@@ -1969,9 +1969,9 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--trace-headcode", action="store_true",
                help="Extra debug: show when VSTP/TRUST/TD mention the filtered headcode/uid")
-    p.add_argument("--db-path", default=None,
+    p.add_argument("--db-path", default="~/.cache/openraildata/railhub.db",
                    help="SQLite database path for state/event storage (enables DB output)")
-    p.add_argument("--web-port", type=int, default=0,
+    p.add_argument("--web-port", type=int, default=8088,
                    help="If set and --db-path is provided, start tiny web dashboard on this port")
     return p.parse_args()
 
