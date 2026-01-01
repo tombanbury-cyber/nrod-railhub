@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
-    utc_now_iso, hhmmss_to_hhmm, local_hhmm, clip
+    utc_now_iso, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc
 )
 from .resolvers import LocationResolver, SmartResolver
 
