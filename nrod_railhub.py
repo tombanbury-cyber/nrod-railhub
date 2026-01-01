@@ -1258,70 +1258,70 @@ class HumanView:
         return "TRUST: " + " ".join(parts)
 
 
-def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
-    """Return planned timetable fields for a headcode from VSTP or ITPS SCHEDULE.
+    def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
+        """Return planned timetable fields for a headcode from VSTP or ITPS SCHEDULE.
 
-    Returns a dict with keys:
-      - source: "VSTP" | "SCHEDULE" | ""
-      - uid: train uid if known
-      - dep, arr: planned hh:mm strings (may be "")
-      - origin, dest: resolved names if possible, else TIPLOC codes (may be "")
-    """
-    headcode = (headcode or "").strip()
-    if not headcode:
+        Returns a dict with keys:
+          - source: "VSTP" | "SCHEDULE" | ""
+          - uid: train uid if known
+          - dep, arr: planned hh:mm strings (may be "")
+          - origin, dest: resolved names if possible, else TIPLOC codes (may be "")
+        """
+        headcode = (headcode or "").strip()
+        if not headcode:
+            return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
+
+        vs = self.vstp_by_headcode.get(headcode)
+        if vs and vs.locations:
+            o_code = vs.locations[0][0]
+            d_code = vs.locations[-1][0]
+            dep = vs.locations[0][2] or vs.locations[0][1]
+            arr = vs.locations[-1][1] or vs.locations[-1][2]
+            origin = (self.resolver.name_for_tiploc(o_code) if self.resolver else None) or o_code
+            dest = (self.resolver.name_for_tiploc(d_code) if self.resolver else None) or d_code
+            return {
+                "source": "VSTP",
+                "uid": vs.uid or "",
+                "dep": dep or "",
+                "arr": arr or "",
+                "origin": origin or "",
+                "dest": dest or "",
+            }
+
+        itps = self.sched_by_headcode.get(headcode)
+        if itps and itps.locations:
+            o = itps.locations[0]
+            d = itps.locations[-1]
+            if isinstance(o, tuple):
+                o_tiploc = o[0] if len(o) > 0 else ""
+                o_arr = o[1] if len(o) > 1 else ""
+                o_dep = o[2] if len(o) > 2 else ""
+            else:
+                o_tiploc = getattr(o, "tiploc", "") or ""
+                o_arr = getattr(o, "arrival", "") or ""
+                o_dep = getattr(o, "departure", "") or ""
+            if isinstance(d, tuple):
+                d_tiploc = d[0] if len(d) > 0 else ""
+                d_arr = d[1] if len(d) > 1 else ""
+                d_dep = d[2] if len(d) > 2 else ""
+            else:
+                d_tiploc = getattr(d, "tiploc", "") or ""
+                d_arr = getattr(d, "arrival", "") or ""
+                d_dep = getattr(d, "departure", "") or ""
+            dep = o_dep or o_arr
+            arr = d_arr or d_dep
+            origin = (self.resolver.name_for_tiploc(o_tiploc) if self.resolver else None) or o_tiploc
+            dest = (self.resolver.name_for_tiploc(d_tiploc) if self.resolver else None) or d_tiploc
+            return {
+                "source": "SCHEDULE",
+                "uid": itps.uid or "",
+                "dep": dep or "",
+                "arr": arr or "",
+                "origin": origin or "",
+                "dest": dest or "",
+            }
+
         return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
-
-    vs = self.vstp_by_headcode.get(headcode)
-    if vs and vs.locations:
-        o_code = vs.locations[0][0]
-        d_code = vs.locations[-1][0]
-        dep = vs.locations[0][2] or vs.locations[0][1]
-        arr = vs.locations[-1][1] or vs.locations[-1][2]
-        origin = (self.resolver.name_for_tiploc(o_code) if self.resolver else None) or o_code
-        dest = (self.resolver.name_for_tiploc(d_code) if self.resolver else None) or d_code
-        return {
-            "source": "VSTP",
-            "uid": vs.uid or "",
-            "dep": dep or "",
-            "arr": arr or "",
-            "origin": origin or "",
-            "dest": dest or "",
-        }
-
-    itps = self.sched_by_headcode.get(headcode)
-    if itps and itps.locations:
-        o = itps.locations[0]
-        d = itps.locations[-1]
-        if isinstance(o, tuple):
-            o_tiploc = o[0] if len(o) > 0 else ""
-            o_arr = o[1] if len(o) > 1 else ""
-            o_dep = o[2] if len(o) > 2 else ""
-        else:
-            o_tiploc = getattr(o, "tiploc", "") or ""
-            o_arr = getattr(o, "arrival", "") or ""
-            o_dep = getattr(o, "departure", "") or ""
-        if isinstance(d, tuple):
-            d_tiploc = d[0] if len(d) > 0 else ""
-            d_arr = d[1] if len(d) > 1 else ""
-            d_dep = d[2] if len(d) > 2 else ""
-        else:
-            d_tiploc = getattr(d, "tiploc", "") or ""
-            d_arr = getattr(d, "arrival", "") or ""
-            d_dep = getattr(d, "departure", "") or ""
-        dep = o_dep or o_arr
-        arr = d_arr or d_dep
-        origin = (self.resolver.name_for_tiploc(o_tiploc) if self.resolver else None) or o_tiploc
-        dest = (self.resolver.name_for_tiploc(d_tiploc) if self.resolver else None) or d_tiploc
-        return {
-            "source": "SCHEDULE",
-            "uid": itps.uid or "",
-            "dep": dep or "",
-            "arr": arr or "",
-            "origin": origin or "",
-            "dest": dest or "",
-        }
-
-    return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
 
     def render_for_uid(self, uid: str) -> str:
         parts: List[str] = [f"[{utc_now_iso()}] uid={uid}"]
