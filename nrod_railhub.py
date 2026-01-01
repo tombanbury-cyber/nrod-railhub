@@ -1156,7 +1156,7 @@ class HumanView:
             parts.append(self._render_trust(ts))
         else:
             if vs and vs.uid and vs.uid in self.trust_by_uid:
-                parts.append(self._render_trust(self.trust_by_uid[vs.uid]))
+                parts.append(self._render_trust(self.trust_by_uid.get(vs.uid)))
 
         line = " | ".join(parts)
 
@@ -1241,6 +1241,41 @@ class HumanView:
         if width and width > 10 and len(line) > width:
             line = line[:width]
         return f"{line}\n      Last: {last_str}"
+        
+        
+    def _render_trust(self, trust):
+        """
+        Render TRUST state safely.
+        This is intentionally defensive: TRUST may be missing or partial.
+        """
+        if not trust:
+            return ""
+
+        parts = []
+
+        try:
+            if trust.get("event_type"):
+                parts.append(trust["event_type"])
+            if trust.get("loc_name"):
+                parts.append(trust["loc_name"])
+            if trust.get("platform"):
+                parts.append(f"plat {trust['platform']}")
+            if trust.get("actual_ts"):
+                parts.append(trust["actual_ts"])
+        except Exception:
+            return ""
+
+        if not parts:
+            return ""
+
+        return "TRUST: " + " ".join(parts)
+
+# --- Compatibility shim ---
+if not hasattr(HumanView, "_render_trust"):
+    def _render_trust(self, trust):
+        return ""
+    HumanView._render_trust = _render_trust
+        
 
 
 def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
