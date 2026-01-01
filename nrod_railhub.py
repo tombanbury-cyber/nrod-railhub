@@ -39,7 +39,6 @@ import io
 import argparse
 import json
 import sys
-import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -47,8 +46,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import stomp
-
-from datetime import datetime
 
 def local_hhmm() -> str:
     # Uses the machine's local timezone (UK if your box is UK configured)
@@ -402,13 +399,8 @@ class LocationResolver:
                 snippet = ""
                 try:
                     snippet = e.read(500).decode("utf-8", errors="replace")
-                except Exception as e:
-                    try:
-                        self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                        if self._db_err_count <= 5:
-                            print(f"[{utc_now_iso()}] DB: persist failed: {type(e).__name__}: {e}")
-                    except Exception:
-                        pass
+                except Exception:
+                    pass  # Ignore if we can't read error body
                 raise RuntimeError(f"CORPUS download HTTP error: {e.code} {e.reason} body={snippet!r}") from e
 
             except URLError as e:
@@ -599,13 +591,8 @@ class SmartResolver:
                 snippet = ""
                 try:
                     snippet = e.read(500).decode("utf-8", errors="replace")
-                except Exception as e:
-                    try:
-                        self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                        if self._db_err_count <= 5:
-                            print(f"[{utc_now_iso()}] DB: persist failed: {type(e).__name__}: {e}")
-                    except Exception:
-                        pass
+                except Exception:
+                    pass  # Ignore if we can't read error body
                 raise RuntimeError(f"SMART download HTTP error: {e.code} {e.reason} body={snippet!r}") from e
             except URLError as e:
                 raise RuntimeError(f"SMART download failed: {e}") from e
@@ -1270,13 +1257,6 @@ class HumanView:
 
         return "TRUST: " + " ".join(parts)
 
-# --- Compatibility shim ---
-if not hasattr(HumanView, "_render_trust"):
-    def _render_trust(self, trust):
-        return ""
-    HumanView._render_trust = _render_trust
-        
-
 
 def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
     """Return planned timetable fields for a headcode from VSTP or ITPS SCHEDULE.
@@ -1487,14 +1467,6 @@ def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
             line2 = clip(f"      Last: {last_seen}", width)
 
         return line1 if not line2 else f"{line1}\n{line2}"
-
-# --- Compatibility shim: ensure HumanView has get_timetable_fields() ---
-# In some builds this helper was defined at module level; bind it onto the class.
-if 'HumanView' in globals() and 'get_timetable_fields' in globals():
-    if not hasattr(HumanView, 'get_timetable_fields'):
-        HumanView.get_timetable_fields = get_timetable_fields
-
-
 
 
 class Listener(stomp.ConnectionListener):
