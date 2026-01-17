@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import pathlib
 import datetime
 from datetime import timezone
@@ -15,6 +16,8 @@ from .models import (
     utc_now_iso, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc
 )
 from .resolvers import LocationResolver, SmartResolver
+
+logger = logging.getLogger(__name__)
 
 class HumanView:
     """In-memory caches so we can join VSTP + TRUST + TD into a readable view."""
@@ -39,7 +42,116 @@ class HumanView:
 
         self.headcode_by_uid: Dict[str, str] = {}
 
+    def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False) -> tuple[Optional[object], str]:
+        """
+        Try to find the best matching VSTP/ITPS schedule object for a TD observation.
 
+        Returns (schedule_object_or_None, reason_string).
+
+        Strategy:
+         - If TRUST for this headcode has train_uid, try vstp/sched lookup by uid.
+         - Else try direct vstp_by_headcode / sched_by_headcode candidates.
+         - Use SMART to resolve TD berth -> stanox -> station name and attempt to match that name
+           to schedule locations (via resolver.name_for_tiploc).
+         - Use simple time proximity (td.last_time_utc vs schedule dep/arr) as a tiebreaker.
+        """
+        td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
+
+        # 1) TRUST -> train_uid -> lookup
+        ts = self.trust_by_headcode.get(headcode) or None
+        if ts and ts.train_uid:
+            uid = ts.train_uid
+            for (k_uid, k_date), vs in list(self.vstp_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched via TRUST train_uid {uid}"
+                    if trace:
+                        print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return vs, reason
+            for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched timetable via TRUST train_uid {uid}"
+                    if trace:
+                        print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return ss, reason
+
+        # 2) Candidate schedules by headcode
+        candidates = []
+        vs = self.vstp_by_headcode.get(headcode)
+        if vs:
+            candidates.append(("VSTP", vs))
+        ss = self.sched_by_headcode.get(headcode)
+        if ss:
+            candidates.append(("SCHEDULE", ss))
+        if not candidates:
+            reason = "no candidate schedules for headcode"
+            if trace:
+                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+            return None, reason
+
+        # 3) SMART -> stanox -> station name matching
+        if td and self.smart:
+            berth = td.to_berth or td.from_berth or ""
+            hit = self.smart.lookup(td.area_id or "", berth) if (td.area_id and berth) else None
+            if hit and hit.get("stanox"):
+                stanox = str(hit["stanox"])
+                stanox_name = self.resolver.name_for_stanox(stanox) if self.resolver else None
+                if stanox_name:
+                    for typ, cand in candidates:
+                        locs = getattr(cand, "locations", []) or []
+                        for loc in locs:
+                            tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, "tiploc", "") or ""
+                            if not tiploc:
+                                continue
+                            cand_name = self.resolver.name_for_tiploc(tiploc) if self.resolver else None
+                            if cand_name and cand_name.strip().lower() == stanox_name.strip().lower():
+                                reason = f"matched by SMART stanox {stanox} -> station name"
+                                if trace:
+                                    print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                                return cand, reason
+
+        # 4) Time proximity fallback
+        try:
+            td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
+        except Exception:
+            td_time = None
+
+        best = None
+        best_delta = None
+        for typ, cand in candidates:
+            planned_dt = None
+            locs = getattr(cand, "locations", []) or []
+            if locs:
+                first = locs[0]
+                dep = None
+                if isinstance(first, tuple):
+                    dep = first[2] if len(first) > 2 else None
+                else:
+                    dep = getattr(first, "departure", None) or getattr(first, "dep", None)
+                if dep and getattr(cand, "start_date", None):
+                    try:
+                        sd = getattr(cand, "start_date")
+                        planned_dt = datetime.datetime.fromisoformat(sd) if "T" in sd else datetime.datetime.strptime(sd, "%Y-%m-%d")
+                        hhmm = dep.strip()
+                        if hhmm and ":" in hhmm:
+                            h, m = map(int, hhmm.split(":")[:2])
+                            planned_dt = planned_dt.replace(hour=h, minute=m, tzinfo=datetime.timezone.utc)
+                    except Exception:
+                        planned_dt = None
+            if td_time and planned_dt:
+                delta = abs((td_time - planned_dt).total_seconds())
+                if best is None or delta < best_delta:
+                    best = cand
+                    best_delta = delta
+        if best:
+            reason = f"matched by time proximity (delta seconds {best_delta:.0f})"
+            if trace:
+                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+            return best, reason
+
+        reason = "ambiguous — returned first candidate for headcode"
+        if trace:
+            print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+        return candidates[0][1], reason
 
     def load_schedule_gz(
         self,
@@ -369,10 +481,24 @@ class HumanView:
             "raw": raw,
         }
 
-    def render_for_headcode(self, headcode: str, td_area: str | None = None, *, width: int = 120) -> str:
+    def render_for_headcode(self, headcode: str, td_area: str | None = None, *, width: int = 120, trace: bool = False) -> str:
         parts: List[str] = [f"[{utc_now_iso()}] {headcode}"]
 
-        vs = self.vstp_by_headcode.get(headcode)
+        # Use match_td_to_schedule when td_area is provided
+        vs = None
+        if td_area:
+            td = self.td_by_headcode.get((td_area, headcode))
+            if td:
+                sched, reason = self.match_td_to_schedule(td_area, headcode, trace=trace)
+                logger.debug(f"render_for_headcode: headcode={headcode} td_area={td_area} reason={reason}")
+                # Note: render_for_headcode is VSTP-focused; use render_for_td for full VSTP/ITPS support
+                if sched and isinstance(sched, VstpSchedule):
+                    vs = sched
+        
+        # Fallback to direct lookup if no td_area or no match
+        if not vs:
+            vs = self.vstp_by_headcode.get(headcode)
+
         if vs:
             # decorate origin/dest with names if we have them
             if vs.locations and self.resolver:
@@ -414,29 +540,31 @@ class HumanView:
         return line
 
 
-    def render_for_td(self, td_area: str, headcode: str, *, width: int = 120) -> str:
+    def render_for_td(self, td_area: str, headcode: str, *, width: int = 120, trace: bool = False) -> str:
         """Render a single-line, human-friendly view for a TD train (area+headcode)."""
-        # Timetable enrichment (prefer VSTP, else ITPS SCHEDULE)
+        # Timetable enrichment using match_td_to_schedule
         dep = arr = None
         origin = dest = None
 
-        vs = self.vstp_by_headcode.get(headcode)
-        if vs and vs.locations:
-            o_code = vs.locations[0][0]
-            d_code = vs.locations[-1][0]
-            dep = vs.locations[0][2] or vs.locations[0][1]
-            arr = vs.locations[-1][1] or vs.locations[-1][2]
-            if self.resolver:
-                origin = self.resolver.name_for_tiploc(o_code) or o_code
-                dest = self.resolver.name_for_tiploc(d_code) or d_code
-            else:
-                origin, dest = o_code, d_code
-        else:
-            itps = self.sched_by_headcode.get(headcode)
-            if itps and itps.locations:
-                o = itps.locations[0]
-                d = itps.locations[-1]
-                # itps.locations may be tuples like (tiploc, arr, dep) or objects with attributes
+        # Use the new matching helper to select the best schedule
+        td = self.td_by_headcode.get((td_area, headcode))
+        sched = None
+        reason = ""
+        if td:
+            sched, reason = self.match_td_to_schedule(td_area, headcode, trace=trace)
+            logger.debug(f"render_for_td: headcode={headcode} td_area={td_area} reason={reason}")
+
+        # If no match via TD, fallback to direct lookup (legacy behavior)
+        if not sched:
+            sched = self.vstp_by_headcode.get(headcode) or self.sched_by_headcode.get(headcode)
+
+        # Extract schedule details
+        if sched and getattr(sched, "locations", None):
+            locs = sched.locations
+            if locs:
+                o = locs[0]
+                d = locs[-1]
+                # Handle both tuple and object location formats
                 if isinstance(o, tuple):
                     o_tiploc = o[0] if len(o) > 0 else ''
                     o_arr = o[1] if len(o) > 1 else ''
@@ -457,6 +585,7 @@ class HumanView:
                 arr = d_arr or d_dep
                 origin = (self.resolver.name_for_tiploc(o_tiploc) if self.resolver else None) or o_tiploc
                 dest = (self.resolver.name_for_tiploc(d_tiploc) if self.resolver else None) or d_tiploc
+
         dep_s = dep or "??:??"
         arr_s = arr or "??:??"
         origin_s = origin or "?"
