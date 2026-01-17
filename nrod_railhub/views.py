@@ -110,7 +110,6 @@ class HumanView:
                                 return cand, reason
 
         # 4) Time proximity fallback
-        import datetime
         try:
             td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
         except Exception:
@@ -144,7 +143,7 @@ class HumanView:
                     best = cand
                     best_delta = delta
         if best:
-            reason = f"matched by time proximity (delta seconds {best_delta})"
+            reason = f"matched by time proximity (delta seconds {best_delta:.0f})"
             if trace:
                 print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
             return best, reason
@@ -492,6 +491,7 @@ class HumanView:
             if td:
                 sched, reason = self.match_td_to_schedule(td_area, headcode, trace=trace)
                 logger.debug(f"render_for_headcode: headcode={headcode} td_area={td_area} reason={reason}")
+                # Note: render_for_headcode is VSTP-focused; use render_for_td for full VSTP/ITPS support
                 if sched and isinstance(sched, VstpSchedule):
                     vs = sched
         
