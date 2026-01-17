@@ -51,11 +51,17 @@ class Listener(stomp.ConnectionListener):
         if not headcode:
             return False
 
+        # Check if trace_headcode is enabled for this headcode
+        trace = getattr(self.args, 'trace_headcode', False) and (
+            (self.args.headcode and str(headcode) == self.args.headcode) or
+            (self.args.uid and self.hv.headcode_by_uid.get(self.args.uid) == str(headcode))
+        )
+
         # Choose renderer based on whether we have a TD area context.
         if td_area:
-            text = self.hv.render_for_td(td_area, str(headcode), width=self.args.width)
+            text = self.hv.render_for_td(td_area, str(headcode), width=self.args.width, trace=trace)
         else:
-            text = self.hv.render_for_headcode(str(headcode), width=self.args.width)
+            text = self.hv.render_for_headcode(str(headcode), width=self.args.width, trace=trace)
 
         if not text:
             return False
