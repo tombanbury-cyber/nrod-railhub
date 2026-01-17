@@ -46,6 +46,28 @@ class HumanView:
 
         self.headcode_by_uid: Dict[str, str] = {}
 
+    @staticmethod
+    def _normalize_tiploc(tiploc: str) -> str:
+        """Normalize TIPLOC for consistent indexing (upper-case, stripped)."""
+        return (tiploc or "").strip().upper()
+
+    def _build_station_to_tiplocs_index(self) -> Dict[str, List[str]]:
+        """Build a reverse index: station name (lowercase) → list of TIPLOCs.
+        
+        This is used to efficiently find TIPLOCs for a given station name during
+        TIPLOC-index matching without iterating through all TIPLOCs.
+        """
+        if not self.resolver:
+            return {}
+        
+        station_to_tiplocs: Dict[str, List[str]] = {}
+        for tiploc, name in self.resolver.tiploc_to_name.items():
+            key = name.strip().lower()
+            if key not in station_to_tiplocs:
+                station_to_tiplocs[key] = []
+            station_to_tiplocs[key].append(tiploc)
+        return station_to_tiplocs
+
     def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False) -> tuple[Optional[object], str, Optional[Dict[str, Any]]]:
         """
         Try to find the best matching VSTP/ITPS schedule object for a TD observation.
@@ -92,11 +114,9 @@ class HumanView:
                 stanox = str(hit["stanox"])
                 stanox_name = self.resolver.name_for_stanox(stanox)
                 if stanox_name:
-                    # Find TIPLOCs that map to this station name
-                    candidate_tiplocs = []
-                    for tiploc, name in self.resolver.tiploc_to_name.items():
-                        if name.strip().lower() == stanox_name.strip().lower():
-                            candidate_tiplocs.append(tiploc)
+                    # Build reverse index for efficient lookup
+                    station_to_tiplocs = self._build_station_to_tiplocs_index()
+                    candidate_tiplocs = station_to_tiplocs.get(stanox_name.strip().lower(), [])
                     
                     # Query schedules_by_tiploc for each candidate TIPLOC
                     tiploc_candidates = []
@@ -397,7 +417,7 @@ class HumanView:
 
                 # Build TIPLOC index: for each location in the schedule, add an entry
                 for stop_idx, loc_tuple in enumerate(itps.locations):
-                    tiploc = loc_tuple[0].strip().upper()  # Normalize TIPLOC
+                    tiploc = self._normalize_tiploc(loc_tuple[0])
                     if not tiploc:
                         continue
                     # Use departure or arrival time as planned_hhmm
@@ -475,7 +495,7 @@ class HumanView:
 
         # Build TIPLOC index for VSTP schedules
         for stop_idx, loc_tuple in enumerate(vs.locations):
-            tiploc = loc_tuple[0].strip().upper()  # Normalize TIPLOC
+            tiploc = self._normalize_tiploc(loc_tuple[0])
             if not tiploc:
                 continue
             # Use departure or arrival time as planned_hhmm

@@ -460,11 +460,11 @@ def test_tiploc_index_populated_by_load_schedule():
                 "schedule_location": [
                     {
                         "tiploc_code": "CLPHMJC",
-                        "public_departure": "123100"  # Use public_departure in HHMM format
+                        "public_departure": "1231"  # HHMM format (4 digits)
                     },
                     {
                         "tiploc_code": "VICTRIC",
-                        "public_arrival": "124500"  # Use public_arrival in HHMM format
+                        "public_arrival": "1245"  # HHMM format (4 digits)
                     }
                 ]
             }
