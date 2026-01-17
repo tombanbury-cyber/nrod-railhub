@@ -53,13 +53,13 @@ def demo_uid_matching():
 
     # Test Margate area
     hv.trust_by_headcode["1J37"] = ts_margate
-    sched, reason = hv.match_td_to_schedule("MA", "1J37", trace=True)
+    sched, reason, matched_info = hv.match_td_to_schedule("MA", "1J37", trace=True)
     print(f"Margate Match: UID={sched.uid if sched else None}, Reason: {reason}")
     assert sched.uid == "M12345", "Should match Margate schedule via UID"
 
     # Test Brockenhurst area
     hv.trust_by_headcode["1J37"] = ts_brockenhurst
-    sched, reason = hv.match_td_to_schedule("BR", "1J37", trace=True)
+    sched, reason, matched_info = hv.match_td_to_schedule("BR", "1J37", trace=True)
     print(f"Brockenhurst Match: UID={sched.uid if sched else None}, Reason: {reason}")
     assert sched.uid == "B67890", "Should match Brockenhurst schedule via UID"
     
@@ -68,7 +68,7 @@ def demo_uid_matching():
 
 def demo_stanox_matching():
     """Demonstrate SMART stanox-based matching."""
-    print("\n=== Demo 2: STANOX-based Matching ===")
+    print("\n=== Demo 2: STANOX-based Matching (Legacy) ===")
     print("Scenario: Two schedules for headcode 2C90, one via Clapham Junction, one via Margate")
     print("  - TD berth resolves to Clapham Junction (stanox 87701)")
     print()
@@ -110,9 +110,16 @@ def demo_stanox_matching():
         return mapping.get(tiploc)
     
     resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Mock tiploc_to_name for TIPLOC index lookup
+    resolver.tiploc_to_name = {
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "Victoria",
+        "MARGAT": "Margate"
+    }
 
     # Test matching
-    sched, reason = hv.match_td_to_schedule("EK", "2C90", trace=True)
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", trace=True)
     print(f"Match: UID={sched.uid if sched else None}, Reason: {reason}")
     assert sched.uid == "C11111", "Should match Clapham schedule via STANOX"
     
@@ -152,11 +159,114 @@ def demo_time_proximity():
 
     smart.lookup.return_value = None  # No SMART match
 
-    sched, reason = hv.match_td_to_schedule("EK", "2C90", trace=True)
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", trace=True)
     print(f"Match: UID={sched.uid if sched else None}, Reason: {reason}")
     assert sched.uid == "C11111", "Should match first schedule via time proximity"
     
     print("✓ Time proximity matching correctly picks schedule closest in time")
+
+
+def demo_tiploc_index_matching():
+    """Demonstrate new TIPLOC index-based matching."""
+    print("\n=== Demo 4: TIPLOC Index Matching (NEW FEATURE) ===")
+    print("Scenario: Reused headcode 1P42")
+    print("  - Schedule 1 (P12345): King's Cross → Peterborough (via Stevenage)")
+    print("  - Schedule 2 (R67890): Ramsgate → Victoria (via Clapham Junction)")
+    print("  - TD observation at Clapham Junction should match Schedule 2")
+    print()
+    
+    from nrod_railhub.models import ItpsSchedule
+    
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+
+    # Setup two schedules with same headcode but different routes
+    sched_kx_pboro = ItpsSchedule(
+        uid="P12345",
+        signalling_id="1P42",
+        start_date="2026-01-17",
+        end_date="2026-01-17",
+        days_run="1111111",
+        stp_indicator="P",
+        locations=[
+            ("KNGX", "08:00", "08:05"),
+            ("SVNSTGE", "08:25", "08:26"),
+            ("PBORO", "08:50", "")
+        ]
+    )
+    
+    sched_ram_vic = ItpsSchedule(
+        uid="R67890",
+        signalling_id="1P42",
+        start_date="2026-01-17",
+        end_date="2026-01-17",
+        days_run="1111111",
+        stp_indicator="P",
+        locations=[
+            ("RAMSGTE", "09:00", "09:05"),
+            ("CLPHMJC", "10:25", "10:26"),
+            ("VICTRIC", "10:40", "")
+        ]
+    )
+    
+    # Register schedules
+    hv.sched_by_headcode["1P42"] = sched_kx_pboro  # First one wins in headcode index
+    hv.sched_by_uid_date[("P12345", "2026-01-17")] = sched_kx_pboro
+    hv.sched_by_uid_date[("R67890", "2026-01-17")] = sched_ram_vic
+    
+    # Populate TIPLOC index (simulating load_schedule_gz)
+    print("  Populating TIPLOC index...")
+    for sched in [sched_kx_pboro, sched_ram_vic]:
+        for stop_idx, loc_tuple in enumerate(sched.locations):
+            tiploc = loc_tuple[0].strip().upper()
+            planned_hhmm = loc_tuple[2] or loc_tuple[1]
+            if tiploc not in hv.schedules_by_tiploc:
+                hv.schedules_by_tiploc[tiploc] = []
+            hv.schedules_by_tiploc[tiploc].append((sched, stop_idx, planned_hhmm))
+    
+    print(f"  TIPLOC index now contains {len(hv.schedules_by_tiploc)} locations")
+    
+    # Setup TD state at Clapham Junction
+    td = TdState(
+        descr="1P42",
+        area_id="VL",
+        to_berth="0152",
+        last_time_utc="2026-01-17T10:25:00+00:00"
+    )
+    hv.td_by_headcode[("VL", "1P42")] = td
+    
+    # Mock SMART to resolve berth to Clapham Junction
+    smart.lookup.return_value = {"stanox": "87701", "platform": "3"}
+    resolver.name_for_stanox.return_value = "Clapham Junction"
+    
+    # Mock tiploc_to_name for index lookup
+    resolver.tiploc_to_name = {
+        "KNGX": "London Kings Cross",
+        "SVNSTGE": "Stevenage",
+        "PBORO": "Peterborough",
+        "RAMSGTE": "Ramsgate",
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "London Victoria"
+    }
+    
+    # Test matching
+    sched, reason, matched_info = hv.match_td_to_schedule("VL", "1P42", trace=True)
+    
+    print(f"  Match Result:")
+    print(f"    Schedule UID: {sched.uid if sched else None}")
+    print(f"    Reason: {reason}")
+    if matched_info:
+        print(f"    Matched TIPLOC: {matched_info.get('matched_tiploc')}")
+        print(f"    Stop Index: {matched_info.get('stop_index')}")
+        print(f"    Planned Time: {matched_info.get('planned_dt')}")
+    
+    assert sched.uid == "R67890", f"Should match Ramsgate→Victoria (got {sched.uid})"
+    assert "TIPLOC index" in reason, f"Should use TIPLOC index (got: {reason})"
+    assert matched_info is not None, "Should return matched_info"
+    assert matched_info["matched_tiploc"] == "CLPHMJC"
+    
+    print("✓ TIPLOC index correctly matches schedule calling at TD-resolved station")
 
 
 def main():
@@ -169,6 +279,7 @@ def main():
         demo_uid_matching()
         demo_stanox_matching()
         demo_time_proximity()
+        demo_tiploc_index_matching()
         
         print("\n" + "=" * 70)
         print("✓ All verification tests passed!")
