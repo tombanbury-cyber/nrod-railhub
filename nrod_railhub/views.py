@@ -34,6 +34,10 @@ class HumanView:
         self.sched_by_uid_date: Dict[Tuple[str, str], ItpsSchedule] = {}
         self.sched_by_headcode: Dict[str, ItpsSchedule] = {}
 
+        # TIPLOC → schedule index for accurate TD matching
+        # Maps normalized TIPLOC to list of (schedule_object, stop_index, planned_hhmm)
+        self.schedules_by_tiploc: Dict[str, List[Tuple[Any, int, str]]] = {}
+
         self.trust_by_train_id: Dict[str, TrustState] = {}
         self.trust_by_uid: Dict[str, TrustState] = {}
         self.trust_by_headcode: Dict[str, TrustState] = {}
@@ -42,22 +46,27 @@ class HumanView:
 
         self.headcode_by_uid: Dict[str, str] = {}
 
-    def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False) -> tuple[Optional[object], str]:
+    def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False) -> tuple[Optional[object], str, Optional[Dict[str, Any]]]:
         """
         Try to find the best matching VSTP/ITPS schedule object for a TD observation.
 
-        Returns (schedule_object_or_None, reason_string).
+        Returns (schedule_object_or_None, reason_string, matched_info_or_None).
+        
+        matched_info is a dict with keys:
+          - matched_tiploc: str - the TIPLOC that was matched
+          - stop_index: int - index of matched stop in schedule.locations
+          - planned_dt: str - ISO datetime of planned stop time
 
         Strategy:
          - If TRUST for this headcode has train_uid, try vstp/sched lookup by uid.
-         - Else try direct vstp_by_headcode / sched_by_headcode candidates.
-         - Use SMART to resolve TD berth -> stanox -> station name and attempt to match that name
-           to schedule locations (via resolver.name_for_tiploc).
-         - Use simple time proximity (td.last_time_utc vs schedule dep/arr) as a tiebreaker.
+         - Use TIPLOC index: resolve TD berth → stanox → station name → TIPLOC(s),
+           then query schedules_by_tiploc for candidates that call at that station.
+         - Rank matches by: UID match, validity, and time delta from TD observation.
+         - Fallback to headcode candidates with time proximity if no TIPLOC match.
         """
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
 
-        # 1) TRUST -> train_uid -> lookup
+        # 1) TRUST -> train_uid -> lookup (highest priority)
         ts = self.trust_by_headcode.get(headcode) or None
         if ts and ts.train_uid:
             uid = ts.train_uid
@@ -66,15 +75,111 @@ class HumanView:
                     reason = f"matched via TRUST train_uid {uid}"
                     if trace:
                         print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    return vs, reason
+                    # No matched_info since we didn't use TIPLOC matching
+                    return vs, reason, None
             for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
                 if k_uid == uid:
                     reason = f"matched timetable via TRUST train_uid {uid}"
                     if trace:
                         print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    return ss, reason
+                    return ss, reason, None
 
-        # 2) Candidate schedules by headcode
+        # 2) TIPLOC-index based matching (new approach)
+        if td and self.smart and self.resolver:
+            berth = td.to_berth or td.from_berth or ""
+            hit = self.smart.lookup(td.area_id or "", berth) if (td.area_id and berth) else None
+            if hit and hit.get("stanox"):
+                stanox = str(hit["stanox"])
+                stanox_name = self.resolver.name_for_stanox(stanox)
+                if stanox_name:
+                    # Find TIPLOCs that map to this station name
+                    candidate_tiplocs = []
+                    for tiploc, name in self.resolver.tiploc_to_name.items():
+                        if name.strip().lower() == stanox_name.strip().lower():
+                            candidate_tiplocs.append(tiploc)
+                    
+                    # Query schedules_by_tiploc for each candidate TIPLOC
+                    tiploc_candidates = []
+                    for tiploc in candidate_tiplocs:
+                        if tiploc in self.schedules_by_tiploc:
+                            for sched_obj, stop_idx, planned_hhmm in self.schedules_by_tiploc[tiploc]:
+                                # Filter by headcode - only consider schedules with matching headcode
+                                sched_headcode = getattr(sched_obj, "signalling_id", "") or ""
+                                if sched_headcode == headcode:
+                                    tiploc_candidates.append((sched_obj, stop_idx, planned_hhmm, tiploc))
+                    
+                    if tiploc_candidates:
+                        # Rank candidates by time proximity to TD observation
+                        try:
+                            td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
+                        except Exception:
+                            td_time = None
+                        
+                        best = None
+                        best_delta = None
+                        best_info = None
+                        
+                        for sched_obj, stop_idx, planned_hhmm, tiploc in tiploc_candidates:
+                            # Compute planned datetime for this stop
+                            planned_dt = None
+                            if planned_hhmm and getattr(sched_obj, "start_date", None):
+                                try:
+                                    sd = getattr(sched_obj, "start_date")
+                                    planned_dt = datetime.datetime.fromisoformat(sd) if "T" in sd else datetime.datetime.strptime(sd, "%Y-%m-%d")
+                                    hhmm = planned_hhmm.strip()
+                                    if hhmm and ":" in hhmm:
+                                        h, m = map(int, hhmm.split(":")[:2])
+                                        planned_dt = planned_dt.replace(hour=h, minute=m, tzinfo=datetime.timezone.utc)
+                                except Exception:
+                                    planned_dt = None
+                            
+                            # Prefer UID match if TRUST has UID
+                            uid_match = False
+                            if ts and ts.train_uid and getattr(sched_obj, "uid", "") == ts.train_uid:
+                                uid_match = True
+                            
+                            # Compute time delta
+                            delta = None
+                            if td_time and planned_dt:
+                                delta = abs((td_time - planned_dt).total_seconds())
+                            
+                            # Rank: UID match first, then smallest time delta
+                            if best is None:
+                                best = sched_obj
+                                best_delta = delta
+                                best_info = {
+                                    "matched_tiploc": tiploc,
+                                    "stop_index": stop_idx,
+                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                }
+                            elif uid_match and not (best_info and best_info.get("uid_match")):
+                                best = sched_obj
+                                best_delta = delta
+                                best_info = {
+                                    "matched_tiploc": tiploc,
+                                    "stop_index": stop_idx,
+                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                    "uid_match": True,
+                                }
+                            elif delta is not None and (best_delta is None or delta < best_delta):
+                                best = sched_obj
+                                best_delta = delta
+                                best_info = {
+                                    "matched_tiploc": tiploc,
+                                    "stop_index": stop_idx,
+                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                }
+                        
+                        if best:
+                            reason = f"matched via TIPLOC index: tiploc={best_info['matched_tiploc']} stanox={stanox} stop_idx={best_info['stop_index']}"
+                            if best_delta is not None:
+                                reason += f" delta={best_delta:.0f}s"
+                            if trace:
+                                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                            logger.debug(f"TIPLOC match: {reason}")
+                            return best, reason, best_info
+
+        # 3) Fallback: Candidate schedules by headcode
         candidates = []
         vs = self.vstp_by_headcode.get(headcode)
         if vs:
@@ -86,9 +191,9 @@ class HumanView:
             reason = "no candidate schedules for headcode"
             if trace:
                 print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-            return None, reason
+            return None, reason, None
 
-        # 3) SMART -> stanox -> station name matching
+        # 4) Legacy SMART stanox matching (scan candidate locations)
         if td and self.smart:
             berth = td.to_berth or td.from_berth or ""
             hit = self.smart.lookup(td.area_id or "", berth) if (td.area_id and berth) else None
@@ -107,9 +212,9 @@ class HumanView:
                                 reason = f"matched by SMART stanox {stanox} -> station name"
                                 if trace:
                                     print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                                return cand, reason
+                                return cand, reason, None
 
-        # 4) Time proximity fallback
+        # 5) Time proximity fallback
         try:
             td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
         except Exception:
@@ -146,12 +251,12 @@ class HumanView:
             reason = f"matched by time proximity (delta seconds {best_delta:.0f})"
             if trace:
                 print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-            return best, reason
+            return best, reason, None
 
         reason = "ambiguous — returned first candidate for headcode"
         if trace:
             print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-        return candidates[0][1], reason
+        return candidates[0][1], reason, None
 
     def load_schedule_gz(
         self,
@@ -166,6 +271,8 @@ class HumanView:
 
         We only keep the schedules that are *valid on* service_date (default: today, UTC),
         and optionally only those matching headcode_filter / uid_filter.
+        
+        Also builds a TIPLOC→schedule index (schedules_by_tiploc) for accurate TD matching.
         """
         import gzip
         import json
@@ -181,6 +288,9 @@ class HumanView:
 
         svc_dt = datetime.date.fromisoformat(service_date)
         dow = svc_dt.weekday()  # Mon=0
+        
+        # Clear existing TIPLOC index to avoid stale entries
+        self.schedules_by_tiploc.clear()
 
         def valid_on(rec: Dict[str, Any]) -> bool:
             sd = (rec.get("schedule_start_date") or "").strip()
@@ -285,6 +395,18 @@ class HumanView:
                     if not cur2 or (itps.stp_indicator and cur2.stp_indicator and itps.stp_indicator < cur2.stp_indicator):
                         self.sched_by_uid_date[key] = itps
 
+                # Build TIPLOC index: for each location in the schedule, add an entry
+                for stop_idx, loc_tuple in enumerate(itps.locations):
+                    tiploc = loc_tuple[0].strip().upper()  # Normalize TIPLOC
+                    if not tiploc:
+                        continue
+                    # Use departure or arrival time as planned_hhmm
+                    planned_hhmm = loc_tuple[2] or loc_tuple[1]  # dep or arr
+                    if tiploc not in self.schedules_by_tiploc:
+                        self.schedules_by_tiploc[tiploc] = []
+                    # Add entry: (schedule_object, stop_index, planned_hhmm)
+                    self.schedules_by_tiploc[tiploc].append((itps, stop_idx, planned_hhmm))
+
                 kept += 1
 
         if not quiet:
@@ -350,6 +472,18 @@ class HumanView:
             self.vstp_by_uid_date[(uid, start_date)] = vs
         if signalling_id:
             self.vstp_by_headcode[signalling_id] = vs
+
+        # Build TIPLOC index for VSTP schedules
+        for stop_idx, loc_tuple in enumerate(vs.locations):
+            tiploc = loc_tuple[0].strip().upper()  # Normalize TIPLOC
+            if not tiploc:
+                continue
+            # Use departure or arrival time as planned_hhmm
+            planned_hhmm = loc_tuple[2] or loc_tuple[1]  # dep or arr
+            if tiploc not in self.schedules_by_tiploc:
+                self.schedules_by_tiploc[tiploc] = []
+            # Add entry: (schedule_object, stop_index, planned_hhmm)
+            self.schedules_by_tiploc[tiploc].append((vs, stop_idx, planned_hhmm))
 
         return vs
 
@@ -489,7 +623,7 @@ class HumanView:
         if td_area:
             td = self.td_by_headcode.get((td_area, headcode))
             if td:
-                sched, reason = self.match_td_to_schedule(td_area, headcode, trace=trace)
+                sched, reason, matched_info = self.match_td_to_schedule(td_area, headcode, trace=trace)
                 logger.debug(f"render_for_headcode: headcode={headcode} td_area={td_area} reason={reason}")
                 # Note: render_for_headcode is VSTP-focused; use render_for_td for full VSTP/ITPS support
                 if sched and isinstance(sched, VstpSchedule):
@@ -550,8 +684,9 @@ class HumanView:
         td = self.td_by_headcode.get((td_area, headcode))
         sched = None
         reason = ""
+        matched_info = None
         if td:
-            sched, reason = self.match_td_to_schedule(td_area, headcode, trace=trace)
+            sched, reason, matched_info = self.match_td_to_schedule(td_area, headcode, trace=trace)
             logger.debug(f"render_for_td: headcode={headcode} td_area={td_area} reason={reason}")
 
         # If no match via TD, fallback to direct lookup (legacy behavior)
