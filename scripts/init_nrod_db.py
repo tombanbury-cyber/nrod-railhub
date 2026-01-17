@@ -13,6 +13,9 @@ import sys
 import os
 import datetime as _dt
 
+# Schema version for metadata tracking
+SCHEMA_VERSION = "1"
+
 
 def apply_sql(schema_path: str, out_path: str) -> None:
     if os.path.exists(out_path):
@@ -37,7 +40,7 @@ def apply_sql(schema_path: str, out_path: str) -> None:
             );
         """)
         conn.execute("INSERT OR REPLACE INTO meta_schema(name, version, applied_at) VALUES (?,?,?)",
-                     ("nrod", "1", _dt.datetime.now(_dt.timezone.utc).isoformat()))
+                     ("nrod", SCHEMA_VERSION, _dt.datetime.now(_dt.timezone.utc).isoformat()))
         conn.commit()
         print("Schema applied.")
     finally:

@@ -17,6 +17,7 @@ init-db:
 import-ref:
 	# Example: uses secrets or env vars: NROD_USERNAME / NROD_PASSWORD
 	# When using --no-download with local files, dummy credentials are sufficient
+	# Note: Creates nrod_ref.sqlite (separate from nrod.sqlite used for live data)
 	$(PY) import_scripts/nrod_ref_import.py --no-download --db nrod_ref.sqlite --outdir json --username unused --password unused
 
 convert-shp:
