@@ -76,6 +76,150 @@ def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
     """Exponential weighting function used for scoring."""
     return math.exp(-abs(dt_ms) / float(tau_ms))
 
+# Mapper constants
+_STEP_TYPES = {"CA", "CB", "CC"}
+_SIG_TYPES  = {"SF"}  # extend if needed
+
+
+def ensure_mapper_schema(conn: sqlite3.Connection) -> None:
+    """
+    Create/update berth_signal_observations and berth_signal_scores tables.
+    Uses step_timestamp and signal_timestamp (INTEGER unix ms).
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS berth_signal_observations (
+          id INTEGER PRIMARY KEY,
+          td_area TEXT NOT NULL,
+          step_event_id INTEGER,
+          step_timestamp INTEGER NOT NULL,
+          from_berth TEXT,
+          to_berth TEXT,
+          descr TEXT,
+          signal_event_id INTEGER,
+          signal_timestamp INTEGER NOT NULL,
+          address TEXT NOT NULL,
+          data TEXT,
+          dt_ms INTEGER NOT NULL,
+          weight REAL NOT NULL,
+          created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bso_edge
+        ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_bso_addr
+        ON berth_signal_observations(td_area, address, signal_timestamp);
+
+        CREATE TABLE IF NOT EXISTS berth_signal_scores (
+          td_area TEXT NOT NULL,
+          from_berth TEXT NOT NULL,
+          to_berth TEXT NOT NULL,
+          address TEXT NOT NULL,
+          score REAL NOT NULL,
+          obs_count INTEGER NOT NULL,
+          last_seen_ts INTEGER,
+          last_seen_utc TEXT NOT NULL,
+          last_data TEXT,
+          PRIMARY KEY (td_area, from_berth, to_berth, address)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bss_edge
+        ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
+        """
+    )
+    conn.commit()
+
+
+def process_batch_for_mapper(
+    evs: List[Dict[str, Any]],
+    pre_ms: int,
+    post_ms: int,
+    tau_ms: int,
+) -> Tuple[List[Tuple], List[Tuple]]:
+    """
+    Process a batch of events and return observation and score rows for the mapper.
+    
+    Args:
+        evs: List of event dicts with keys: msg_ts, received_at_utc, msg_type, td_area, descr, from_berth, to_berth, address, data
+        pre_ms: Time window before step (ms)
+        post_ms: Time window after step (ms)
+        tau_ms: Exponential weight time constant (ms)
+    
+    Returns:
+        (obs_rows, score_rows) - tuples ready for INSERT
+    """
+    from bisect import bisect_left, bisect_right
+    
+    # Group by TD area
+    by_area = defaultdict(list)
+    for e in evs:
+        td_area = e.get("td_area")
+        if not td_area:
+            continue
+        by_area[td_area].append(e)
+    
+    obs_rows = []
+    score_rows = []
+    
+    for td_area, area_evs in by_area.items():
+        # Filter and sort signals
+        signals = [
+            e for e in area_evs
+            if e["msg_type"] in _SIG_TYPES and e.get("address") and e["msg_ts"] > 0
+        ]
+        signals.sort(key=lambda e: e["msg_ts"])
+        sig_times = [e["msg_ts"] for e in signals]
+        
+        # Filter and sort steps
+        steps = [
+            e for e in area_evs
+            if e["msg_type"] in _STEP_TYPES and e.get("from_berth") and e.get("to_berth") and e["msg_ts"] > 0
+        ]
+        steps.sort(key=lambda e: e["msg_ts"])
+        
+        if not signals or not steps:
+            continue
+        
+        # For each step, find nearby signals and create observations
+        for st in steps:
+            lo = bisect_left(sig_times, st["msg_ts"] - pre_ms)
+            hi = bisect_right(sig_times, st["msg_ts"] + post_ms)
+            
+            for s in signals[lo:hi]:
+                dt = s["msg_ts"] - st["msg_ts"]
+                w = exp_weight(dt, tau_ms)
+                
+                obs_rows.append((
+                    td_area,
+                    None,                    # step_event_id
+                    st["msg_ts"],            # step_timestamp (unix ms)
+                    st["from_berth"],
+                    st["to_berth"],
+                    st.get("descr"),
+                    None,                    # signal_event_id
+                    s["msg_ts"],             # signal_timestamp (unix ms)
+                    str(s["address"]),
+                    s.get("data"),
+                    abs(int(dt)),
+                    float(w),
+                ))
+                
+                score_rows.append((
+                    td_area,
+                    st["from_berth"],
+                    st["to_berth"],
+                    str(s["address"]),
+                    float(w),
+                    s["msg_ts"],             # last_seen_ts (unix ms)
+                    s["received_at_utc"],    # last_seen_utc (ISO string)
+                    s.get("data"),
+                ))
+    
+    return obs_rows, score_rows
+
+
 @dataclass
 class Candidate:
     """
@@ -342,7 +486,6 @@ class BerthSignalMapper:
               AND msg_timestamp BETWEEN ? AND ?
             ORDER BY msg_timestamp ASC
             """
-            # the strftime/substr millisecond extraction assumes ISO like 2026-01-27T13:07:00.123Z
             params: List[object] = [td_area, *self.signal_msg_types, t0, t1]
             rows = con.execute(q, params).fetchall()
 
@@ -410,7 +553,7 @@ class BerthSignalMapper:
         try:
             rows = con.execute(
                 """
-                SELECT address, score, obs_count, last_seen_ts, last_seen_utc, last_data
+                SELECT address, score, obs_count, last_seen_utc, last_data
                 FROM berth_signal_scores
                 WHERE td_area=? AND from_berth=? AND to_berth=?
                 ORDER BY score DESC
@@ -538,12 +681,6 @@ def fetch_mapper_edges(
 
     return result
 
-_STEP_TYPES = {"CA", "CB", "CC"}
-_SIG_TYPES  = {"SF"}  # extend if needed
-
-def _exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
-    return math.exp(-abs(dt_ms) / float(tau_ms))
-
 
 def hex_to_bits(hex_str: str) -> str:
     try:
@@ -568,7 +705,6 @@ PORT = 61618
 TOPIC_DEFAULT = "TD_ALL_SIG_AREA"
 AREA_FILTER_DEFAULT = ["EK"]
 
-DEFAULT_TABLE_BATCHES = "td_batches"
 DEFAULT_TABLE_EVENTS = "td_events"
 
 LIVE_TABLE_LIMIT = 40
@@ -584,9 +720,8 @@ class SQLiteWriterThreaded:
       - Optional raw JSON storage (batch raw_json + per-event msg_json)
       - td_batches td_area column (or legacy area_filter) autodetection
     """
-    def __init__(self, db_path: str, table_batches: str, table_events: str, store_raw_json: bool = False):
+    def __init__(self, db_path: str, table_events: str, store_raw_json: bool = False):
         self.db_path = db_path
-        self.table_batches = table_batches
         self.table_events = table_events
         self.store_raw_json = store_raw_json
 
@@ -1027,7 +1162,6 @@ class DashboardState:
     area_filter: Optional[list[str]]
     area_filter_desc: str
     db_path: Optional[str]
-    table_batches: str
     table_events: str
     store_raw_json: bool
 
@@ -1284,7 +1418,7 @@ def _poll_db_stats(db_path: str, table_batches: str, table_events: str) -> Tuple
         conn.close()
         return 0, events, last_received  # batches=0 (deprecated)
     except Exception:
-        return None, None, None
+        return None, None
 
 
 def _fmt_hms_from_ms(ms: Any) -> str:
@@ -1576,8 +1710,6 @@ def _render_db_panel(stdscr, state: DashboardState, y0: int, db_h: int, w: int) 
         )
         y += 1
 
-        
-        
         _safe_addstr(dbw, y, 2, f"Writer last save (utc): {state.writer_last_saved_utc or '-'}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
 
         _safe_addstr(dbw, y, 2, f"DB rowcount: events={state.db_events_rows}   Last event utc: {state.db_last_received_utc or '-'}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
@@ -1932,13 +2064,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all-areas", action="store_true", help="Disable area filtering (show/store all areas).")
 
     p.add_argument("--db", help="SQLite database file path. If omitted, nothing is stored.")
-    p.add_argument("--table-batches", type=_validate_sqlite_ident, default=DEFAULT_TABLE_BATCHES)
     p.add_argument("--table-events", type=_validate_sqlite_ident, default=DEFAULT_TABLE_EVENTS)
 
     p.add_argument(
         "--store-raw-json",
         action="store_true",
-        help="Store raw batch JSON (td_batches.raw_json) and per-event msg_json (td_events.msg_json). Default: off.",
+        help="Store per-event msg_json (td_events.msg_json). Default: off.",
     )
 
     p.add_argument("--plain", action="store_true", help="Disable curses UI; print one-line summaries instead.")
@@ -1963,7 +2094,6 @@ def main() -> None:
     if args.db:
         writer = SQLiteWriterThreaded(
             args.db,
-            args.table_batches,
             args.table_events,
             store_raw_json=bool(args.store_raw_json),
         )
@@ -2022,7 +2152,6 @@ def main() -> None:
             area_filter=area_filter,
             area_filter_desc=area_desc,
             db_path=args.db,
-            table_batches=args.table_batches,
             table_events=args.table_events,
             store_raw_json=bool(args.store_raw_json),
         )
