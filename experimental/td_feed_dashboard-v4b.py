@@ -76,6 +76,150 @@ def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
     """Exponential weighting function used for scoring."""
     return math.exp(-abs(dt_ms) / float(tau_ms))
 
+# Mapper constants
+_STEP_TYPES = {"CA", "CB", "CC"}
+_SIG_TYPES  = {"SF"}  # extend if needed
+
+
+def ensure_mapper_schema(conn: sqlite3.Connection) -> None:
+    """
+    Create/update berth_signal_observations and berth_signal_scores tables.
+    Uses step_timestamp and signal_timestamp (INTEGER unix ms).
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS berth_signal_observations (
+          id INTEGER PRIMARY KEY,
+          td_area TEXT NOT NULL,
+          step_event_id INTEGER,
+          step_timestamp INTEGER NOT NULL,
+          from_berth TEXT,
+          to_berth TEXT,
+          descr TEXT,
+          signal_event_id INTEGER,
+          signal_timestamp INTEGER NOT NULL,
+          address TEXT NOT NULL,
+          data TEXT,
+          dt_ms INTEGER NOT NULL,
+          weight REAL NOT NULL,
+          created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bso_edge
+        ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_bso_addr
+        ON berth_signal_observations(td_area, address, signal_timestamp);
+
+        CREATE TABLE IF NOT EXISTS berth_signal_scores (
+          td_area TEXT NOT NULL,
+          from_berth TEXT NOT NULL,
+          to_berth TEXT NOT NULL,
+          address TEXT NOT NULL,
+          score REAL NOT NULL,
+          obs_count INTEGER NOT NULL,
+          last_seen_ts INTEGER,
+          last_seen_utc TEXT NOT NULL,
+          last_data TEXT,
+          PRIMARY KEY (td_area, from_berth, to_berth, address)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bss_edge
+        ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
+        """
+    )
+    conn.commit()
+
+
+def process_batch_for_mapper(
+    evs: List[Dict[str, Any]],
+    pre_ms: int,
+    post_ms: int,
+    tau_ms: int,
+) -> Tuple[List[Tuple], List[Tuple]]:
+    """
+    Process a batch of events and return observation and score rows for the mapper.
+    
+    Args:
+        evs: List of event dicts with keys: msg_ts, received_at_utc, msg_type, td_area, descr, from_berth, to_berth, address, data
+        pre_ms: Time window before step (ms)
+        post_ms: Time window after step (ms)
+        tau_ms: Exponential weight time constant (ms)
+    
+    Returns:
+        (obs_rows, score_rows) - tuples ready for INSERT
+    """
+    from bisect import bisect_left, bisect_right
+    
+    # Group by TD area
+    by_area = defaultdict(list)
+    for e in evs:
+        td_area = e.get("td_area")
+        if not td_area:
+            continue
+        by_area[td_area].append(e)
+    
+    obs_rows = []
+    score_rows = []
+    
+    for td_area, area_evs in by_area.items():
+        # Filter and sort signals
+        signals = [
+            e for e in area_evs
+            if e["msg_type"] in _SIG_TYPES and e.get("address") and e["msg_ts"] > 0
+        ]
+        signals.sort(key=lambda e: e["msg_ts"])
+        sig_times = [e["msg_ts"] for e in signals]
+        
+        # Filter and sort steps
+        steps = [
+            e for e in area_evs
+            if e["msg_type"] in _STEP_TYPES and e.get("from_berth") and e.get("to_berth") and e["msg_ts"] > 0
+        ]
+        steps.sort(key=lambda e: e["msg_ts"])
+        
+        if not signals or not steps:
+            continue
+        
+        # For each step, find nearby signals and create observations
+        for st in steps:
+            lo = bisect_left(sig_times, st["msg_ts"] - pre_ms)
+            hi = bisect_right(sig_times, st["msg_ts"] + post_ms)
+            
+            for s in signals[lo:hi]:
+                dt = s["msg_ts"] - st["msg_ts"]
+                w = exp_weight(dt, tau_ms)
+                
+                obs_rows.append((
+                    td_area,
+                    None,                    # step_event_id
+                    st["msg_ts"],            # step_timestamp (unix ms)
+                    st["from_berth"],
+                    st["to_berth"],
+                    st.get("descr"),
+                    None,                    # signal_event_id
+                    s["msg_ts"],             # signal_timestamp (unix ms)
+                    str(s["address"]),
+                    s.get("data"),
+                    abs(int(dt)),
+                    float(w),
+                ))
+                
+                score_rows.append((
+                    td_area,
+                    st["from_berth"],
+                    st["to_berth"],
+                    str(s["address"]),
+                    float(w),
+                    s["msg_ts"],             # last_seen_ts (unix ms)
+                    s["received_at_utc"],    # last_seen_utc (ISO string)
+                    s.get("data"),
+                ))
+    
+    return obs_rows, score_rows
+
+
 @dataclass
 class Candidate:
     """
@@ -143,58 +287,7 @@ class BerthSignalMapper:
     def _init_schema(self) -> None:
         con = self._connect()
         try:
-            con.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS berth_signal_observations (
-                  id INTEGER PRIMARY KEY,
-                  td_area TEXT NOT NULL,
-                  step_event_id INTEGER,
-                  step_ts INTEGER,
-                  step_ts_utc TEXT NOT NULL,
-                  from_berth TEXT,
-                  to_berth TEXT,
-                  descr TEXT,
-                  signal_event_id INTEGER,
-                  signal_ts INTEGER,
-                  signal_ts_utc TEXT NOT NULL,
-                  address TEXT NOT NULL,
-                  data TEXT,
-                  dt_ms INTEGER NOT NULL,
-                  weight REAL NOT NULL,
-                  created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                  created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_bso_edge
-                ON berth_signal_observations(td_area, from_berth, to_berth, step_ts_utc);
-                
-                CREATE INDEX IF NOT EXISTS idx_bso_edge2
-                ON berth_signal_observations(td_area, from_berth, to_berth, step_ts);
-
-                CREATE INDEX IF NOT EXISTS idx_bso_addr
-                ON berth_signal_observations(td_area, address, signal_ts_utc);
-                
-                CREATE INDEX IF NOT EXISTS idx_bso_addr2
-                ON berth_signal_observations(td_area, address, signal_ts);
-
-                CREATE TABLE IF NOT EXISTS berth_signal_scores (
-                  td_area TEXT NOT NULL,
-                  from_berth TEXT NOT NULL,
-                  to_berth TEXT NOT NULL,
-                  address TEXT NOT NULL,
-                  score REAL NOT NULL,
-                  obs_count INTEGER NOT NULL,
-                  last_seen_ts INTEGER,
-                  last_seen_utc TEXT NOT NULL,
-                  last_data TEXT,
-                  PRIMARY KEY (td_area, from_berth, to_berth, address)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_bss_edge
-                ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
-                """
-            )
-            con.commit()
+            ensure_mapper_schema(con)
         finally:
             con.close()
 
@@ -238,7 +331,6 @@ class BerthSignalMapper:
               AND msg_timestamp BETWEEN ? AND ?
             ORDER BY msg_timestamp ASC
             """
-            # the strftime/substr millisecond extraction assumes ISO like 2026-01-27T13:07:00.123Z
             params: List[object] = [td_area, *self.signal_msg_types, t0, t1]
             rows = con.execute(q, params).fetchall()
 
@@ -255,22 +347,20 @@ class BerthSignalMapper:
                 con.execute(
                     """
                     INSERT INTO berth_signal_observations (
-                      td_area, step_event_id, step_ts, step_ts_utc, from_berth, to_berth, descr,
-                      signal_event_id, signal_ts, signal_ts_utc, address, data, dt_ms, weight
+                      td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
+                      signal_event_id, signal_timestamp, address, data, dt_ms, weight
                     )
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         td_area,
                         step_event_id,
-                        msg_ts,
-                        step_ts_utc,
+                        step_ms,
                         from_berth,
                         to_berth,
                         descr,
                         sig_id,
                         msg_ts,
-                        sig_ts_utc,
                         addr,
                         data,
                         int(abs(dt_ms)),
@@ -286,6 +376,7 @@ class BerthSignalMapper:
                     DO UPDATE SET
                       score = score + excluded.score,
                       obs_count = obs_count + 1,
+                      last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
                       last_seen_utc = CASE WHEN excluded.last_seen_utc > last_seen_utc THEN excluded.last_seen_utc ELSE last_seen_utc END,
                       last_data = CASE WHEN excluded.last_seen_utc > last_seen_utc THEN excluded.last_data ELSE last_data END
                     """,
@@ -307,7 +398,7 @@ class BerthSignalMapper:
         try:
             rows = con.execute(
                 """
-                SELECT address, score, obs_count, last_seen_ts, last_seen_utc, last_data
+                SELECT address, score, obs_count, last_seen_utc, last_data
                 FROM berth_signal_scores
                 WHERE td_area=? AND from_berth=? AND to_berth=?
                 ORDER BY score DESC
@@ -327,7 +418,6 @@ class BerthSignalMapper:
                         score=score,
                         obs_count=int(r["obs_count"]),
                         conf=conf,
-                        last_seen_ts=int(r["last_seen_ts"]),
                         last_seen_utc=str(r["last_seen_utc"]),
                         last_data=r["last_data"],
                     )
@@ -436,12 +526,6 @@ def fetch_mapper_edges(
 
     return result
 
-_STEP_TYPES = {"CA", "CB", "CC"}
-_SIG_TYPES  = {"SF"}  # extend if needed
-
-def _exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
-    return math.exp(-abs(dt_ms) / float(tau_ms))
-
 
 def hex_to_bits(hex_str: str) -> str:
     try:
@@ -466,7 +550,6 @@ PORT = 61618
 TOPIC_DEFAULT = "TD_ALL_SIG_AREA"
 AREA_FILTER_DEFAULT = ["EK"]
 
-DEFAULT_TABLE_BATCHES = "td_batches"
 DEFAULT_TABLE_EVENTS = "td_events"
 
 LIVE_TABLE_LIMIT = 40
@@ -482,9 +565,8 @@ class SQLiteWriterThreaded:
       - Optional raw JSON storage (batch raw_json + per-event msg_json)
       - td_batches td_area column (or legacy area_filter) autodetection
     """
-    def __init__(self, db_path: str, table_batches: str, table_events: str, store_raw_json: bool = False):
+    def __init__(self, db_path: str, table_events: str, store_raw_json: bool = False):
         self.db_path = db_path
-        self.table_batches = table_batches
         self.table_events = table_events
         self.store_raw_json = store_raw_json
 
@@ -497,8 +579,6 @@ class SQLiteWriterThreaded:
         self.saved_events = 0
         self.last_saved_at_utc: Optional[str] = None
         self.last_error: Optional[str] = None
-
-        self._batches_area_col: str = "td_area"
 
     def start(self) -> None:
         if self._started:
@@ -567,37 +647,11 @@ class SQLiteWriterThreaded:
             except Exception:
                 pass
 
-    def _detect_batches_area_col(self, conn: sqlite3.Connection) -> str:
-        try:
-            cur = conn.execute(f"PRAGMA table_info({self.table_batches})")
-            cols = [row[1] for row in cur.fetchall()]
-            if "td_area" in cols:
-                return "td_area"
-            if "area_filter" in cols:
-                return "area_filter"
-        except Exception:
-            pass
-        return "td_area"
-
     def _init_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.table_batches} (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                received_at_utc  TEXT NOT NULL,
-                topic           TEXT NOT NULL,
-                td_area         TEXT,
-                raw_json        TEXT,
-                item_count      INTEGER NOT NULL
-            );
-            """
-        )
-
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {self.table_events} (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                batch_id        INTEGER NOT NULL,
                 msg_timestamp   INTEGER NOT NULL,
                 received_at_utc TEXT NOT NULL,
 
@@ -611,9 +665,7 @@ class SQLiteWriterThreaded:
                 address         TEXT,
                 data            TEXT,
 
-                msg_json        TEXT,
-
-                FOREIGN KEY(batch_id) REFERENCES {self.table_batches}(id)
+                msg_json        TEXT
             );
             """
         )
@@ -625,11 +677,13 @@ class SQLiteWriterThreaded:
             f"CREATE INDEX IF NOT EXISTS idx_{self.table_events}_type ON {self.table_events}(msg_type);"
         )
         conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{self.table_batches}_received ON {self.table_batches}(received_at_utc);"
+            f"CREATE INDEX IF NOT EXISTS idx_{self.table_events}_timestamp ON {self.table_events}(msg_timestamp);"
         )
 
+        # Create mapper tables
+        ensure_mapper_schema(conn)
+
         conn.commit()
-        self._batches_area_col = self._detect_batches_area_col(conn)
 
     def _insert_batch_and_events(
         self,
@@ -640,19 +694,7 @@ class SQLiteWriterThreaded:
         data: List[Dict[str, Any]],
         extracted_events: List[Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Dict[str, Any]]],
     ) -> Tuple[int, int]:
-        area_filter_str = ",".join(area_filter) if area_filter else None
-        raw_json = json.dumps(data, separators=(",", ":"), ensure_ascii=False) if self.store_raw_json else None
-
         cur = conn.cursor()
-
-        cur.execute(
-            f"""
-            INSERT INTO {self.table_batches} (received_at_utc, topic, {self._batches_area_col}, raw_json, item_count)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (received_at_utc, topic, area_filter_str, raw_json, len(data)),
-        )
-        batch_id = cur.lastrowid
 
         event_rows = []
         for msg_wrapper, msg_type, area_id, descr, msg_dict in extracted_events:
@@ -666,9 +708,8 @@ class SQLiteWriterThreaded:
 
             event_rows.append(
                 (
-                    batch_id,
                     ts_int,                 # msg_timestamp (epoch ms)
-                    received_at_utc,        # batch receive time (ISO)
+                    received_at_utc,        # received_at_utc (ISO)
                     msg_wrapper,
                     msg_type,
                     area_id,                # td_area
@@ -685,9 +726,9 @@ class SQLiteWriterThreaded:
             cur.executemany(
                 f"""
                 INSERT INTO {self.table_events}
-                (batch_id, msg_timestamp, received_at_utc, msg_wrapper, msg_type, td_area, descr,
+                (msg_timestamp, received_at_utc, msg_wrapper, msg_type, td_area, descr,
                  from_berth, to_berth, address, data, msg_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 event_rows,
             )
@@ -697,30 +738,17 @@ class SQLiteWriterThreaded:
             # -----------------------------
             if getattr(self, "enable_berth_signal_mapper", True):
                 try:
-                    # local imports so missing imports can't break module import
-                    from collections import defaultdict
-                    from bisect import bisect_left, bisect_right
-                    import math
-
-                    _STEP_TYPES = {"CA", "CB", "CC"}
-                    _SIG_TYPES  = {"SF"}  # extend later if needed
-
-                    def _exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
-                        return math.exp(-abs(dt_ms) / float(tau_ms))
-
                     pre_ms  = getattr(self, "mapper_pre_ms", 8000)
                     post_ms = getattr(self, "mapper_post_ms", 8000)
                     tau_ms  = getattr(self, "mapper_tau_ms", 2500)
 
-                    # Group batch events by TD area
-                    by_area = defaultdict(list)
-                    for r in event_rows:
-                        _batch_id, msg_ts, recv_utc, _wrap, mtype, td_area, descr, f, t, addr, dat, _mj = r
+                    # Convert event_rows to dict format expected by process_batch_for_mapper
+                    evs = []
+                    for msg_ts, recv_utc, _wrap, mtype, td_area, descr, f, t, addr, dat, _mj in event_rows:
                         if not td_area:
                             continue
-                        # msg_ts can be 0 on bad rows - skip for timing logic
                         ts = int(msg_ts or 0)
-                        by_area[td_area].append({
+                        evs.append({
                             "msg_ts": ts,
                             "received_at_utc": recv_utc,
                             "msg_type": mtype,
@@ -732,71 +760,16 @@ class SQLiteWriterThreaded:
                             "data": dat,
                         })
 
-                    obs_rows = []
-                    score_rows = []
+                    obs_rows, score_rows = process_batch_for_mapper(evs, pre_ms, post_ms, tau_ms)
 
-                    for td_area, evs in by_area.items():
-                        signals = [
-                            e for e in evs
-                            if e["msg_type"] in _SIG_TYPES and e.get("address") and e["msg_ts"] > 0
-                        ]
-                        signals.sort(key=lambda e: e["msg_ts"])
-                        sig_times = [e["msg_ts"] for e in signals]
-
-                        steps = [
-                            e for e in evs
-                            if e["msg_type"] in _STEP_TYPES and e.get("from_berth") and e.get("to_berth") and e["msg_ts"] > 0
-                        ]
-                        steps.sort(key=lambda e: e["msg_ts"])
-
-                        if not signals or not steps:
-                            continue
-
-                        for st in steps:
-                            lo = bisect_left(sig_times, st["msg_ts"] - pre_ms)
-                            hi = bisect_right(sig_times, st["msg_ts"] + post_ms)
-
-                            for s in signals[lo:hi]:
-                                dt = s["msg_ts"] - st["msg_ts"]
-                                w = _exp_weight(dt, tau_ms)
-
-                                obs_rows.append((
-                                    td_area,
-                                    None,                  # step_event_id
-                                    st["msg_ts"],# step_ts
-                                    st["received_at_utc"], # step_ts_utc (we can improve later)
-                                    st["from_berth"],
-                                    st["to_berth"],
-                                    st.get("descr"),
-                                    None,                  # signal_event_id
-                                    s["msg_ts"],  # signal_ts
-                                    s["received_at_utc"],  # signal_ts_utc
-                                    str(s["address"]),
-                                    s.get("data"),
-                                    abs(int(dt)),
-                                    float(w),
-                                ))
-
-                                score_rows.append((
-                                    td_area,
-                                    st["from_berth"],
-                                    st["to_berth"],
-                                    str(s["address"]),
-                                    float(w),
-                                    s["msg_ts"],
-                                    s["received_at_utc"],
-                                    s.get("data"),
-                                ))
-
-                    # Insert mapper outputs (only if tables exist)
-                    # If tables are missing, sqlite throws OperationalError — we catch it below.
+                    # Insert mapper outputs
                     if obs_rows:
                         cur.executemany(
                             """
                             INSERT INTO berth_signal_observations (
-                              td_area, step_event_id, step_ts, step_ts_utc, from_berth, to_berth, descr,
-                              signal_event_id, signal_ts, signal_ts_utc, address, data, dt_ms, weight
-                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                              td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
+                              signal_event_id, signal_timestamp, address, data, dt_ms, weight
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             obs_rows
                         )
@@ -812,6 +785,9 @@ class SQLiteWriterThreaded:
                             DO UPDATE SET
                               score = score + excluded.score,
                               obs_count = obs_count + 1,
+                              last_seen_ts = CASE
+                                WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts
+                                ELSE last_seen_ts END,
                               last_seen_utc = CASE
                                 WHEN excluded.last_seen_utc > last_seen_utc THEN excluded.last_seen_utc
                                 ELSE last_seen_utc END,
@@ -824,12 +800,10 @@ class SQLiteWriterThreaded:
 
                 except Exception as e:
                     # CRITICAL: never break ingestion
-                    # Replace print with your logger if you have one
                     print(f"[mapper] disabled for this batch due to error: {e!r}")
 
-
         conn.commit()
-        return int(batch_id), len(event_rows)
+        return 1, len(event_rows)  # Return 1 for batch (for compatibility), event count
 
 
 
@@ -1028,7 +1002,6 @@ class DashboardState:
     area_filter: Optional[list[str]]
     area_filter_desc: str
     db_path: Optional[str]
-    table_batches: str
     table_events: str
     store_raw_json: bool
 
@@ -1058,10 +1031,8 @@ class DashboardState:
     writer_last_error: Optional[str] = None
 
     # db observed stats
-    db_batches_rows: Optional[int] = None
     db_events_rows: Optional[int] = None
     db_last_received_utc: Optional[str] = None
-    db_batches_area_col: str = "td_area"
 
     last_error: Optional[str] = None
 
@@ -1269,37 +1240,20 @@ def _wrap_lines(text: str, width: int) -> List[str]:
     return textwrap.wrap(text, width=width, replace_whitespace=False, drop_whitespace=False) or [""]
 
 
-def _detect_batches_area_col_ro(db_path: str, table_batches: str) -> str:
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
-        cur = conn.execute(f"PRAGMA table_info({table_batches})")
-        cols = [row[1] for row in cur.fetchall()]
-        conn.close()
-        if "td_area" in cols:
-            return "td_area"
-        if "area_filter" in cols:
-            return "area_filter"
-    except Exception:
-        pass
-    return "td_area"
-
-
-def _poll_db_stats(db_path: str, table_batches: str, table_events: str) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+def _poll_db_stats(db_path: str, table_events: str) -> Tuple[Optional[int], Optional[str]]:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) AS c FROM {table_batches}")
-        batches = int(cur.fetchone()["c"])
         cur.execute(f"SELECT COUNT(*) AS c FROM {table_events}")
         events = int(cur.fetchone()["c"])
-        cur.execute(f"SELECT received_at_utc FROM {table_batches} ORDER BY id DESC LIMIT 1")
+        cur.execute(f"SELECT received_at_utc FROM {table_events} ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         last_received = row["received_at_utc"] if row else None
         conn.close()
-        return batches, events, last_received
+        return events, last_received
     except Exception:
-        return None, None, None
+        return None, None
 
 
 def _fmt_hms_from_ms(ms: Any) -> str:
@@ -1566,11 +1520,9 @@ def _render_db_panel(stdscr, state: DashboardState, y0: int, db_h: int, w: int) 
 
     if state.db_path:
         _safe_addstr(dbw, y, 2, f"SQLite: {state.db_path}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
-        _safe_addstr(dbw, y, 2, f"Tables: {state.table_batches} / {state.table_events}   batches area col: {state.db_batches_area_col}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
+        _safe_addstr(dbw, y, 2, f"Table: {state.table_events}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
 
         q_attr = _cattr(CP_OK) if (state.writer_queue_depth < 2000) else _cattr(CP_WARN)
-        #_safe_addstr(dbw, y, 2, f"Writer queue: {state.writer_queue_depth}   writer saved: batches={state.writer_saved_batches} events={state.writer_saved_events}"[: max(0, w - 4)], q_attr); y += 1
-        
         
         queue_n = state.writer_queue_depth
 
@@ -1592,11 +1544,9 @@ def _render_db_panel(stdscr, state: DashboardState, y0: int, db_h: int, w: int) 
         )
         y += 1
 
-        
-        
         _safe_addstr(dbw, y, 2, f"Writer last save (utc): {state.writer_last_saved_utc or '-'}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
 
-        _safe_addstr(dbw, y, 2, f"DB rowcounts: batches={state.db_batches_rows} events={state.db_events_rows}   DB last batch utc: {state.db_last_received_utc or '-'}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
+        _safe_addstr(dbw, y, 2, f"DB rowcounts: events={state.db_events_rows}   DB last event utc: {state.db_last_received_utc or '-'}"[: max(0, w - 4)], _cattr(CP_DIM)); y += 1
 
         if state.writer_last_error:
             _safe_addstr(dbw, y, 2, f"Writer error: {state.writer_last_error}"[: max(0, w - 4)], _cattr(CP_ERR, curses.A_BOLD)); y += 1
@@ -1859,14 +1809,10 @@ def dashboard_loop(
 
         # DB stats + live queries (read-only)
         now = time.time()
-        if state.db_path and (now - last_detect_poll) >= 10.0:
-            last_detect_poll = now
-            state.db_batches_area_col = _detect_batches_area_col_ro(state.db_path, state.table_batches)
 
         if state.db_path and (now - last_db_poll) >= db_poll_interval:
             last_db_poll = now
-            b, e, last = _poll_db_stats(state.db_path, state.table_batches, state.table_events)
-            state.db_batches_rows = b
+            e, last = _poll_db_stats(state.db_path, state.table_events)
             state.db_events_rows = e
             state.db_last_received_utc = last
 
@@ -1954,13 +1900,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all-areas", action="store_true", help="Disable area filtering (show/store all areas).")
 
     p.add_argument("--db", help="SQLite database file path. If omitted, nothing is stored.")
-    p.add_argument("--table-batches", type=_validate_sqlite_ident, default=DEFAULT_TABLE_BATCHES)
     p.add_argument("--table-events", type=_validate_sqlite_ident, default=DEFAULT_TABLE_EVENTS)
 
     p.add_argument(
         "--store-raw-json",
         action="store_true",
-        help="Store raw batch JSON (td_batches.raw_json) and per-event msg_json (td_events.msg_json). Default: off.",
+        help="Store per-event msg_json (td_events.msg_json). Default: off.",
     )
 
     p.add_argument("--plain", action="store_true", help="Disable curses UI; print one-line summaries instead.")
@@ -1985,7 +1930,6 @@ def main() -> None:
     if args.db:
         writer = SQLiteWriterThreaded(
             args.db,
-            args.table_batches,
             args.table_events,
             store_raw_json=bool(args.store_raw_json),
         )
@@ -2044,7 +1988,6 @@ def main() -> None:
             area_filter=area_filter,
             area_filter_desc=area_desc,
             db_path=args.db,
-            table_batches=args.table_batches,
             table_events=args.table_events,
             store_raw_json=bool(args.store_raw_json),
         )
