@@ -1,0 +1,26 @@
+name: experimental CI
+
+on:
+  push:
+    paths:
+      - 'experimental/**'
+  pull_request:
+    paths:
+      - 'experimental/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install -r experimental/requirements.txt || true
+      - name: Run experimental tests
+        run: |
+          cd experimental
+          pytest -q || ( echo "Tests failed"; exit 1 )
