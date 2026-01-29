@@ -1,0 +1,64 @@
+# Machine-parsable agent manifest — enforce allowlist rules
+agent_name: "experimental-only-agent"
+version: "1.0"
+description: "Manifest that restricts agent actions to experimental/ and enumerates allowed actions."
+
+# File path rules (glob)
+allowed_paths:
+  - "experimental/**"
+
+# Explicit deny (anything not matched in allowed_paths is denied)
+deny_paths:
+  - "**"
+
+# Allowed operations the agent may perform
+allowed_operations:
+  read: true
+  write: true          # writes are allowed but only inside allowed_paths
+  create_files: true
+  delete_files: false  # avoid deletes; require human approval
+  run_commands: true
+
+# Allowed shell/commands the agent is allowed to execute (restrict to safe tools)
+allowed_shell_commands:
+  - "python"
+  - "python3"
+  - "pytest"
+  - "flake8"
+  - "bash"
+  - "sqlite3"
+  - "git"        # only with repository-scoped safe args (see policy)
+  - "grep"
+  - "sed"
+  - "awk"
+
+# Dangerous or disallowed commands — must be explicitly refused
+disallowed_shell_commands:
+  - "curl"
+  - "wget"
+  - "scp"
+  - "ssh"
+  - "docker"
+  - "systemctl"
+  - "sudo"
+
+# Git policy
+git:
+  allowed_branches_prefix:
+    - "experimental/"
+  require_human_approval_for_push_outside_allowed_paths: true
+  commit_message_prefix: "[agent] experimental:"
+
+# Approval policy for actions that touch deny_paths
+approval_required_for:
+  - "writing outside allowed_paths"
+  - "deleting files"
+
+# CI enforcement hint (used by workflows)
+ci:
+  workflow_path: ".github/workflows/experimental-ci.yml"
+  required: true
+
+# Human contact / owners
+owners:
+  - "tombanbury-cyber"
