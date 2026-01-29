@@ -5,9 +5,9 @@
 --   3. Removes step_ts_utc and signal_ts_utc columns from berth_signal_observations
 --   4. Updates indexes to use new column names
 --
--- BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT!
+-- ⚠️ IMPORTANT: BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT!
 --
--- Usage: sqlite3 your_database.db < migrate_drop_td_batches_and_rename_ts.sql
+-- Usage: sqlite3 your_database.db < scripts/migrate_drop_td_batches_and_rename_ts.sql
 
 BEGIN TRANSACTION;
 
