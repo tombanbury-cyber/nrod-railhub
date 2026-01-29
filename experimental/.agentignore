@@ -1,0 +1,5 @@
+# Prevent many agents from accidentally scanning outside this folder
+# These patterns are relative to repository root when agent is asked to operate here.
+/*
+!.gitignore
+!experimental/**
