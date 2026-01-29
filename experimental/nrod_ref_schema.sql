@@ -262,7 +262,6 @@ CREATE TABLE inferred_berth_signal (
 );
 CREATE TABLE td_events (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                batch_id        INTEGER NOT NULL,
                 msg_timestamp   INTEGER NOT NULL,
                 received_at_utc TEXT NOT NULL,
 
@@ -276,33 +275,20 @@ CREATE TABLE td_events (
                 address         TEXT,
                 data            TEXT,
 
-                msg_json        TEXT,
-
-                FOREIGN KEY(batch_id) REFERENCES td_batches(id)
-            );
-CREATE TABLE td_batches (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                received_at_utc  TEXT NOT NULL,
-                topic           TEXT NOT NULL,
-                td_area         TEXT,
-                raw_json        TEXT,
-                item_count      INTEGER NOT NULL
+                msg_json        TEXT
             );
 CREATE INDEX idx_td_events_area ON td_events(td_area);
 CREATE INDEX idx_td_events_type ON td_events(msg_type);
-CREATE INDEX idx_td_batches_received ON td_batches(received_at_utc);
 CREATE TABLE berth_signal_observations (
                   id INTEGER PRIMARY KEY,
                   td_area TEXT NOT NULL,
                   step_event_id INTEGER,
-                  step_ts INTEGER,
-                  step_ts_utc TEXT NOT NULL,
+                  step_timestamp INTEGER,
                   from_berth TEXT,
                   to_berth TEXT,
                   descr TEXT,
                   signal_event_id INTEGER,
-                  signal_ts INTEGER,
-                  signal_ts_utc TEXT NOT NULL,
+                  signal_timestamp INTEGER,
                   address TEXT NOT NULL,
                   data TEXT,
                   dt_ms INTEGER NOT NULL,
@@ -311,13 +297,9 @@ CREATE TABLE berth_signal_observations (
                   created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
                 );
 CREATE INDEX idx_bso_edge
-                ON berth_signal_observations(td_area, from_berth, to_berth, step_ts_utc);
-CREATE INDEX idx_bso_edge2
-                ON berth_signal_observations(td_area, from_berth, to_berth, step_ts);
+                ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
 CREATE INDEX idx_bso_addr
-                ON berth_signal_observations(td_area, address, signal_ts_utc);
-CREATE INDEX idx_bso_addr2
-                ON berth_signal_observations(td_area, address, signal_ts);
+                ON berth_signal_observations(td_area, address, signal_timestamp);
 CREATE TABLE berth_signal_scores (
                   td_area TEXT NOT NULL,
                   from_berth TEXT NOT NULL,
