@@ -1,35 +1,19 @@
--- ============================================================================
--- Migration Script: Drop td_batches and Rename Mapper Timestamp Columns
--- ============================================================================
+-- Migration script: Drop td_batches and rename timestamp columns
+-- This script migrates an existing database to the new schema:
+--   1. Removes td_batches table and batch_id from td_events
+--   2. Renames step_ts -> step_timestamp, signal_ts -> signal_timestamp  
+--   3. Removes step_ts_utc and signal_ts_utc columns from berth_signal_observations
+--   4. Updates indexes to use new column names
 --
--- This migration script updates the database schema to:
--- 1. Remove the td_batches table (events are now stored directly in td_events)
--- 2. Remove the batch_id foreign key from td_events
--- 3. Rename mapper timestamp columns to use unix ms (INTEGER):
---    - berth_signal_observations: step_ts -> step_timestamp, signal_ts -> signal_timestamp
---    - Remove step_ts_utc and signal_ts_utc columns
--- 4. Keep berth_signal_scores with last_seen_ts (INTEGER) and last_seen_utc (TEXT)
+-- ⚠️ IMPORTANT: BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT!
 --
--- IMPORTANT: BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT!
--- 
--- Usage:
---   sqlite3 your_database.db < migrate_drop_td_batches_and_rename_ts.sql
---
--- Testing:
---   1. Make a backup copy of your database: cp rail.db rail.db.backup
---   2. Run the migration on a test copy: cp rail.db rail_test.db && sqlite3 rail_test.db < migrate_drop_td_batches_and_rename_ts.sql
---   3. Verify counts and spot-check data
---   4. If satisfied, run on production database
---
--- Rollback:
---   Keep your backup! If issues arise, restore from rail.db.backup
--- ============================================================================
+-- Usage: sqlite3 your_database.db < scripts/migrate_drop_td_batches_and_rename_ts.sql
 
 BEGIN TRANSACTION;
 
--- ============================================================================
--- Step 1: Migrate td_events (remove batch_id)
--- ============================================================================
+-- ======================================================================
+-- STEP 1: Migrate td_events (remove batch_id)
+-- ======================================================================
 
 -- Create new td_events table without batch_id
 CREATE TABLE td_events_new (
@@ -47,47 +31,44 @@ CREATE TABLE td_events_new (
     msg_json        TEXT
 );
 
--- Copy data from old table to new table
--- Note: We drop batch_id; received_at_utc is preserved from the old td_events table
-INSERT INTO td_events_new (
-    id, msg_timestamp, received_at_utc, msg_wrapper, msg_type, td_area, descr,
-    from_berth, to_berth, address, data, msg_json
-)
-SELECT
-    id, msg_timestamp, received_at_utc, msg_wrapper, msg_type, td_area, descr,
-    from_berth, to_berth, address, data, msg_json
+-- Copy data from old table (drop batch_id column)
+INSERT INTO td_events_new (id, msg_timestamp, received_at_utc, msg_wrapper, msg_type, 
+                           td_area, descr, from_berth, to_berth, address, data, msg_json)
+SELECT id, msg_timestamp, received_at_utc, msg_wrapper, msg_type, 
+       td_area, descr, from_berth, to_berth, address, data, msg_json
 FROM td_events;
 
 -- Drop old table and rename new table
 DROP TABLE td_events;
 ALTER TABLE td_events_new RENAME TO td_events;
 
--- Recreate indexes on td_events
+-- Recreate indexes for td_events
 CREATE INDEX idx_td_events_area ON td_events(td_area);
 CREATE INDEX idx_td_events_type ON td_events(msg_type);
 CREATE INDEX idx_td_events_timestamp ON td_events(msg_timestamp);
+CREATE INDEX idx_td_events_received ON td_events(received_at_utc);
 
--- ============================================================================
--- Step 2: Drop td_batches table
--- ============================================================================
+-- ======================================================================
+-- STEP 2: Drop td_batches table
+-- ======================================================================
 
 DROP TABLE IF EXISTS td_batches;
 
--- ============================================================================
--- Step 3: Migrate berth_signal_observations (rename timestamp columns)
--- ============================================================================
+-- ======================================================================
+-- STEP 3: Migrate berth_signal_observations (rename columns)
+-- ======================================================================
 
--- Create new observations table with renamed columns
+-- Create new berth_signal_observations table with new column names
 CREATE TABLE berth_signal_observations_new (
     id INTEGER PRIMARY KEY,
     td_area TEXT NOT NULL,
     step_event_id INTEGER,
-    step_timestamp INTEGER NOT NULL,
+    step_timestamp INTEGER,
     from_berth TEXT,
     to_berth TEXT,
     descr TEXT,
     signal_event_id INTEGER,
-    signal_timestamp INTEGER NOT NULL,
+    signal_timestamp INTEGER,
     address TEXT NOT NULL,
     data TEXT,
     dt_ms INTEGER NOT NULL,
@@ -97,89 +78,79 @@ CREATE TABLE berth_signal_observations_new (
 );
 
 -- Copy data with column name mapping
--- Migration policy:
---   - Use existing step_ts as step_timestamp (already unix ms)
---   - Use existing signal_ts as signal_timestamp (already unix ms)
---   - If step_ts is NULL or 0, try parsing step_ts_utc to unix ms, else use 0
---   - If signal_ts is NULL or 0, use 0 (could enhance by matching td_events.msg_timestamp)
-INSERT INTO berth_signal_observations_new (
-    id, td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
-    signal_event_id, signal_timestamp, address, data, dt_ms, weight, created_at_utc, created_at_ts
-)
-SELECT
-    id,
-    td_area,
-    step_event_id,
-    COALESCE(step_ts, 
-             CASE 
-                 WHEN step_ts_utc IS NOT NULL 
-                 THEN CAST((julianday(step_ts_utc) - 2440587.5) * 86400000 AS INTEGER)
-                 ELSE 0
-             END
-    ) AS step_timestamp,
-    from_berth,
-    to_berth,
-    descr,
-    signal_event_id,
-    COALESCE(signal_ts, 
-             CASE 
-                 WHEN signal_ts_utc IS NOT NULL 
-                 THEN CAST((julianday(signal_ts_utc) - 2440587.5) * 86400000 AS INTEGER)
-                 ELSE 0
-             END
-    ) AS signal_timestamp,
-    address,
-    data,
-    dt_ms,
-    weight,
-    created_at_utc,
-    created_at_ts
+-- Old: step_ts, signal_ts, step_ts_utc, signal_ts_utc
+-- New: step_timestamp, signal_timestamp (drop _utc variants)
+INSERT INTO berth_signal_observations_new 
+    (id, td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
+     signal_event_id, signal_timestamp, address, data, dt_ms, weight, created_at_utc, created_at_ts)
+SELECT 
+    id, td_area, step_event_id, 
+    COALESCE(step_ts, 0) AS step_timestamp,  -- fallback for NULL
+    from_berth, to_berth, descr,
+    signal_event_id, 
+    COALESCE(signal_ts, 0) AS signal_timestamp,  -- fallback for NULL
+    address, data, dt_ms, weight, created_at_utc, created_at_ts
 FROM berth_signal_observations;
 
 -- Drop old table and rename new table
 DROP TABLE berth_signal_observations;
 ALTER TABLE berth_signal_observations_new RENAME TO berth_signal_observations;
 
--- Recreate indexes on berth_signal_observations
-CREATE INDEX idx_bso_edge ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
-CREATE INDEX idx_bso_addr ON berth_signal_observations(td_area, address, signal_timestamp);
+-- Recreate indexes with new column names
+CREATE INDEX idx_bso_edge 
+    ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
+CREATE INDEX idx_bso_addr 
+    ON berth_signal_observations(td_area, address, signal_timestamp);
 
--- ============================================================================
--- Step 4: berth_signal_scores (already has correct schema)
--- ============================================================================
--- The berth_signal_scores table already has the correct schema:
--- - last_seen_ts (INTEGER)
--- - last_seen_utc (TEXT)
--- No migration needed for this table.
+-- ======================================================================
+-- STEP 4: Migrate berth_signal_scores (ensure both last_seen_ts and last_seen_utc)
+-- ======================================================================
 
--- ============================================================================
--- Verification Queries (optional - uncomment to check results)
--- ============================================================================
+-- Check if we need to migrate berth_signal_scores
+-- The schema should already have last_seen_ts and last_seen_utc
+-- If not, we create a new table
+CREATE TABLE berth_signal_scores_new (
+    td_area TEXT NOT NULL,
+    from_berth TEXT NOT NULL,
+    to_berth TEXT NOT NULL,
+    address TEXT NOT NULL,
+    score REAL NOT NULL,
+    obs_count INTEGER NOT NULL,
+    last_seen_ts INTEGER,
+    last_seen_utc TEXT NOT NULL,
+    last_data TEXT,
+    PRIMARY KEY (td_area, from_berth, to_berth, address)
+);
 
--- SELECT 'td_events count:' AS check, COUNT(*) AS count FROM td_events;
--- SELECT 'berth_signal_observations count:' AS check, COUNT(*) AS count FROM berth_signal_observations;
--- SELECT 'berth_signal_scores count:' AS check, COUNT(*) AS count FROM berth_signal_scores;
+-- Copy data (handle case where old table might not have last_seen_ts)
+INSERT INTO berth_signal_scores_new 
+    (td_area, from_berth, to_berth, address, score, obs_count, last_seen_ts, last_seen_utc, last_data)
+SELECT 
+    td_area, from_berth, to_berth, address, score, obs_count,
+    COALESCE(last_seen_ts, 0) AS last_seen_ts,  -- fallback if column missing
+    last_seen_utc,
+    last_data
+FROM berth_signal_scores;
 
--- Sample data checks:
--- SELECT 'td_events sample:' AS check, id, msg_timestamp, received_at_utc, td_area, msg_type FROM td_events ORDER BY id DESC LIMIT 3;
--- SELECT 'observations sample:' AS check, id, step_timestamp, signal_timestamp, td_area, from_berth, to_berth FROM berth_signal_observations ORDER BY id DESC LIMIT 3;
+-- Drop old table and rename new table
+DROP TABLE berth_signal_scores;
+ALTER TABLE berth_signal_scores_new RENAME TO berth_signal_scores;
+
+-- Recreate index
+CREATE INDEX idx_bss_edge 
+    ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
+
+-- ======================================================================
+-- COMMIT
+-- ======================================================================
 
 COMMIT;
 
--- ============================================================================
--- Migration Complete
--- ============================================================================
--- Your database has been migrated to the new schema.
--- 
--- Changes applied:
--- - td_batches table dropped
--- - td_events: batch_id column removed
--- - berth_signal_observations: step_ts -> step_timestamp, signal_ts -> signal_timestamp
--- - berth_signal_observations: step_ts_utc and signal_ts_utc columns removed
--- - Indexes recreated with new column names
--- 
--- Next steps:
--- 1. Verify data integrity with sample queries
--- 2. Run the updated td_feed_dashboard-v4b.py with the new schema
--- 3. Monitor for any issues and keep your backup until confident
--- ============================================================================
+-- Vacuum to reclaim space
+VACUUM;
+
+-- Print success message
+SELECT 'Migration completed successfully!' AS result;
+SELECT 'Old columns removed: batch_id, step_ts_utc, signal_ts_utc' AS changes;
+SELECT 'New columns: step_timestamp, signal_timestamp' AS changes;
+SELECT 'Dropped table: td_batches' AS changes;
