@@ -1755,7 +1755,6 @@ def dashboard_loop(
     paused = False
     last_db_poll = 0.0
     db_poll_interval = 1.0
-    last_detect_poll = 0.0
 
     while not stop_event.is_set():
         # Input
@@ -1803,7 +1802,6 @@ def dashboard_loop(
                     if ch in (ord("r"), ord("R")):
                         state.msg_type_counts.clear()
                         state.area_counts.clear()
-                        state.total_batches = 0
                         state.total_events = 0
                         state._rx_times.clear()
                         state._rx_events.clear()
