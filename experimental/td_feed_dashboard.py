@@ -242,42 +242,60 @@ class Candidate:
             return None
 
 
-
 # Helper to fetch mapper edges from a SQLite connection
 def fetch_mapper_edges(
     conn: sqlite3.Connection,
     *,
-    td_area: str,
+    td_area: Optional[str] = None,
     top_k: int = 6,
     max_edges: int = 100,
 ) -> List[Tuple[str, str, List[Candidate]]]:
     """
     Read the top berth edges and candidate signal addresses from the database.
 
+    If td_area is provided we restrict to that area; if td_area is None we
+    include all areas (useful when the UI is not restricted to a single area).
+
     The returned list contains up to `max_edges` entries sorted by the best
     candidate score.  Each entry is a tuple of (from_berth, to_berth, [Candidate…]).
     """
+    # Ensure rows are sqlite3.Row so we can index by column name
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.row_factory = sqlite3.Row
-    rows = cur.execute(
+
+    if td_area:
+        q = """
+            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_utc, last_data
+            FROM berth_signal_scores
+            WHERE td_area = ?
+            ORDER BY from_berth, to_berth, score DESC
         """
-        SELECT from_berth, to_berth, address, score, obs_count, last_seen_utc, last_data
-        FROM berth_signal_scores
-        WHERE td_area=?
-        ORDER BY from_berth, to_berth, score DESC
-        """,
-        (td_area,),
-    ).fetchall()
-    edge_map: Dict[Tuple[str, str], List[sqlite3.Row]] = defaultdict(list)
+        params = (td_area,)
+    else:
+        # include td_area in results when querying across all areas
+        q = """
+            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_utc, last_data
+            FROM berth_signal_scores
+            ORDER BY td_area, from_berth, to_berth, score DESC
+        """
+        params = ()
+
+    rows = [dict(r) for r in cur.execute(q, params).fetchall()]
+
+    edge_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        key = (str(r["from_berth"]), str(r["to_berth"]))
+        # r is a dict-like row now
+        key = (str(r.get("from_berth") or ""), str(r.get("to_berth") or ""))
         edge_map[key].append(r)
 
-    edge_items: List[Tuple[str, str, float, List[sqlite3.Row]]] = []
+    edge_items: List[Tuple[str, str, float, List[Dict[str, Any]]]] = []
     for (fb, tb), row_list in edge_map.items():
         if not row_list:
             continue
-        best_score = float(row_list[0]["score"])
+        # row_list should already be ordered by score DESC due to the SQL ORDER BY,
+        # but sort again defensively just by score descending
+        row_list.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+        best_score = float(row_list[0].get("score") or 0.0)
         edge_items.append((fb, tb, best_score, row_list))
 
     edge_items.sort(key=lambda x: x[2], reverse=True)
@@ -286,19 +304,19 @@ def fetch_mapper_edges(
     result: List[Tuple[str, str, List[Candidate]]] = []
     for fb, tb, _, row_list in edge_items:
         top_rows = row_list[: int(top_k)]
-        total = sum(float(r["score"]) for r in top_rows) or 1.0
+        total = sum(float(r.get("score") or 0.0) for r in top_rows) or 1.0
         cand_list: List[Candidate] = []
         for r in top_rows:
-            score = float(r["score"])
+            score = float(r.get("score") or 0.0)
             conf = score / total
             cand_list.append(
                 Candidate(
-                    address=str(r["address"]),
+                    address=str(r.get("address")),
                     score=score,
-                    obs_count=int(r["obs_count"] or 1),
+                    obs_count=int(r.get("obs_count") or 1),
                     conf=conf,
-                    last_seen_utc=str(r["last_seen_utc"]),
-                    last_data=r["last_data"],
+                    last_seen_utc=str(r.get("last_seen_utc") or ""),
+                    last_data=r.get("last_data"),
                 )
             )
         result.append((fb, tb, cand_list))
