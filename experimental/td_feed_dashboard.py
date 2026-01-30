@@ -57,25 +57,6 @@ ISO = "%Y-%m-%dT%H:%M:%S.%fZ"
 STEP_TYPES = {"CA", "CB", "CC"}
 SIG_TYPES = {"SF"}
 
-
-def iso_to_ms(ts: str) -> int:
-    """Convert an ISO-8601 timestamp (Z or ±HH:MM offset) into epoch milliseconds."""
-    if not ts:
-        return 0
-    # Python can't parse trailing Z directly, so normalise it
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(ts)  # handles fractional seconds + offsets
-        return int(dt.timestamp() * 1000)
-    except Exception:
-        # fallback: try int() if it's a numeric string
-        try:
-            return int(float(ts))
-        except Exception:
-            return 0
-
-
 def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
     """Exponential weighting function used for scoring."""
     return math.exp(-abs(dt_ms) / float(tau_ms))
@@ -224,19 +205,25 @@ def hex_to_bits(hex_str: str) -> str:
 class Candidate:
     """
     Represents a candidate signal address for a given berth step.
+    Uses last_seen_ts (unix ms) for age calculations.
     """
     address: str
     score: float
     obs_count: int
     conf: float
-    last_seen_utc: str
+    last_seen_ts: Optional[int]
     last_data: Optional[str]
 
     @property
     def age_s(self) -> Optional[float]:
         """Age in seconds since this candidate was last observed (None on error)."""
         try:
-            t = datetime.strptime(self.last_seen_utc, ISO).replace(tzinfo=timezone.utc)
+            if self.last_seen_ts is None:
+                return None
+            ts = int(self.last_seen_ts)
+            if ts <= 0:
+                return None
+            t = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
             return (datetime.now(timezone.utc) - t).total_seconds()
         except Exception:
             return None
@@ -259,22 +246,21 @@ def fetch_mapper_edges(
     The returned list contains up to `max_edges` entries sorted by the best
     candidate score.  Each entry is a tuple of (from_berth, to_berth, [Candidate…]).
     """
-    # Ensure rows are sqlite3.Row so we can index by column name
+    # Make sure rows are sqlite3.Row so we can index by column name consistently
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if td_area:
         q = """
-            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_utc, last_data
+            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_ts, last_data
             FROM berth_signal_scores
             WHERE td_area = ?
             ORDER BY from_berth, to_berth, score DESC
         """
         params = (td_area,)
     else:
-        # include td_area in results when querying across all areas
         q = """
-            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_utc, last_data
+            SELECT td_area, from_berth, to_berth, address, score, obs_count, last_seen_ts, last_data
             FROM berth_signal_scores
             ORDER BY td_area, from_berth, to_berth, score DESC
         """
@@ -284,7 +270,6 @@ def fetch_mapper_edges(
 
     edge_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        # r is a dict-like row now
         key = (str(r.get("from_berth") or ""), str(r.get("to_berth") or ""))
         edge_map[key].append(r)
 
@@ -292,8 +277,7 @@ def fetch_mapper_edges(
     for (fb, tb), row_list in edge_map.items():
         if not row_list:
             continue
-        # row_list should already be ordered by score DESC due to the SQL ORDER BY,
-        # but sort again defensively just by score descending
+        # ensure ordered by score descending (defensive)
         row_list.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
         best_score = float(row_list[0].get("score") or 0.0)
         edge_items.append((fb, tb, best_score, row_list))
@@ -309,13 +293,20 @@ def fetch_mapper_edges(
         for r in top_rows:
             score = float(r.get("score") or 0.0)
             conf = score / total
+            # last_seen_ts stored as integer unix ms in DB
+            last_seen_ts_val = None
+            try:
+                last_seen_ts_val = int(r.get("last_seen_ts")) if r.get("last_seen_ts") is not None else None
+            except Exception:
+                last_seen_ts_val = None
+
             cand_list.append(
                 Candidate(
-                    address=str(r.get("address")),
+                    address=str(r.get("address") or ""),
                     score=score,
                     obs_count=int(r.get("obs_count") or 1),
                     conf=conf,
-                    last_seen_utc=str(r.get("last_seen_utc") or ""),
+                    last_seen_ts=last_seen_ts_val,
                     last_data=r.get("last_data"),
                 )
             )
