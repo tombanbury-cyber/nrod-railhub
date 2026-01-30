@@ -236,6 +236,7 @@ def fetch_mapper_edges(
     td_area: Optional[str] = None,
     top_k: int = 6,
     max_edges: int = 100,
+    sort_mode: str = "conf",  # "conf", "obs", "age", "edge"
 ) -> List[Tuple[str, str, List[Candidate]]]:
     """
     Read the top berth edges and candidate signal addresses from the database.
@@ -243,8 +244,14 @@ def fetch_mapper_edges(
     If td_area is provided we restrict to that area; if td_area is None we
     include all areas (useful when the UI is not restricted to a single area).
 
-    The returned list contains up to `max_edges` entries sorted by the best
-    candidate score.  Each entry is a tuple of (from_berth, to_berth, [Candidate…]).
+    sort_mode determines edge ordering:
+      - "conf": by best candidate confidence (default)
+      - "obs": by best candidate observation count
+      - "age": by best candidate recency (most recent first)
+      - "edge": alphabetically by from_berth → to_berth
+
+    The returned list contains up to `max_edges` entries sorted accordingly.
+    Each entry is a tuple of (from_berth, to_berth, [Candidate…]).
     """
     # Make sure rows are sqlite3.Row so we can index by column name consistently
     conn.row_factory = sqlite3.Row
@@ -282,7 +289,20 @@ def fetch_mapper_edges(
         best_score = float(row_list[0].get("score") or 0.0)
         edge_items.append((fb, tb, best_score, row_list))
 
-    edge_items.sort(key=lambda x: x[2], reverse=True)
+    # Sort edges according to sort_mode
+    if sort_mode == "obs":
+        # by best candidate obs_count descending
+        edge_items.sort(key=lambda x: int(x[3][0].get("obs_count") or 0), reverse=True)
+    elif sort_mode == "age":
+        # by best candidate last_seen_ts descending (most recent first)
+        edge_items.sort(key=lambda x: int(x[3][0].get("last_seen_ts") or 0), reverse=True)
+    elif sort_mode == "edge":
+        # alphabetically by from_berth → to_berth
+        edge_items.sort(key=lambda x: (x[0], x[1]))
+    else:
+        # default: "conf" — by best candidate score descending
+        edge_items.sort(key=lambda x: x[2], reverse=True)
+
     edge_items = edge_items[: int(max_edges)]
 
     result: List[Tuple[str, str, List[Candidate]]] = []
@@ -958,6 +978,9 @@ class DashboardState:
     live_rows: List[Dict[str, Any]] = field(default_factory=list)
     live_last_poll: float = 0.0
     live_last_error: Optional[str] = None
+    
+    # mapper sorting (VIEW_SIGNALS)
+    mapper_sort_mode: str = "conf"  # "conf", "obs", "age", "edge"
 
     def note_batch(self, received_at_utc: str, event_count: int, msg_types: Dict[str, int], areas: Dict[str, int], lines: List[str]) -> None:
         self.total_batches += 1
@@ -1041,6 +1064,11 @@ def _init_colors() -> None:
         curses.init_pair(CP_CB, curses.COLOR_YELLOW, -1)
         curses.init_pair(CP_OTHER, curses.COLOR_WHITE, -1)
         curses.init_pair(CP_ALERT_BG, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+
+        # Confidence color pairs used by the mapper (21=high, 22=med, 23=low)
+        curses.init_pair(21, curses.COLOR_GREEN, -1)
+        curses.init_pair(22, curses.COLOR_YELLOW, -1)
+        curses.init_pair(23, curses.COLOR_RED, -1)
 
     except Exception:
         pass
@@ -1204,18 +1232,31 @@ def _live_query(
 # Rendering views
 # ----------------------------
 
-def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: str, selected_idx: int, y0: int, body_h: int, w: int):
+def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: Optional[str], selected_idx: int, y0: int, body_h: int, w: int):
     win = stdscr.derwin(body_h, w, y0, 0)
     win.erase()
 
-    title = f" Signal Mapper  td_area={td_area}  (berth edge -> top signal candidates) "
+    sort_label = {
+        "conf": "Confidence",
+        "obs": "Observations",
+        "age": "Recency",
+        "edge": "Edge (A-Z)",
+    }.get(state.mapper_sort_mode, state.mapper_sort_mode)
+
+    title = f" Signal Mapper  td_area={td_area or 'ALL'}  sort={sort_label}  (s=cycle sort) "
     try:
         _draw_box_title(win, title, _cattr(CP_TITLE))
     except curses.error:
         pass
 
     max_rows = max(0, body_h - 3)
-    edges = fetch_mapper_edges(conn, td_area=td_area, top_k=6, max_edges=max_rows)
+    edges = fetch_mapper_edges(
+        conn,
+        td_area=td_area,
+        top_k=6,
+        max_edges=max_rows,
+        sort_mode=state.mapper_sort_mode,
+    )
 
     if not edges:
         try:
@@ -1230,20 +1271,20 @@ def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: str, selec
     edge_w = 12
     bar_w = 10
     tail_w = 18
-    cand_w = max(10, w - (edge_w + bar_w + tail_w + 6))
+    cand_w = max(10, w - (edge_w + bar_w + tail_w + 8)) - 1
 
     y = 1
     hdr = f"{'EDGE':<{edge_w}}  {'CONF':<{bar_w}}  {'CANDIDATES':<{cand_w}}  {'DATA/AGE/OBS':<{tail_w}}"
     try:
         win.attron(curses.A_DIM)
-        win.addnstr(y, 2, hdr.ljust(w), w-3)
+        win.addnstr(y, 2, hdr.ljust(w - 3), w - 3)
         win.attroff(curses.A_DIM)
     except curses.error:
         pass
 
     for i, (fb, tb, cands) in enumerate(edges[:max_rows]):
         y = 2 + i
-        if y >= body_h:
+        if y >= body_h - 1:
             break
 
         if i == selected_idx:
@@ -1261,7 +1302,7 @@ def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: str, selec
         bar = _bar(conf, bar_w)
         try:
             win.attron(curses.color_pair(_conf_color(conf)))
-            win.addnstr(y, edge_w + 2, bar, bar_w-2)
+            win.addnstr(y, 2 + edge_w + 2, bar, bar_w)
             win.attroff(curses.color_pair(_conf_color(conf)))
         except curses.error:
             pass
@@ -1276,7 +1317,7 @@ def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: str, selec
         try:
             if best:
                 win.attron(curses.color_pair(_conf_color(best.conf)))
-            win.addnstr(y, edge_w + 2 + bar_w + 2, cand_str, cand_w)
+            win.addnstr(y, 2 + edge_w + 2 + bar_w + 2, cand_str, cand_w)
             if best:
                 win.attroff(curses.color_pair(_conf_color(best.conf)))
         except curses.error:
@@ -1289,7 +1330,7 @@ def _draw_signal_mapper(stdscr, conn, state: DashboardState, td_area: str, selec
 
         try:
             win.attron(curses.A_DIM)
-            win.addnstr(y, edge_w + 2 + bar_w + 2 + cand_w + 2, tail, tail_w-2)
+            win.addnstr(y, 2 + edge_w + 2 + bar_w + 2 + cand_w + 2, tail, tail_w)
             win.attroff(curses.A_DIM)
         except curses.error:
             pass
@@ -1485,6 +1526,8 @@ def _render_footer(stdscr, h: int, w: int, state: DashboardState) -> None:
     footer = stdscr.derwin(1, w, h - 1, 0)
     if state.view == VIEW_DASHBOARD:
         help_txt = "Keys: q quit | TAB/1-5 views | p pause | c clear log | r reset | / filter (live) | x clear filter"
+    elif state.view == VIEW_SIGNALS:
+        help_txt = "Keys: q quit | TAB/1-5 views | p pause | s cycle sort"
     else:
         help_txt = "Keys: q quit | TAB/1-5 views | p pause | / filter | x clear filter | ESC cancel | ENTER apply"
     _safe_addstr(footer, 0, 1, help_txt[: max(0, w - 2)], _cattr(CP_DIM))
@@ -1547,6 +1590,13 @@ def dashboard_loop(
                 if ch in (ord("x"), ord("X")):
                     state.filter_text = ""
                     state.live_last_poll = 0.0
+
+                # Cycle mapper sort mode when in VIEW_SIGNALS
+                if ch in (ord("s"), ord("S")):
+                    if state.view == VIEW_SIGNALS:
+                        modes = ["conf", "obs", "age", "edge"]
+                        idx = modes.index(state.mapper_sort_mode) if state.mapper_sort_mode in modes else 0
+                        state.mapper_sort_mode = modes[(idx + 1) % len(modes)]
 
                 if state.view == VIEW_DASHBOARD:
                     if ch in (ord("c"), ord("C")):
