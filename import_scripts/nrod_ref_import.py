@@ -373,6 +373,77 @@ def maybe_rebuild(conn: sqlite3.Connection) -> None:
     init_schema(conn)
 
 
+def _out_path_for_dataset(outdir: str, dataset: str) -> str:
+    """Helper to determine output file path for a dataset."""
+    return os.path.join(outdir, f"{dataset}.json")
+
+
+def run_imports(
+    db_path: str,
+    datasets: list[str],
+    username: str,
+    password: str,
+    outdir: str,
+    download: bool = True,
+    rebuild: bool = False,
+) -> Dict[str, Any]:
+    """
+    High-level function to run imports for specified datasets.
+    
+    Args:
+        db_path: Path to SQLite database
+        datasets: List of dataset names (e.g. ["CORPUS", "SMART"])
+        username: Network Rail username
+        password: Network Rail password
+        outdir: Directory for downloaded files
+        download: If True, download files; if False, use existing files
+        rebuild: If True, drop and recreate tables before importing
+    
+    Returns:
+        Dict with summary of imports, e.g.:
+        {
+            "db_path": "/path/to/db",
+            "datasets": {
+                "CORPUS": {"TIPLOCDATA": 12345, "STANOXDATA": 678, "CRSDATA": 234},
+                "SMART": {"BERTHDATA": 56789}
+            }
+        }
+    """
+    os.makedirs(outdir, exist_ok=True)
+    
+    conn = connect_db(db_path)
+    init_schema(conn)
+    if rebuild:
+        maybe_rebuild(conn)
+    
+    summary = {"db_path": os.path.abspath(db_path), "datasets": {}}
+    
+    for ds in datasets:
+        url = URL_TEMPLATE.format(type=ds)
+        out_path = _out_path_for_dataset(outdir, ds)
+        
+        if download:
+            download_file(url, username, password, out_path)
+            record_download_meta(conn, ds, url, out_path)
+        else:
+            if not os.path.exists(out_path):
+                raise FileNotFoundError(f"download=False but file not found: {out_path}")
+        
+        data = read_json_file(out_path)
+        
+        if ds == "CORPUS":
+            counts = import_corpus(conn, data)
+            summary["datasets"][ds] = counts
+        elif ds == "SMART":
+            count = import_smart(conn, data)
+            summary["datasets"][ds] = {"BERTHDATA": count}
+        else:
+            summary["datasets"][ds] = {"error": "unsupported dataset"}
+    
+    conn.close()
+    return summary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Download and import Network Rail CORPUS + SMART reference data into SQLite."
@@ -387,39 +458,38 @@ def main() -> int:
     args = ap.parse_args()
 
     datasets = [d.strip().upper() for d in args.datasets.split(",") if d.strip()]
-    os.makedirs(args.outdir, exist_ok=True)
-
-    conn = connect_db(args.db)
-    init_schema(conn)
-    if args.rebuild:
-        maybe_rebuild(conn)
-
+    
+    # Print progress messages for CLI usage
     for ds in datasets:
-        url = URL_TEMPLATE.format(type=ds)
-        out_path = os.path.join(args.outdir, f"{ds}.json")
-
         if not args.no_download:
-            print(f"[{ds}] downloading: {url}")
-            download_file(url, args.username, args.password, out_path)
-            record_download_meta(conn, ds, url, out_path)
-            print(f"[{ds}] saved: {out_path}")
+            print(f"[{ds}] downloading: {URL_TEMPLATE.format(type=ds)}")
         else:
+            out_path = _out_path_for_dataset(args.outdir, ds)
             if not os.path.exists(out_path):
-                raise FileNotFoundError(f"--no-download set but file not found: {out_path}")
-
-        print(f"[{ds}] parsing JSON...")
-        data = read_json_file(out_path)
-
-        if ds == "CORPUS":
-            counts = import_corpus(conn, data)
-            print(f"[{ds}] imported TIPLOCDATA={counts['TIPLOCDATA']}, STANOXDATA={counts['STANOXDATA']}, CRSDATA={counts['CRSDATA']}")
-        elif ds == "SMART":
-            count = import_smart(conn, data)
-            print(f"[{ds}] imported BERTHDATA rows={count}")
-        else:
-            print(f"[{ds}] unsupported dataset (supported: CORPUS, SMART). Skipping.")
-
-    print(f"Done. DB: {os.path.abspath(args.db)}")
+                print(f"ERROR: --no-download set but file not found: {out_path}")
+                return 1
+    
+    # Use run_imports to do the actual work
+    summary = run_imports(
+        db_path=args.db,
+        datasets=datasets,
+        username=args.username,
+        password=args.password,
+        outdir=args.outdir,
+        download=not args.no_download,
+        rebuild=args.rebuild,
+    )
+    
+    # Print summary for CLI usage
+    for ds, result in summary["datasets"].items():
+        if ds == "CORPUS" and "TIPLOCDATA" in result:
+            print(f"[{ds}] imported TIPLOCDATA={result['TIPLOCDATA']}, STANOXDATA={result['STANOXDATA']}, CRSDATA={result['CRSDATA']}")
+        elif ds == "SMART" and "BERTHDATA" in result:
+            print(f"[{ds}] imported BERTHDATA rows={result['BERTHDATA']}")
+        elif "error" in result:
+            print(f"[{ds}] {result['error']}")
+    
+    print(f"Done. DB: {summary['db_path']}")
     return 0
 
 
