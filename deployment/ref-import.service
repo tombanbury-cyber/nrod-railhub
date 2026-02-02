@@ -26,7 +26,9 @@ Environment="REF_IMPORT_INTERVAL=86400"
 Environment="DATASETS=CORPUS,SMART"
 
 # Execute the service
+# Note: Update path to use venv if you installed with virtual environment
 ExecStart=/usr/bin/python3 -m nrod_railhub.services.ref_import_service
+# Or with venv: ExecStart=/opt/nrod-railhub/venv/bin/python3 -m nrod_railhub.services.ref_import_service
 
 # Restart policy
 Restart=on-failure

@@ -55,7 +55,7 @@ class RefImportService:
         username: str,
         password: str,
         outdir: str = "nrod_ref_downloads",
-        interval: int = 86400,  # 24 hours
+        interval: int = 86400,  # 24 hours (86400 seconds)
         datasets: Optional[list[str]] = None,
     ):
         """

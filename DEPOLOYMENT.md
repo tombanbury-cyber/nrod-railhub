@@ -122,7 +122,17 @@ sudo cp nrod_railhub.py /opt/nrod-railhub/
 sudo chown -R railhub:railhub /opt/nrod-railhub /var/lib/nrod-railhub
 
 # Install dependencies
-sudo pip3 install stomp. py flask
+# Option 1: Using virtual environment (recommended)
+cd /opt/nrod-railhub
+sudo -u railhub python3 -m venv venv
+sudo -u railhub venv/bin/pip install stomp.py flask requests
+# Then update ExecStart in unit file to use: /opt/nrod-railhub/venv/bin/python3
+
+# Option 2: Using system packages (if available)
+# sudo apt-get install python3-stomp.py python3-flask python3-requests
+
+# Option 3: Global install (not recommended for production)
+# sudo pip3 install stomp. py flask
 
 # Enable and start
 sudo systemctl daemon-reload

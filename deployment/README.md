@@ -21,7 +21,16 @@ sudo cp -r import_scripts /opt/nrod-railhub/
 sudo chown -R railhub:railhub /opt/nrod-railhub /var/lib/nrod-railhub
 
 # Install Python dependencies
-sudo pip3 install stomp.py flask requests
+# Option 1: Using virtual environment (recommended)
+cd /opt/nrod-railhub
+sudo -u railhub python3 -m venv venv
+sudo -u railhub venv/bin/pip install stomp.py flask requests
+
+# Option 2: Using system packages (if available)
+# sudo apt-get install python3-stomp.py python3-flask python3-requests
+
+# Option 3: Global install (not recommended for production)
+# sudo pip3 install stomp.py flask requests
 ```
 
 ### 2. Configure and install the service
@@ -134,7 +143,9 @@ sudo journalctl -u ref-import -n 50
 Common issues:
 - Missing credentials → Set `NR_USERNAME` and `NR_PASSWORD`
 - Permission denied → Check `chown -R railhub:railhub /var/lib/nrod-railhub`
-- Python module not found → Run `sudo pip3 install stomp.py flask requests`
+- Python module not found → Install dependencies (see setup instructions)
+  - With venv: `sudo -u railhub /opt/nrod-railhub/venv/bin/pip install stomp.py flask requests`
+  - System packages: `sudo apt-get install python3-stomp.py python3-flask python3-requests`
 
 ### Import failures
 
