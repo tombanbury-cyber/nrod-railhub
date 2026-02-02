@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import html
+from html import escape as html_escape
 import os
 import pathlib
 import sqlite3
@@ -383,11 +383,11 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 table_check = q(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
                 if table_check:
                     count = q(f"SELECT COUNT(*) as cnt FROM {table}")[0]['cnt']
-                    html.append(f"<tr><td>{html.escape(table)}</td><td>{count:,}</td></tr>")
+                    html.append(f"<tr><td>{html_escape(table)}</td><td>{count:,}</td></tr>")
                 else:
-                    html.append(f"<tr><td>{html.escape(table)}</td><td class='dim'>N/A (table not found)</td></tr>")
+                    html.append(f"<tr><td>{html_escape(table)}</td><td class='dim'>N/A (table not found)</td></tr>")
             except Exception as e:
-                html.append(f"<tr><td>{html.escape(table)}</td><td class='dim'>Error: {html.escape(str(e))}</td></tr>")
+                html.append(f"<tr><td>{html_escape(table)}</td><td class='dim'>Error: {html_escape(str(e))}</td></tr>")
         
         html.append("</table>")
         html.append("</div>")
