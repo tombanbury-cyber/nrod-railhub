@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 import pathlib
 import sqlite3
@@ -17,6 +18,15 @@ def hex_to_bits(hex_str: str) -> str:
         return format(b, "08b")  # 8 bits
     except Exception:
         return ""
+
+
+def validate_table_name(table_name: str) -> bool:
+    """Validate that table name is from our known safe list."""
+    allowed_tables = {
+        "td_state", "td_event", "td_events", "trust_state", "vstp_state",
+        "berth_signal_scores", "berth_signal_observations"
+    }
+    return table_name in allowed_tables
 
 
 def start_web_dashboard(db_path: str, port: int) -> None:
@@ -217,13 +227,13 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         except Exception:
             pass
         
-        if not table_name:
+        if not table_name or not validate_table_name(table_name):
             html.append("<p><i>No TD events table found (td_events or td_event).</i></p>")
             html.append("</body></html>")
             return "\n".join(html)
         
         try:
-            # Determine column names based on table
+            # Determine column names based on table (validated above)
             if table_name == "td_events":
                 timestamp_col = "received_at_utc"
                 descr_col = "descr"
@@ -366,15 +376,18 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         ]
         
         for table in tables_to_check:
+            # All tables in tables_to_check are validated by validate_table_name
+            if not validate_table_name(table):
+                continue
             try:
                 table_check = q(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
                 if table_check:
                     count = q(f"SELECT COUNT(*) as cnt FROM {table}")[0]['cnt']
-                    html.append(f"<tr><td>{table}</td><td>{count:,}</td></tr>")
+                    html.append(f"<tr><td>{html.escape(table)}</td><td>{count:,}</td></tr>")
                 else:
-                    html.append(f"<tr><td>{table}</td><td class='dim'>N/A (table not found)</td></tr>")
+                    html.append(f"<tr><td>{html.escape(table)}</td><td class='dim'>N/A (table not found)</td></tr>")
             except Exception as e:
-                html.append(f"<tr><td>{table}</td><td class='dim'>Error: {e}</td></tr>")
+                html.append(f"<tr><td>{html.escape(table)}</td><td class='dim'>Error: {html.escape(str(e))}</td></tr>")
         
         html.append("</table>")
         html.append("</div>")
