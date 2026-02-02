@@ -10,7 +10,80 @@ python3 nrod_railhub.py --user USER --password PASS \
 
 ## Production Deployment
 
-### Option 1: Systemd Service (Recommended for Linux)
+### Reference Data Import Service
+
+The application relies on Network Rail's CORPUS (location data) and SMART (berth stepping) reference data. You can run a continuous background service to keep this data up-to-date.
+
+#### Systemd Service for Reference Imports
+
+The reference import service runs continuously, updating CORPUS and SMART data on a configurable interval (default: 24 hours).
+
+**Setup:**
+
+```bash
+# Create user (if not already created)
+sudo useradd -r -s /bin/false railhub
+
+# Install application
+sudo mkdir -p /opt/nrod-railhub /var/lib/nrod-railhub
+sudo cp -r nrod_railhub /opt/nrod-railhub/
+sudo cp -r import_scripts /opt/nrod-railhub/
+sudo chown -R railhub:railhub /opt/nrod-railhub /var/lib/nrod-railhub
+
+# Install dependencies
+sudo pip3 install stomp.py flask requests
+
+# Copy systemd unit file
+sudo cp deployment/ref-import.service /etc/systemd/system/
+
+# Edit the unit file to set your credentials
+sudo nano /etc/systemd/system/ref-import.service
+# Update NR_USERNAME and NR_PASSWORD with your Network Rail credentials
+
+# Enable and start the service
+sudo systemctl daemon-reload
+sudo systemctl enable ref-import
+sudo systemctl start ref-import
+
+# Check status
+sudo systemctl status ref-import
+sudo journalctl -u ref-import -f
+```
+
+**Configuration:**
+
+Edit `/etc/systemd/system/ref-import.service` to configure:
+
+- `NR_USERNAME` - Your Network Rail username (required)
+- `NR_PASSWORD` - Your Network Rail password (required)
+- `DB_PATH` - SQLite database path (default: `/var/lib/nrod-railhub/nrod_ref.sqlite`)
+- `OUTDIR` - Download directory (default: `/var/lib/nrod-railhub/ref_downloads`)
+- `REF_IMPORT_INTERVAL` - Import interval in seconds (default: `86400` = 24 hours)
+- `DATASETS` - Datasets to import (default: `CORPUS,SMART`)
+
+**Using the same database with the main application:**
+
+Both the reference import service and the main nrod-railhub application use SQLite with WAL (Write-Ahead Logging) mode enabled. This allows:
+
+- Multiple readers concurrently
+- One writer at a time (serialized automatically)
+- No blocking between readers and the writer
+
+The main application can read location data from the same database that the import service writes to. Just point both services to the same `DB_PATH`.
+
+**Manual import:**
+
+If you prefer manual updates instead of a continuous service:
+
+```bash
+python3 import_scripts/nrod_ref_import.py \
+  --db /var/lib/nrod-railhub/nrod_ref.sqlite \
+  --username your.email@example.com \
+  --password yourpassword \
+  --outdir /var/lib/nrod-railhub/ref_downloads
+```
+
+### Option 1: Systemd Service for Main Application (Recommended for Linux)
 
 Create `/etc/systemd/system/nrod-railhub.service`:
 
@@ -49,7 +122,17 @@ sudo cp nrod_railhub.py /opt/nrod-railhub/
 sudo chown -R railhub:railhub /opt/nrod-railhub /var/lib/nrod-railhub
 
 # Install dependencies
-sudo pip3 install stomp. py flask
+# Option 1: Using virtual environment (recommended)
+cd /opt/nrod-railhub
+sudo -u railhub python3 -m venv venv
+sudo -u railhub venv/bin/pip install stomp.py flask requests
+# Then update ExecStart in unit file to use: /opt/nrod-railhub/venv/bin/python3
+
+# Option 2: Using system packages (if available)
+# sudo apt-get install python3-stomp.py python3-flask python3-requests
+
+# Option 3: Global install (not recommended for production)
+# sudo pip3 install stomp. py flask
 
 # Enable and start
 sudo systemctl daemon-reload
@@ -245,6 +328,42 @@ sudo journalctl -u nrod-railhub -f --output=json | \
 Or configure syslog forwarding to ELK/Graylog. 
 
 ## Database Maintenance
+
+### SQLite WAL Mode and Concurrent Access
+
+The application uses SQLite with WAL (Write-Ahead Logging) mode for better concurrency:
+
+**Benefits:**
+- Multiple processes can read simultaneously without blocking
+- Writers don't block readers
+- Better performance for concurrent workloads
+- Automatic crash recovery
+
+**How it works:**
+- Both `RailDB` (in `nrod_railhub/database.py`) and the reference import service automatically enable WAL mode
+- The import service can update reference data while the main app reads it
+- All connections set `busy_timeout=5000` to handle brief lock contention
+
+**Verify WAL mode:**
+
+```bash
+sqlite3 /var/lib/nrod-railhub/rail.db "PRAGMA journal_mode;"
+# Should output: wal
+```
+
+**Checkpointing:**
+
+WAL mode creates `-wal` and `-shm` files alongside the main database. SQLite automatically checkpoints (merges WAL into main DB) periodically. You can force a checkpoint:
+
+```bash
+sqlite3 /var/lib/nrod-railhub/rail.db "PRAGMA wal_checkpoint(TRUNCATE);"
+```
+
+**Best practices:**
+- Use a single writer per database (reference import service OR manual import, not both simultaneously)
+- Multiple readers are safe and encouraged
+- Network filesystems (NFS, SMB) are not recommended with WAL mode
+- Local SSD/HDD filesystems work best
 
 ### Backup
 
