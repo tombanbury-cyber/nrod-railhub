@@ -21,6 +21,8 @@ class RailDB:
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._init_schema()
+        if enable_mapper:
+            self.ensure_mapper_schema()
 
     def _init_schema(self) -> None:
         with self._conn:
