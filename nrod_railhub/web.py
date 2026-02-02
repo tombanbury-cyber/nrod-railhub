@@ -107,20 +107,25 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         for r in rows:
             # Build schedule string similar to original
             sched = ""
-            if r.get("sched_dep") or r.get("sched_arr"):
-                sched = f"{r.get('sched_dep') or ''}→{r.get('sched_arr') or ''} {r.get('origin_name') or ''}→{r.get('dest_name') or ''}"
+            sched_dep = r["sched_dep"] if "sched_dep" in r.keys() and r["sched_dep"] else None
+            sched_arr = r["sched_arr"] if "sched_arr" in r.keys() and r["sched_arr"] else None
+            if sched_dep or sched_arr:
+                origin = r["origin_name"] if "origin_name" in r.keys() and r["origin_name"] else ""
+                dest = r["dest_name"] if "dest_name" in r.keys() and r["dest_name"] else ""
+                sched = f"{sched_dep or ''}→{sched_arr or ''} {origin}→{dest}"
             # Build location string similar to original
-            loc = r.get("location_name") or ""
-            if r.get("stanox"):
-                loc = f"{loc} ({r['stanox']})".strip()
+            loc = r["location_name"] if "location_name" in r.keys() and r["location_name"] else ""
+            stanox = r["stanox"] if "stanox" in r.keys() and r["stanox"] else ""
+            if stanox:
+                loc = f"{loc} ({stanox})".strip()
             body.append("<tr>" + "".join([
                 f"<td>{r['td_area']}</td>",
                 f"<td><a href='/train?area={r['td_area']}&hc={r['headcode']}'>{r['headcode']}</a></td>",
-                f"<td class='mono dim'>{r.get('last_time_utc','')}</td>",
-                f"<td>{r.get('from_berth','')}</td>",
-                f"<td>{r.get('to_berth','')}</td>",
+                f"<td class='mono dim'>{r['last_time_utc'] if r['last_time_utc'] else ''}</td>",
+                f"<td>{r['from_berth'] if r['from_berth'] else ''}</td>",
+                f"<td>{r['to_berth'] if r['to_berth'] else ''}</td>",
                 f"<td>{loc}</td>",
-                f"<td>{r.get('platform','')}</td>",
+                f"<td>{r['platform'] if 'platform' in r.keys() and r['platform'] else ''}</td>",
                 f"<td>{sched}</td>",
             ]) + "</tr>")
         body.append("</table>")
@@ -162,12 +167,19 @@ def start_web_dashboard(db_path: str, port: int) -> None:
 
     @app.get("/signals")
     def signals():
-        # Reuse existing query from previous implementation
-        rows = q("SELECT * FROM trust_state ORDER BY td_area, headcode LIMIT 500")
+        # Query trust_state table for signal data
+        rows = q("SELECT * FROM trust_state ORDER BY headcode LIMIT 500")
         body = ["<h2>Signal Mapper</h2>"]
-        body.append("<table><tr><th>Area</th><th>Headcode</th><th>Data</th></tr>")
+        body.append("<table><tr><th>Train ID</th><th>Headcode</th><th>UID</th><th>TOC</th><th>Last Event</th><th>Location</th><th>Delay</th></tr>")
         for r in rows:
-            body.append(f"<tr><td>{r['td_area']}</td><td>{r['headcode']}</td><td class='mono dim'>{r.get('data','')}</td></tr>")
+            train_id = r["train_id"] if "train_id" in r.keys() and r["train_id"] else ""
+            headcode = r["headcode"] if "headcode" in r.keys() and r["headcode"] else ""
+            uid = r["uid"] if "uid" in r.keys() and r["uid"] else ""
+            toc_id = r["toc_id"] if "toc_id" in r.keys() and r["toc_id"] else ""
+            last_event = r["last_event_time"] if "last_event_time" in r.keys() and r["last_event_time"] else ""
+            last_loc = r["last_location"] if "last_location" in r.keys() and r["last_location"] else ""
+            delay = r["last_delay_min"] if "last_delay_min" in r.keys() and r["last_delay_min"] else ""
+            body.append(f"<tr><td class='mono dim'>{train_id}</td><td>{headcode}</td><td>{uid}</td><td>{toc_id}</td><td class='mono dim'>{last_event}</td><td>{last_loc}</td><td>{delay}</td></tr>")
         body.append("</table>")
         return render_page("Signals - NR RailHub", body, active="signals")
 
