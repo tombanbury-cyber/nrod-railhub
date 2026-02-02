@@ -12,7 +12,7 @@ from typing import Optional
 class RailDB:
     """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history."""
 
-    def __init__(self, path: str, enable_mapper: bool = False) -> None:
+    def __init__(self, path: str, enable_mapper: bool = True) -> None:
         self.path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
