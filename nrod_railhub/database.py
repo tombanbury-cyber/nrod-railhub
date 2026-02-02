@@ -150,3 +150,57 @@ class RailDB:
                 """,
                 (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':'))),
             )
+
+    
+    
+    def ensure_mapper_schema(self) -> None:
+        """Create berth signal mapper tables if they don't exist."""
+        with self._conn:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS berth_signal_observations (
+                    id INTEGER PRIMARY KEY,
+                    td_area TEXT NOT NULL,
+                    step_event_id INTEGER,
+                    step_timestamp INTEGER,
+                    from_berth TEXT,
+                    to_berth TEXT,
+                    descr TEXT,
+                    signal_event_id INTEGER,
+                    signal_timestamp INTEGER,
+                    address TEXT NOT NULL,
+                    data TEXT,
+                    dt_ms INTEGER NOT NULL,
+                    weight REAL NOT NULL,
+                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_bso_edge
+                ON berth_signal_observations(td_area, from_berth, to_berth, step_timestamp);
+                
+                CREATE INDEX IF NOT EXISTS idx_bso_addr
+                ON berth_signal_observations(td_area, address, signal_timestamp);
+                
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_bso_unique
+                ON berth_signal_observations(td_area, step_timestamp, signal_timestamp, address);
+                
+                CREATE TABLE IF NOT EXISTS berth_signal_scores (
+                    td_area TEXT NOT NULL,
+                    from_berth TEXT NOT NULL,
+                    to_berth TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    obs_count INTEGER NOT NULL DEFAULT 1,
+                    last_seen_ts INTEGER,
+                    last_seen_utc TEXT NOT NULL,
+                    last_data TEXT,
+                    PRIMARY KEY (td_area, from_berth, to_berth, address)
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_bss_edge
+                ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
+            """)
+    
+    
+
+
