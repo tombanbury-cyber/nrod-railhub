@@ -245,7 +245,7 @@ def parse_args() -> argparse.Namespace:
                    help="SQLite database path for state/event storage (enables DB output)")
     p.add_argument("--web-port", type=int, default=8088,
                    help="If set and --db-path is provided, start tiny web dashboard on this port")
-    p.add_argument("--enable-mapper", action="store_true", default=True
+    p.add_argument("--enable-mapper", action="store_true", default=True,
                    help="Enable berth-to-signal correlation mapper")
     
     return p.parse_args()
