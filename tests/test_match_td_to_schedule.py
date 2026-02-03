@@ -23,7 +23,7 @@ def test_match_via_trust_uid_vstp():
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
     hv.vstp_by_uid_date[("C12345", "2026-01-17")] = vs
-    hv.vstp_by_headcode["2C90"] = vs
+    hv.vstp_by_headcode["2C90"] = [vs]
 
     # Setup TRUST state with train_uid
     ts = TrustState(
@@ -65,7 +65,7 @@ def test_match_via_trust_uid_itps():
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
     hv.sched_by_uid_date[("C12345", "2026-01-17")] = itps
-    hv.sched_by_headcode["2C90"] = itps
+    hv.sched_by_headcode["2C90"] = [itps]
 
     # Setup TRUST state
     ts = TrustState(
@@ -112,7 +112,7 @@ def test_match_via_smart_stanox():
         start_date="2026-01-17",
         locations=[("MARGAT", "14:30", "14:31"), ("VICTRIC", "15:45", "")]
     )
-    hv.vstp_by_headcode["2C90"] = vs1  # First candidate
+    hv.vstp_by_headcode["2C90"] = [vs1]  # First candidate
 
     # Setup TD state
     td = TdState(
@@ -176,7 +176,7 @@ def test_match_via_time_proximity():
         start_date="2026-01-17",
         locations=[("MARGAT", "14:30", "14:31"), ("VICTRIC", "15:45", "")]
     )
-    hv.vstp_by_headcode["2C90"] = vs1  # First candidate
+    hv.vstp_by_headcode["2C90"] = [vs1]  # First candidate
 
     # Setup TD state with time closer to vs1
     td = TdState(
@@ -211,7 +211,7 @@ def test_match_ambiguous_fallback():
         start_date="2026-01-17",
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
-    hv.vstp_by_headcode["2C90"] = vs
+    hv.vstp_by_headcode["2C90"] = [vs]
 
     # Setup TD state without time
     td = TdState(
@@ -272,7 +272,7 @@ def test_match_without_td_state():
         start_date="2026-01-17",
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
-    hv.vstp_by_headcode["2C90"] = vs
+    hv.vstp_by_headcode["2C90"] = [vs]
 
     # Test matching without TD state - should still return schedule
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
@@ -303,7 +303,7 @@ def test_match_prefers_uid_over_stanox():
     )
     
     hv.vstp_by_uid_date[("C12345", "2026-01-17")] = vs_correct
-    hv.vstp_by_headcode["2C90"] = vs_wrong
+    hv.vstp_by_headcode["2C90"] = [vs_wrong]
 
     # Setup TRUST state with UID pointing to vs_correct
     ts = TrustState(
@@ -379,7 +379,7 @@ def test_tiploc_index_matching_with_reused_headcode():
     )
     
     # Both schedules are valid, first one is stored in headcode index
-    hv.sched_by_headcode["1P42"] = sched_kx_pboro
+    hv.sched_by_headcode["1P42"] = [sched_kx_pboro]
     hv.sched_by_uid_date[("P12345", "2026-01-17")] = sched_kx_pboro
     hv.sched_by_uid_date[("R67890", "2026-01-17")] = sched_ram_vic
     
