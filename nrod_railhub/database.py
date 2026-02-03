@@ -201,8 +201,190 @@ class RailDB:
                 
                 CREATE INDEX IF NOT EXISTS idx_bss_edge
                 ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
+                
+                CREATE TABLE IF NOT EXISTS mapper_config (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
             """)
+            # Set default mapper parameters if not exists
+            with self._conn:
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('pre_ms', 1000)
+                """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('post_ms', 5000)
+                """)
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('tau_ms', 2500)
+                """)
     
+    def get_mapper_config(self) -> dict:
+        """Get current mapper configuration parameters."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT key, value FROM mapper_config")
+            return {row[0]: row[1] for row in cursor.fetchall()}
     
+    def update_mapper_config(self, pre_ms: int, post_ms: int, tau_ms: int) -> None:
+        """Update mapper configuration parameters."""
+        with self._lock, self._conn:
+            self._conn.execute("""
+                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'
+            """, (pre_ms,))
+            self._conn.execute("""
+                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'
+            """, (post_ms,))
+            self._conn.execute("""
+                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'
+            """, (tau_ms,))
+    
+    def rebuild_mapper_scores(self, pre_ms: int, post_ms: int, tau_ms: int, td_area: Optional[str] = None, progress_callback=None) -> dict:
+        """
+        Rebuild berth_signal_scores from existing observations using new parameters.
+        
+        Args:
+            pre_ms: Pre-window in milliseconds
+            post_ms: Post-window in milliseconds
+            tau_ms: Tau for exponential weighting
+            td_area: Optional TD area filter (None = rebuild all areas)
+            progress_callback: Optional callback function(message: str) for progress updates
+        
+        Returns:
+            Dict with statistics: {'deleted': int, 'inserted': int, 'observations_processed': int}
+        """
+        from .mapper import process_batch_for_mapper
+        
+        with self._lock:
+            cursor = self._conn.cursor()
+            
+            # Get list of areas to process
+            if td_area:
+                areas = [td_area]
+            else:
+                cursor.execute("SELECT DISTINCT td_area FROM berth_signal_observations WHERE td_area IS NOT NULL ORDER BY td_area")
+                areas = [row[0] for row in cursor.fetchall()]
+            
+            if progress_callback:
+                progress_callback(f"Starting rebuild for {len(areas)} area(s) with pre_ms={pre_ms}, post_ms={post_ms}, tau_ms={tau_ms}")
+            
+            # Clear existing scores for the selected area(s)
+            if td_area:
+                cursor.execute("DELETE FROM berth_signal_scores WHERE td_area=?", (td_area,))
+                deleted = cursor.rowcount
+            else:
+                cursor.execute("DELETE FROM berth_signal_scores")
+                deleted = cursor.rowcount
+            
+            if progress_callback:
+                progress_callback(f"Cleared {deleted} existing score entries")
+            
+            total_observations = 0
+            total_inserted = 0
+            
+            for area in areas:
+                if progress_callback:
+                    progress_callback(f"Processing area: {area}")
+                
+                # Fetch all observations for this area
+                cursor.execute("""
+                    SELECT 
+                        td_area, step_timestamp, from_berth, to_berth, descr,
+                        signal_timestamp, address, data,
+                        dt_ms, weight
+                    FROM berth_signal_observations
+                    WHERE td_area=?
+                    ORDER BY step_timestamp
+                """, (area,))
+                
+                obs_rows = cursor.fetchall()
+                total_observations += len(obs_rows)
+                
+                if progress_callback:
+                    progress_callback(f"  Found {len(obs_rows)} observations")
+                
+                # Convert to event format for reprocessing
+                events = []
+                for row in obs_rows:
+                    td_area_val, step_ts, from_b, to_b, descr, sig_ts, addr, data, dt_ms, weight = row
+                    
+                    # Add step event
+                    if step_ts and from_b and to_b:
+                        events.append({
+                            'msg_ts': step_ts,
+                            'msg_type': 'CA',  # Assume CA for steps
+                            'td_area': td_area_val,
+                            'from_berth': from_b,
+                            'to_berth': to_b,
+                            'descr': descr,
+                            'address': None,
+                            'data': None,
+                            'received_at_utc': None
+                        })
+                    
+                    # Add signal event
+                    if sig_ts and addr:
+                        events.append({
+                            'msg_ts': sig_ts,
+                            'msg_type': 'SF',
+                            'td_area': td_area_val,
+                            'from_berth': None,
+                            'to_berth': None,
+                            'descr': None,
+                            'address': addr,
+                            'data': data,
+                            'received_at_utc': None
+                        })
+                
+                # Deduplicate events by key
+                seen = set()
+                unique_events = []
+                for e in events:
+                    key = (e['msg_type'], e['msg_ts'], e.get('address'), e.get('from_berth'), e.get('to_berth'))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_events.append(e)
+                
+                if unique_events:
+                    # Reprocess with new parameters
+                    _, score_rows = process_batch_for_mapper(
+                        unique_events,
+                        pre_ms=pre_ms,
+                        post_ms=post_ms,
+                        tau_ms=tau_ms
+                    )
+                    
+                    if score_rows:
+                        # Insert new scores (accumulate if duplicate)
+                        cursor.executemany("""
+                            INSERT INTO berth_signal_scores (
+                                td_area, from_berth, to_berth, address, score, last_seen_ts, last_seen_utc, last_data
+                            )
+                            VALUES (?,?,?,?,?,?,?,?)
+                            ON CONFLICT(td_area, from_berth, to_berth, address)
+                            DO UPDATE SET
+                                score = score + excluded.score,
+                                obs_count = obs_count + 1,
+                                last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
+                                last_seen_utc = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_utc ELSE last_seen_utc END,
+                                last_data = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_data ELSE last_data END
+                        """, score_rows)
+                        
+                        total_inserted += len(score_rows)
+                        
+                        if progress_callback:
+                            progress_callback(f"  Generated {len(score_rows)} score entries")
+            
+            self._conn.commit()
+            
+            if progress_callback:
+                progress_callback(f"Rebuild complete: processed {total_observations} observations, generated {total_inserted} score entries")
+            
+            return {
+                'deleted': deleted,
+                'inserted': total_inserted,
+                'observations_processed': total_observations
+            }
 
 
