@@ -249,12 +249,18 @@ class SmartResolver:
         self._db_conn = None
         
         # Initialize database connection if path provided
+        # Note: check_same_thread=False is used because SmartResolver lookup may be called
+        # from different threads (e.g., STOMP receiver thread). The connection is read-only
+        # and SQLite supports concurrent reads safely.
         if db_path:
             import sqlite3
+            import logging
+            logger = logging.getLogger(__name__)
             try:
                 self._db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5.0)
                 self._db_conn.row_factory = sqlite3.Row
-            except Exception:
+            except Exception as e:
+                logger.warning(f"SmartResolver: Failed to connect to database {db_path}: {e}")
                 self._db_conn = None  # Silently fail; fallback won't work but SMART will
 
     def load_or_download(
@@ -458,6 +464,9 @@ class SmartResolver:
         if not self._db_conn:
             return None
         
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
             cursor = self._db_conn.cursor()
             
@@ -465,7 +474,7 @@ class SmartResolver:
             # We look for berths appearing in either from_berth or to_berth position
             # and pick the highest-scoring association
             cursor.execute("""
-                SELECT DISTINCT
+                SELECT
                     bss.td_area,
                     COALESCE(bss.from_berth, bss.to_berth) as berth,
                     ct.stanox,
@@ -489,9 +498,9 @@ class SmartResolver:
                     "event": "INFERRED",  # Mark as inferred to distinguish from SMART
                     "confidence": float(row['score']) if row['score'] else 0.0,
                 }
-        except Exception:
-            # Silently fail on database errors; don't crash the resolver
-            pass
+        except Exception as e:
+            # Log database errors but don't crash the resolver
+            logger.debug(f"SmartResolver: Failed to query inferred berth for {td_area}:{berth}: {e}")
         
         return None
 
@@ -730,10 +739,8 @@ class TdAreaResolver:
         "YR": "York",
     }
     
-    def __init__(self) -> None:
-        pass
-    
-    def name_for_td_area(self, code: str) -> str:
+    @classmethod
+    def name_for_td_area(cls, code: str) -> str:
         """Get human-readable name for TD area code.
         
         Args:
@@ -742,7 +749,7 @@ class TdAreaResolver:
         Returns:
             Human-readable name, or empty string if not found
         """
-        return self.TD_AREA_NAMES.get((code or "").strip().upper(), "")
+        return cls.TD_AREA_NAMES.get((code or "").strip().upper(), "")
 
 
 class ScheduleResolver:
