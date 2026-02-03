@@ -272,13 +272,13 @@ class Listener(stomp.ConnectionListener):
                 if self.args.td_area and td.area_id and td.area_id not in self.args.td_area:
                     continue
 
-                # Persist berth events
+                # Persist berth events and update TD state
                 if self.db:
                     try:
                         ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
                         ts_iso = ms_to_iso_utc(ts_ms)
                         
-                        # C-Class: berth stepping events
+                        # Insert berth event record
                         if msg_type in ("CA", "CB", "CC"):
                             if td.area_id and td.descr:
                                 self.db.insert_td_berth_event(
@@ -292,7 +292,7 @@ class Listener(stomp.ConnectionListener):
                                     descr=td.descr
                                 )
                         
-                        # Update TD state for berth events
+                        # Update current TD state with enriched location/schedule data
                         if msg_type in ("CA", "CB", "CC") and td.area_id and td.descr:
                             # Enrich via HumanView render context
                             loc = self.hv.decode_last_location(td.area_id, td.descr)
