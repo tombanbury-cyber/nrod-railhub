@@ -155,7 +155,7 @@ Network Rail STOMP Feeds
 - **TIPLOC** - Timing Point Location code (e.g. `CLPHMJC` = Clapham Junction)
 - **STANOX** - Station Number (e.g. `87701` = Clapham Junction)
 - **CRS** - 3-letter station code (e.g. `WAT` = Waterloo)
-- **TD Area** - Signalling control area (e.g. `EK` = Eastleigh, `AD` = Ashford)
+- **TD Area** - Signalling control area (e.g. `EK` = East Kent, `AD` = Ashford)
 - **Berth** - Track circuit identifier within TD area
 
 ## Troubleshooting
@@ -194,6 +194,30 @@ Network Rail STOMP Feeds
 - Set `--no-schedule` for faster startup (disables timetable enrichment)
 - Limit `--td-area` to areas you care about
 - SQLite database grows ~1MB/day per active area
+
+## Enhanced Berth Resolution
+
+### TD Area Names
+The application includes a comprehensive TD area code mapping (200+ areas) based on the [Network Rail Open Data Wiki](https://wiki.openraildata.com/index.php/List_of_Train_Describers). Examples:
+- `EK` = East Kent (Gillingham)
+- `ER` = Eastleigh
+- `AD` = Ashford
+- `WL` = Waterloo
+
+### Inferred Berth Data
+When SMART reference data doesn't include a berth, the system automatically falls back to **inferred berth-signal mappings** derived from historical TD events. This:
+- Uses the `berth_signal_scores` table populated by the mapper
+- Correlates berth change events (CA) with signal events (SF)
+- Provides STANOX and location name even for berths not in official SMART data
+- Marked with `event="INFERRED"` to distinguish from official SMART entries
+
+**To enable inferred berth fallback:**
+```bash
+# Requires --db-path to be set (for database access)
+python3 nrod_railhub.py --user USER --password PASS --db-path rail.db --enable-mapper
+```
+
+The mapper processes TD events in real-time to build statistical correlations between berth steps and signal addresses.
 
 ## Contributing
 

@@ -46,7 +46,10 @@ def connect_and_run(args: argparse.Namespace) -> None:
         quiet=False,
     )
 
-    smart = SmartResolver()
+    # Get db_path early so we can pass it to SmartResolver for inferred berth fallback
+    db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
+
+    smart = SmartResolver(db_path=db_path)
     smart.load_or_download(
         username=args.user,
         password=args.password,
@@ -104,7 +107,6 @@ def connect_and_run(args: argparse.Namespace) -> None:
         vhost=args.vhost,
     )
 
-    db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
     db = RailDB(db_path, enable_mapper=args.enable_mapper) if db_path else None
     listener = Listener(hv, args, db=db)
     if args.web_port and db_path:

@@ -237,11 +237,31 @@ class LocationResolver:
 
 
 class SmartResolver:
-    """Loads SMART berth stepping reference data and provides TD+berth -> STANOX/platform/name."""
+    """Loads SMART berth stepping reference data and provides TD+berth -> STANOX/platform/name.
+    
+    Supports fallback to inferred berth-signal data from database when SMART data is unavailable.
+    """
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         # Keyed by (td_area, berth) e.g. ("AD","0152") -> dict with stanox/platform/stanme
         self.berth_map: Dict[Tuple[str, str], Dict[str, str]] = {}
+        self.db_path = db_path
+        self._db_conn = None
+        
+        # Initialize database connection if path provided
+        # Note: check_same_thread=False is used because SmartResolver lookup may be called
+        # from different threads (e.g., STOMP receiver thread). The connection is read-only
+        # and SQLite supports concurrent reads safely.
+        if db_path:
+            import sqlite3
+            import logging
+            logger = logging.getLogger(__name__)
+            try:
+                self._db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5.0)
+                self._db_conn.row_factory = sqlite3.Row
+            except Exception as e:
+                logger.warning(f"SmartResolver: Failed to connect to database {db_path}: {e}")
+                self._db_conn = None  # Silently fail; fallback won't work but SMART will
 
     def load_or_download(
         self,
@@ -401,8 +421,335 @@ class SmartResolver:
             print(f"[{utc_now_iso()}] SMART loaded: {len(self.berth_map)} berth mappings")
 
     def lookup(self, td_area: str, berth: str) -> Optional[Dict[str, str]]:
+        """Look up berth information, with fallback to inferred data.
+        
+        First tries SMART data (from JSON file), then falls back to querying
+        the berth_signal_scores table if a database connection is available.
+        
+        Args:
+            td_area: 2-character TD area code (e.g. "EK", "AD")
+            berth: Berth identifier (e.g. "0152")
+            
+        Returns:
+            Dict with keys: stanox, platform, stanme, event (from SMART)
+            OR dict with keys: stanox, confidence (from inferred data)
+            OR None if not found in either source
+        """
         k = ((td_area or "").strip().upper(), (berth or "").strip().upper())
-        return self.berth_map.get(k)
+        
+        # Try SMART first (in-memory lookup)
+        result = self.berth_map.get(k)
+        if result:
+            return result
+        
+        # Fallback to database inferred berth data
+        if self._db_conn:
+            return self._lookup_inferred_berth(k[0], k[1])
+        
+        return None
+    
+    def _lookup_inferred_berth(self, td_area: str, berth: str) -> Optional[Dict[str, str]]:
+        """Query database for inferred berth-to-signal mapping.
+        
+        Uses berth_signal_scores table populated by the mapper from historical TD data.
+        Returns the highest-scoring (most confident) STANOX for this berth.
+        
+        Args:
+            td_area: TD area code (normalized)
+            berth: Berth identifier (normalized)
+            
+        Returns:
+            Dict with stanox and confidence score, or None if not found
+        """
+        if not self._db_conn:
+            return None
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            cursor = self._db_conn.cursor()
+            
+            # Query berth_signal_scores for best match
+            # We look for berths appearing in either from_berth or to_berth position
+            # and pick the highest-scoring association
+            cursor.execute("""
+                SELECT
+                    bss.td_area,
+                    COALESCE(bss.from_berth, bss.to_berth) as berth,
+                    ct.stanox,
+                    ct.nlcdesc as location_name,
+                    bss.score,
+                    bss.obs_count
+                FROM berth_signal_scores bss
+                LEFT JOIN corpus_tiploc ct ON CAST(bss.address AS TEXT) = CAST(ct.stanox AS TEXT)
+                WHERE bss.td_area = ?
+                  AND (bss.from_berth = ? OR bss.to_berth = ?)
+                ORDER BY bss.score DESC
+                LIMIT 1
+            """, (td_area, berth, berth))
+            
+            row = cursor.fetchone()
+            if row and row['stanox']:
+                return {
+                    "stanox": str(row['stanox']),
+                    "stanme": row['location_name'] or "",
+                    "platform": "",  # Not available in inferred data
+                    "event": "INFERRED",  # Mark as inferred to distinguish from SMART
+                    "confidence": float(row['score']) if row['score'] else 0.0,
+                }
+        except Exception as e:
+            # Log database errors but don't crash the resolver
+            logger.debug(f"SmartResolver: Failed to query inferred berth for {td_area}:{berth}: {e}")
+        
+        return None
+
+
+class TdAreaResolver:
+    """Maps TD area codes to human-readable names.
+    
+    Source: https://wiki.openraildata.com/index.php/List_of_Train_Describers
+    TD areas are 2-character signalling control area codes used in the TD feed.
+    """
+    
+    # Official TD area code to name mappings from Network Rail Open Data Wiki
+    TD_AREA_NAMES: Dict[str, str] = {
+        "AD": "Ashford",
+        "AG": "Aberdeen",
+        "AJ": "Aberdeen Junction",
+        "AM": "Acton Main Line",
+        "AN": "Anglia",
+        "AY": "Aylesbury",
+        "BG": "Birmingham",
+        "BM": "Birmingham New Street",
+        "BN": "Brighton",
+        "BP": "Bristol Panel",
+        "BR": "Bristol",
+        "BS": "Bristol Parkway",
+        "BT": "Bletchley",
+        "BW": "Bescot Yard",
+        "BX": "Basingstoke",
+        "CA": "Cambridge",
+        "CB": "Carlisle",
+        "CC": "Cardiff Canton",
+        "CD": "Crewe",
+        "CE": "Chesterfield",
+        "CF": "Cardiff",
+        "CG": "Cambridge",
+        "CH": "Charing Cross",
+        "CL": "Colchester",
+        "CR": "Crewe",
+        "CS": "Cricklewood",
+        "CT": "Canterbury",
+        "CW": "Crown Point",
+        "CY": "Croydon",
+        "DB": "Derby",
+        "DD": "Didcot",
+        "DE": "Derby",
+        "DF": "Doncaster",
+        "DG": "Dungeness",
+        "DN": "Doncaster",
+        "DO": "Doncaster",
+        "DR": "Doncaster",
+        "DU": "Dundee",
+        "DY": "Derby",
+        "EA": "East Anglia",
+        "EB": "Edinburgh",
+        "EC": "Edinburgh",
+        "ED": "Edinburgh",
+        "EK": "East Kent",  # Gillingham area
+        "EL": "Ely",
+        "EM": "East Midlands",
+        "EN": "Enfield",
+        "EP": "Euston Power Box",
+        "ER": "Eastleigh",  # Note: ER is Eastleigh, not EK
+        "EX": "Exeter",
+        "EY": "Ely",
+        "FA": "Faversham",
+        "FD": "Farringdon",
+        "FE": "Feltham",
+        "FF": "Fenchurch Street",
+        "FG": "Folkestone",
+        "FH": "Finsbury Park",
+        "FN": "Finsbury Park",
+        "FP": "Finsbury Park",
+        "FR": "Ferme Park",
+        "FY": "Fenny Stratford",
+        "GB": "Glasgow",
+        "GD": "Guildford",
+        "GE": "Gillingham",
+        "GF": "Gillingham",
+        "GG": "Glasgow",
+        "GL": "Gloucester",
+        "GM": "Gillingham",
+        "GN": "Grantham",
+        "GP": "Gospel Oak",
+        "GR": "Grantham",
+        "GS": "Glasgow South",
+        "GT": "Gatwick",
+        "GW": "Gloucester",
+        "GY": "Gateshead",
+        "HB": "Hornsey",
+        "HD": "Haywards Heath",
+        "HE": "Hereford",
+        "HF": "Hatfield",
+        "HG": "Huntingdon",
+        "HN": "Hornsey",
+        "HP": "Harpenden",
+        "HR": "Harrow",
+        "HT": "Hitchin",
+        "HW": "Heaton",
+        "HX": "Hexham",
+        "HY": "Haywards Heath",
+        "IF": "Ilford",
+        "IM": "Ipswich",
+        "IP": "Ipswich",
+        "KC": "Kings Cross",
+        "KE": "Kentish Town",
+        "KL": "Kilmarnock",
+        "KN": "Kentish Town",
+        "KT": "Kings Norton",
+        "KX": "Kings Cross",
+        "LA": "Lancaster",
+        "LB": "London Bridge",
+        "LC": "Leicester",
+        "LD": "Leeds",
+        "LE": "Leicester",
+        "LG": "Lincoln",
+        "LI": "Liverpool",
+        "LM": "Liverpool Street Moorgate",
+        "LN": "Lincoln",
+        "LO": "London",
+        "LP": "Liverpool Lime Street",
+        "LR": "Leicester",
+        "LS": "Liverpool Street",
+        "LT": "Luton",
+        "LV": "Liverpool",
+        "LY": "Leyland",
+        "MA": "Manchester",
+        "MB": "Marylebone",
+        "MC": "Manchester",
+        "MD": "Maidstone",
+        "ME": "Motherwell",
+        "MG": "Margam",
+        "MH": "Motherwell",
+        "MK": "Milton Keynes",
+        "ML": "Motherwell",
+        "MM": "Manchester",
+        "MN": "Manchester",
+        "MO": "Manchester",
+        "MR": "Manchester",
+        "MS": "Manchester South",
+        "MT": "Margate",
+        "MW": "Motherwell",
+        "MY": "Morley",
+        "NC": "Newcastle",
+        "ND": "North Dulwich",
+        "NE": "Newcastle",
+        "NL": "New Barnet",
+        "NM": "Normanton",
+        "NN": "Norwich",
+        "NO": "Nottingham",
+        "NR": "Norwich",
+        "NT": "Nottingham",
+        "NW": "Newport",
+        "NY": "New Malden",
+        "OR": "Orpington",
+        "OX": "Oxford",
+        "PA": "Paddington",
+        "PB": "Peterborough",
+        "PC": "Preston",
+        "PD": "Paddington",
+        "PE": "Perth",
+        "PG": "Preston",
+        "PH": "Portsmouth Harbour",
+        "PL": "Plymouth",
+        "PM": "Peterborough",
+        "PN": "Preston",
+        "PP": "Portsmouth",
+        "PR": "Preston",
+        "PS": "Paisley",
+        "PT": "Perth",
+        "PY": "Plymouth",
+        "RA": "Ramsgate",
+        "RD": "Reading",
+        "RE": "Reading",
+        "RF": "Redhill",
+        "RG": "Reading",
+        "RL": "Rotherham",
+        "RM": "Romford",
+        "RO": "Rochester",
+        "RP": "Redditch",
+        "RY": "Rugby",
+        "SA": "South Anglia",
+        "SB": "Salisbury",
+        "SC": "Stafford",
+        "SD": "Sunderland",
+        "SE": "Selhurst",
+        "SF": "Stafford",
+        "SG": "Stirling",
+        "SH": "Sheffield",
+        "SI": "Sittingbourne",
+        "SL": "Slough",
+        "SM": "Sunderland",
+        "SN": "Swindon",
+        "SO": "Southampton",
+        "SP": "St Pancras",
+        "SR": "Shrewsbury",
+        "SS": "Stoke on Trent",
+        "ST": "Stratford",
+        "SU": "Sunderland",
+        "SW": "Swindon",
+        "SY": "Stirling",
+        "TB": "Tyneside",
+        "TD": "Thornaby",
+        "TH": "Three Bridges",
+        "TN": "Tonbridge",
+        "TO": "Tyne & Wear",
+        "TR": "Trent",
+        "TT": "Totton",
+        "TW": "Trowbridge",
+        "TY": "Tyseley",
+        "VI": "Victoria",
+        "VX": "Vauxhall",
+        "WA": "Warrington",
+        "WB": "Willesden",
+        "WC": "Waterloo",
+        "WD": "Wembley",
+        "WE": "Westbury",
+        "WF": "Watford",
+        "WG": "Wigan",
+        "WH": "Whitehall",
+        "WI": "Willesden",
+        "WJ": "Willesden Junction",
+        "WK": "Wakefield",
+        "WL": "Waterloo",
+        "WM": "Wolverhampton",
+        "WN": "Waterloo",
+        "WO": "Wolverhampton",
+        "WR": "Warrington",
+        "WS": "Westbury",
+        "WT": "Watford",
+        "WV": "Wolverhampton",
+        "WW": "West Hampstead",
+        "WX": "Wolverhampton",
+        "WY": "Wembley",
+        "YK": "York",
+        "YO": "York",
+        "YR": "York",
+    }
+    
+    @classmethod
+    def name_for_td_area(cls, code: str) -> str:
+        """Get human-readable name for TD area code.
+        
+        Args:
+            code: 2-character TD area code (e.g. "EK", "AD")
+            
+        Returns:
+            Human-readable name, or empty string if not found
+        """
+        return cls.TD_AREA_NAMES.get((code or "").strip().upper(), "")
 
 
 class ScheduleResolver:
