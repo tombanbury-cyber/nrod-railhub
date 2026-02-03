@@ -217,6 +217,43 @@ class Listener(stomp.ConnectionListener):
             # ------------------------------------------------------------
             td_msg = self._unwrap_td_item(item)
             if td_msg and "msg_type" in td_msg and ("descr" in td_msg or "to" in td_msg or "from" in td_msg or "address" in td_msg):
+                msg_type = td_msg.get("msg_type", "").upper()
+                
+                # Handle signal events (S-Class: SF, SG, SH) separately
+                # These don't have a descr field and don't update TD state
+                if msg_type in ("SF", "SG", "SH"):
+                    if self.db:
+                        try:
+                            area_id = (td_msg.get("area_id") or "").strip()
+                            address = td_msg.get("address", "")
+                            
+                            # Apply area filter if configured
+                            if self.args.td_area and area_id and area_id not in self.args.td_area:
+                                continue
+                            
+                            if area_id and address:
+                                ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
+                                ts_iso = ms_to_iso_utc(ts_ms)
+                                self.db.insert_td_signal_event(
+                                    ts_ms=ts_ms,
+                                    ts_iso=ts_iso,
+                                    area=area_id,
+                                    msg_type=msg_type,
+                                    address=address,
+                                    data=td_msg.get("data", "")
+                                )
+                        except Exception as e:
+                            # Don't kill the receiver thread; log a few DB errors for diagnosis
+                            try:
+                                self._db_err_count = getattr(self, '_db_err_count', 0) + 1
+                                if self._db_err_count <= 5:
+                                    print(f"[{utc_now_iso()}] DB: TD signal event persist failed: {type(e).__name__}: {e}")
+                            except Exception:
+                                pass
+                    continue
+                
+                # Handle berth events (C-Class: CA, CB, CC)
+                # These have a descr field and update TD state
                 td = self.hv.upsert_td(td_msg)
                 if not td:
                     continue
@@ -235,18 +272,14 @@ class Listener(stomp.ConnectionListener):
                 if self.args.td_area and td.area_id and td.area_id not in self.args.td_area:
                     continue
 
-                # Persist TD - split by event class
+                # Persist berth events and update TD state
                 if self.db:
                     try:
-                        # Extract timestamp - td_msg["time"] is in milliseconds
                         ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
                         ts_iso = ms_to_iso_utc(ts_ms)
                         
-                        msg_type = td_msg.get("msg_type", "").upper()
-                        
-                        # Determine event class: C-Class (berth) or S-Class (signal)
+                        # Insert berth event record
                         if msg_type in ("CA", "CB", "CC"):
-                            # C-Class: berth stepping events
                             if td.area_id and td.descr:
                                 self.db.insert_td_berth_event(
                                     ts_ms=ts_ms,
@@ -258,20 +291,8 @@ class Listener(stomp.ConnectionListener):
                                     to_berth=td.to_berth,
                                     descr=td.descr
                                 )
-                        elif msg_type in ("SF", "SG", "SH"):
-                            # S-Class: signal events
-                            address = td_msg.get("address", "")
-                            if td.area_id and address:
-                                self.db.insert_td_signal_event(
-                                    ts_ms=ts_ms,
-                                    ts_iso=ts_iso,
-                                    area=td.area_id,
-                                    msg_type=msg_type,
-                                    address=address,
-                                    data=td_msg.get("data", "")
-                                )
                         
-                        # Update TD state for berth events
+                        # Update current TD state with enriched location/schedule data
                         if msg_type in ("CA", "CB", "CC") and td.area_id and td.descr:
                             # Enrich via HumanView render context
                             loc = self.hv.decode_last_location(td.area_id, td.descr)
@@ -297,7 +318,7 @@ class Listener(stomp.ConnectionListener):
                         try:
                             self._db_err_count = getattr(self, '_db_err_count', 0) + 1
                             if self._db_err_count <= 5:
-                                print(f"[{utc_now_iso()}] DB: TD persist failed: {type(e).__name__}: {e}")
+                                print(f"[{utc_now_iso()}] DB: TD berth event persist failed: {type(e).__name__}: {e}")
                         except Exception:
                             pass
 
