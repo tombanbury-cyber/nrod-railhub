@@ -103,6 +103,17 @@ When `--web-port` is set, open `http://localhost: PORT` in your browser:
 - **Filter by area** - Click area pill to filter (e.g. EK, AD, WR)
 - **Train detail** - Click headcode for event history
 - **Events** - Recent TD berth movements
+- **Mapper** - Configure and rebuild berth-signal correlation mappings
+
+### Mapper Configuration
+
+The Mapper page allows you to adjust the parameters used for correlating berth step movements with signal events:
+
+- **pre_ms**: Milliseconds to look back before a berth step event (default: 1000)
+- **post_ms**: Milliseconds to look forward after a berth step event (default: 5000)
+- **tau_ms**: Time constant for exponential weighting (default: 2500)
+
+You can rebuild the correlation scores with new parameters without re-collecting data. The rebuild processes existing observations and regenerates the `berth_signal_scores` table.
 
 ## Architecture
 
