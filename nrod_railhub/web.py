@@ -680,7 +680,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             areas = q("SELECT DISTINCT td_area FROM berth_signal_scores ORDER BY td_area")
             
             body.append("<p class='dim'>")
-            body.append(f"This screen shows signal address to berth mappings based on observed correlations between TD berth movements and signal events.")
+            body.append("This screen shows signal address to berth mappings based on observed correlations between TD berth movements and signal events.")
             body.append("</p>")
             
             # Summary statistics
@@ -696,9 +696,9 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             
             # Area pills
             body.append("<div style='margin:12px 0'>Quick filter: ")
-            for a_row in areas:
-                a = a_row[0]
-                body.append(f"<a class='pill' href='/signal-mappings?area={a}'>{a}</a>")
+            for area_row in areas:
+                area = area_row[0]
+                body.append(f"<a class='pill' href='/signal-mappings?area={area}'>{area}</a>")
             body.append(" <a class='pill' href='/signal-mappings'>ALL</a></div>")
             
             # Filter form
@@ -757,7 +757,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 
                 for r in rows:
                     # Format score with color coding
-                    score = r['score'] if r['score'] else 0
+                    score = r['score'] if r['score'] is not None else 0
                     score_color = '#22c55e' if score > 1.0 else '#f59e0b' if score > 0.5 else '#6b7280'
                     score_str = f"<span style='color:{score_color};font-weight:600'>{score:.3f}</span>"
                     
