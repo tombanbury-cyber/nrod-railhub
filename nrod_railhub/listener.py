@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 import stomp
 
-from .models import utc_now_iso
+from .models import utc_now_iso, utc_now_ms, ms_to_iso_utc, safe_int
 from .views import HumanView
 from .database import RailDB
 
@@ -216,16 +216,17 @@ class Listener(stomp.ConnectionListener):
             # TD (wrapped as CA_MSG/CC_MSG/SF_MSG/etc)
             # ------------------------------------------------------------
             td_msg = self._unwrap_td_item(item)
-            if td_msg and "msg_type" in td_msg and ("descr" in td_msg or "to" in td_msg or "from" in td_msg):
+            if td_msg and "msg_type" in td_msg and ("descr" in td_msg or "to" in td_msg or "from" in td_msg or "address" in td_msg):
                 td = self.hv.upsert_td(td_msg)
                 if not td:
                     continue
 
                 if self.args.trace_headcode and self.args.headcode and td.descr == self.args.headcode:
+                    td_time_iso = ms_to_iso_utc(td.last_time_ms) if td.last_time_ms else "?"
                     print(
                         f"[{utc_now_iso()}] TRACE TD headcode={td.descr} "
                         f"area={td.area_id} {td.from_berth}->{td.to_berth} "
-                        f"time={td.last_time_utc}"
+                        f"time={td_time_iso}"
                     )
 
                 if self.args.headcode and td.descr != self.args.headcode:
@@ -234,18 +235,63 @@ class Listener(stomp.ConnectionListener):
                 if self.args.td_area and td.area_id and td.area_id not in self.args.td_area:
                     continue
 
-                # Persist TD
+                # Persist TD - split by event class
                 if self.db:
                     try:
-                        if not (td.area_id and td.descr):
-                            raise ValueError('missing td_area/headcode')
-                        self.db.insert_td_event(td.last_time_utc or utc_now_iso(), td.area_id, td.descr, 'td', td.from_berth, td.to_berth, td_msg)
-                        # Enrich via HumanView render context
-                        loc = self.hv.decode_last_location(td.area_id, td.descr)
-                        tten = self.hv.get_timetable_fields(td.descr)
-                        self.db.upsert_td_state(td.area_id, td.descr, td.last_time_utc or utc_now_iso(), td.from_berth, td.to_berth,
-                                                stanox=loc.get('stanox'), location_name=loc.get('name'), platform=loc.get('platform'),
-                                                sched_dep=tten.get('dep'), sched_arr=tten.get('arr'), origin_name=tten.get('origin'), dest_name=tten.get('dest'), uid=tten.get('uid'))
+                        # Extract timestamp - td_msg["time"] is in milliseconds
+                        ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
+                        ts_iso = ms_to_iso_utc(ts_ms)
+                        
+                        msg_type = td_msg.get("msg_type", "").upper()
+                        
+                        # Determine event class: C-Class (berth) or S-Class (signal)
+                        if msg_type in ("CA", "CB", "CC"):
+                            # C-Class: berth stepping events
+                            if td.area_id and td.descr:
+                                self.db.insert_td_berth_event(
+                                    ts_ms=ts_ms,
+                                    ts_iso=ts_iso,
+                                    area=td.area_id,
+                                    headcode=td.descr,
+                                    msg_type=msg_type,
+                                    from_berth=td.from_berth,
+                                    to_berth=td.to_berth,
+                                    descr=td.descr
+                                )
+                        elif msg_type in ("SF", "SG", "SH"):
+                            # S-Class: signal events
+                            address = td_msg.get("address", "")
+                            if td.area_id and address:
+                                self.db.insert_td_signal_event(
+                                    ts_ms=ts_ms,
+                                    ts_iso=ts_iso,
+                                    area=td.area_id,
+                                    msg_type=msg_type,
+                                    address=address,
+                                    data=td_msg.get("data", "")
+                                )
+                        
+                        # Update TD state for berth events
+                        if msg_type in ("CA", "CB", "CC") and td.area_id and td.descr:
+                            # Enrich via HumanView render context
+                            loc = self.hv.decode_last_location(td.area_id, td.descr)
+                            tten = self.hv.get_timetable_fields(td.descr)
+                            self.db.upsert_td_state(
+                                area=td.area_id,
+                                headcode=td.descr,
+                                last_time_ms=ts_ms,
+                                last_time_iso=ts_iso,
+                                from_berth=td.from_berth,
+                                to_berth=td.to_berth,
+                                stanox=loc.get('stanox'),
+                                location_name=loc.get('name'),
+                                platform=loc.get('platform'),
+                                sched_dep=tten.get('dep'),
+                                sched_arr=tten.get('arr'),
+                                origin_name=tten.get('origin'),
+                                dest_name=tten.get('dest'),
+                                uid=tten.get('uid')
+                            )
                     except Exception as e:
                         # Don't kill the receiver thread; log a few DB errors for diagnosis
                         try:

@@ -31,7 +31,8 @@ class RailDB:
                 CREATE TABLE IF NOT EXISTS td_state (
                     td_area TEXT NOT NULL,
                     headcode TEXT NOT NULL,
-                    last_time_utc TEXT,
+                    last_time_ms INTEGER NOT NULL,
+                    last_time_iso TEXT,
                     from_berth TEXT,
                     to_berth TEXT,
                     stanox TEXT,
@@ -44,18 +45,32 @@ class RailDB:
                     uid TEXT,
                     PRIMARY KEY (td_area, headcode)
                 );
-                CREATE TABLE IF NOT EXISTS td_event (
+                
+                CREATE TABLE IF NOT EXISTS td_berth_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts_utc TEXT NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
                     td_area TEXT,
                     headcode TEXT,
-                    event_type TEXT NOT NULL,
+                    msg_type TEXT NOT NULL,
                     from_berth TEXT,
                     to_berth TEXT,
-                    raw_json TEXT
+                    descr TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_td_event_ts ON td_event(ts_utc);
-                CREATE INDEX IF NOT EXISTS idx_td_event_area_hc_ts ON td_event(td_area, headcode, ts_utc);
+                CREATE INDEX IF NOT EXISTS idx_td_berth_ts ON td_berth_events(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_berth_area_hc_ts ON td_berth_events(td_area, headcode, ts_ms);
+                
+                CREATE TABLE IF NOT EXISTS td_signal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    td_area TEXT,
+                    msg_type TEXT NOT NULL,
+                    address TEXT,
+                    data TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
 
                 CREATE TABLE IF NOT EXISTS trust_state (
                     train_id TEXT PRIMARY KEY,
@@ -87,24 +102,34 @@ class RailDB:
         except Exception:
             pass
 
-    def insert_td_event(self, ts_utc: str, area: str, headcode: str, event_type: str, from_berth: str, to_berth: str, raw: dict) -> None:
+    def insert_td_berth_event(self, ts_ms: int, ts_iso: str, area: str, headcode: str, msg_type: str, from_berth: str, to_berth: str, descr: str = "") -> None:
+        """Insert a TD berth stepping event (C-Class: CA, CB, CC)."""
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO td_event(ts_utc, td_area, headcode, event_type, from_berth, to_berth, raw_json) VALUES (?,?,?,?,?,?,?)",
-                (ts_utc, area, headcode, event_type, from_berth, to_berth, json.dumps(raw, separators=(',',':'))),
+                "INSERT INTO td_berth_events(ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr) VALUES (?,?,?,?,?,?,?,?)",
+                (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr),
             )
 
-    def upsert_td_state(self, area: str, headcode: str, last_time_utc: str, from_berth: str, to_berth: str,
+    def insert_td_signal_event(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str = "") -> None:
+        """Insert a TD signal event (S-Class: SF, SG, SH)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
+                (ts_ms, ts_iso, area, msg_type, address, data or ""),
+            )
+
+    def upsert_td_state(self, area: str, headcode: str, last_time_ms: int, last_time_iso: str, from_berth: str, to_berth: str,
                         stanox: str | None = None, location_name: str | None = None, platform: str | None = None,
                         sched_dep: str | None = None, sched_arr: str | None = None, origin_name: str | None = None, dest_name: str | None = None, uid: str | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO td_state(td_area, headcode, last_time_utc, from_berth, to_berth, stanox, location_name, platform,
+                INSERT INTO td_state(td_area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox, location_name, platform,
                                      sched_dep, sched_arr, origin_name, dest_name, uid)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(td_area, headcode) DO UPDATE SET
-                    last_time_utc=excluded.last_time_utc,
+                    last_time_ms=excluded.last_time_ms,
+                    last_time_iso=excluded.last_time_iso,
                     from_berth=excluded.from_berth,
                     to_berth=excluded.to_berth,
                     stanox=COALESCE(excluded.stanox, td_state.stanox),
@@ -116,7 +141,7 @@ class RailDB:
                     dest_name=COALESCE(excluded.dest_name, td_state.dest_name),
                     uid=COALESCE(excluded.uid, td_state.uid)
                 """,
-                (area, headcode, last_time_utc, from_berth, to_berth, stanox, location_name, platform, sched_dep, sched_arr, origin_name, dest_name, uid),
+                (area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox, location_name, platform, sched_dep, sched_arr, origin_name, dest_name, uid),
             )
 
     def upsert_trust(self, train_id: str, headcode: str, uid: str, toc_id: str, last_event_time: str, last_location: str, last_delay_min: int | None, raw: dict) -> None:

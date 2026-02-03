@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
-    utc_now_iso, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc
+    utc_now_iso, utc_now_ms, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc, safe_int
 )
 from .resolvers import LocationResolver, SmartResolver
 
@@ -131,7 +131,7 @@ class HumanView:
                     if tiploc_candidates:
                         # Rank candidates by time proximity to TD observation
                         try:
-                            td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
+                            td_time = td.last_time_ms and datetime.datetime.fromtimestamp(td.last_time_ms / 1000, tz=timezone.utc)
                         except Exception:
                             td_time = None
                         
@@ -236,7 +236,7 @@ class HumanView:
 
         # 5) Time proximity fallback
         try:
-            td_time = td.last_time_utc and datetime.datetime.fromisoformat(td.last_time_utc.replace("Z", "+00:00"))
+            td_time = td.last_time_ms and datetime.datetime.fromtimestamp(td.last_time_ms / 1000, tz=timezone.utc)
         except Exception:
             td_time = None
 
@@ -523,9 +523,14 @@ class HumanView:
         state.to_berth = (td_msg.get("to") or state.to_berth or "").strip()
 
         if "time" in td_msg:
-            state.last_time_utc = ms_to_iso_utc(td_msg["time"])
+            # td_msg["time"] is already in milliseconds
+            time_ms = safe_int(td_msg["time"])
+            if time_ms:
+                state.last_time_ms = time_ms
+            else:
+                state.last_time_ms = state.last_time_ms or utc_now_ms()
         else:
-            state.last_time_utc = state.last_time_utc or utc_now_iso()
+            state.last_time_ms = state.last_time_ms or utc_now_ms()
 
         self.td_by_headcode[key] = state
         return state
@@ -595,7 +600,7 @@ class HumanView:
         for (area, hc), st in self.td_by_headcode.items():
             if hc != headcode:
                 continue
-            if not best or (st.last_time_utc and st.last_time_utc > (best.last_time_utc or "")):
+            if not best or (st.last_time_ms and st.last_time_ms > (best.last_time_ms or 0)):
                 best = st
         return best
 
@@ -672,8 +677,9 @@ class HumanView:
 
         td = self.td_by_headcode.get((td_area, headcode)) if td_area else None
         if td and (td.from_berth or td.to_berth or td.area_id):
+            td_time_iso = ms_to_iso_utc(td.last_time_ms) if td.last_time_ms else "?"
             parts.append(
-                f"TD: area={td.area_id or '?'} {td.from_berth or '?'}→{td.to_berth or '?'} @ {td.last_time_utc or '?'}"
+                f"TD: area={td.area_id or '?'} {td.from_berth or '?'}→{td.to_berth or '?'} @ {td_time_iso}"
             )
 
         ts = self.trust_by_headcode.get(headcode)
