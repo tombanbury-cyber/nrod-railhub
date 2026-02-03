@@ -28,11 +28,11 @@ class HumanView:
         self.smart = smart
 
         self.vstp_by_uid_date: Dict[Tuple[str, str], VstpSchedule] = {}
-        self.vstp_by_headcode: Dict[str, VstpSchedule] = {}
+        self.vstp_by_headcode: Dict[str, List[VstpSchedule]] = {}
 
         # Planned schedules (SCHEDULE feed) for timetable enrichment
         self.sched_by_uid_date: Dict[Tuple[str, str], ItpsSchedule] = {}
-        self.sched_by_headcode: Dict[str, ItpsSchedule] = {}
+        self.sched_by_headcode: Dict[str, List[ItpsSchedule]] = {}
 
         # TIPLOC → schedule index for accurate TD matching
         # Maps normalized TIPLOC to list of (schedule_object, stop_index, planned_hhmm)
@@ -199,13 +199,13 @@ class HumanView:
                             logger.debug(f"TIPLOC match: {reason}")
                             return best, reason, best_info
 
-        # 3) Fallback: Candidate schedules by headcode
+        # 3) Fallback: Candidate schedules by headcode (now handling multiple schedules per headcode)
         candidates = []
-        vs = self.vstp_by_headcode.get(headcode)
-        if vs:
+        vs_list = self.vstp_by_headcode.get(headcode, [])
+        for vs in vs_list:
             candidates.append(("VSTP", vs))
-        ss = self.sched_by_headcode.get(headcode)
-        if ss:
+        ss_list = self.sched_by_headcode.get(headcode, [])
+        for ss in ss_list:
             candidates.append(("SCHEDULE", ss))
         if not candidates:
             reason = "no candidate schedules for headcode"
@@ -402,12 +402,11 @@ class HumanView:
                     locations=locations,
                 )
 
-                # If we already have a schedule for this headcode, prefer the one with
-                # the "lowest" STP indicator (C < O < P generally).
+                # Store all schedules with this headcode (multiple services may share the same headcode)
                 if signalling_id:
-                    cur = self.sched_by_headcode.get(signalling_id)
-                    if not cur or (itps.stp_indicator and cur.stp_indicator and itps.stp_indicator < cur.stp_indicator):
-                        self.sched_by_headcode[signalling_id] = itps
+                    if signalling_id not in self.sched_by_headcode:
+                        self.sched_by_headcode[signalling_id] = []
+                    self.sched_by_headcode[signalling_id].append(itps)
 
                 if uid and itps.start_date:
                     key = (uid, itps.start_date)
@@ -491,7 +490,9 @@ class HumanView:
         if uid and start_date:
             self.vstp_by_uid_date[(uid, start_date)] = vs
         if signalling_id:
-            self.vstp_by_headcode[signalling_id] = vs
+            if signalling_id not in self.vstp_by_headcode:
+                self.vstp_by_headcode[signalling_id] = []
+            self.vstp_by_headcode[signalling_id].append(vs)
 
         # Build TIPLOC index for VSTP schedules
         for stop_idx, loc_tuple in enumerate(vs.locations):
@@ -656,7 +657,8 @@ class HumanView:
         
         # Fallback to direct lookup if no td_area or no match
         if not vs:
-            vs = self.vstp_by_headcode.get(headcode)
+            vs_list = self.vstp_by_headcode.get(headcode, [])
+            vs = vs_list[0] if vs_list else None
 
         if vs:
             # decorate origin/dest with names if we have them
@@ -717,7 +719,9 @@ class HumanView:
 
         # If no match via TD, fallback to direct lookup (legacy behavior)
         if not sched:
-            sched = self.vstp_by_headcode.get(headcode) or self.sched_by_headcode.get(headcode)
+            vs_list = self.vstp_by_headcode.get(headcode, [])
+            ss_list = self.sched_by_headcode.get(headcode, [])
+            sched = vs_list[0] if vs_list else (ss_list[0] if ss_list else None)
 
         # Extract schedule details
         if sched and getattr(sched, "locations", None):
@@ -819,7 +823,8 @@ class HumanView:
         if not headcode:
             return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
 
-        vs = self.vstp_by_headcode.get(headcode)
+        vs_list = self.vstp_by_headcode.get(headcode, [])
+        vs = vs_list[0] if vs_list else None
         if vs and vs.locations:
             o_code = vs.locations[0][0]
             d_code = vs.locations[-1][0]
@@ -836,7 +841,8 @@ class HumanView:
                 "dest": dest or "",
             }
 
-        itps = self.sched_by_headcode.get(headcode)
+        itps_list = self.sched_by_headcode.get(headcode, [])
+        itps = itps_list[0] if itps_list else None
         if itps and itps.locations:
             o = itps.locations[0]
             d = itps.locations[-1]
@@ -909,8 +915,10 @@ class HumanView:
           - TRUST: delay + last STANOX (resolved)
           - TD: last area/berth (fallback if no TRUST location)
         """
-        vs = self.vstp_by_headcode.get(headcode)
-        ss = self.sched_by_headcode.get(headcode)
+        vs_list = self.vstp_by_headcode.get(headcode, [])
+        vs = vs_list[0] if vs_list else None
+        ss_list = self.sched_by_headcode.get(headcode, [])
+        ss = ss_list[0] if ss_list else None
         ts = self.trust_by_headcode.get(headcode)
 
         # If TRUST doesn't have the headcode directly but we have a VSTP UID, try that.

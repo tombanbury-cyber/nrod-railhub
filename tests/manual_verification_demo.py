@@ -38,7 +38,7 @@ def demo_uid_matching():
     
     hv.vstp_by_uid_date[("M12345", "2026-01-17")] = vs_margate
     hv.vstp_by_uid_date[("B67890", "2026-01-17")] = vs_brockenhurst
-    hv.vstp_by_headcode["1J37"] = vs_margate  # First one registered
+    hv.vstp_by_headcode["1J37"] = [vs_margate]  # First one registered
 
     # Setup TRUST states for each
     ts_margate = TrustState(train_id="111111", train_uid="M12345", activated=True)
@@ -91,7 +91,7 @@ def demo_stanox_matching():
         locations=[("MARGAT", "14:30", "14:31"), ("VICTRIC", "15:45", "")]
     )
     
-    hv.vstp_by_headcode["2C90"] = vs_clapham  # First candidate
+    hv.vstp_by_headcode["2C90"] = [vs_clapham]  # First candidate
 
     # Setup TD state
     td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0)
@@ -152,7 +152,7 @@ def demo_time_proximity():
         locations=[("MARGAT", "14:30", "14:31"), ("VICTRIC", "15:45", "")]
     )
     
-    hv.vstp_by_headcode["2C90"] = vs1
+    hv.vstp_by_headcode["2C90"] = [vs1]
 
     td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_ms=iso_to_ms("2026-01-17T12:29:00+00:00") or 0)
     hv.td_by_headcode[("EK", "2C90")] = td
@@ -211,7 +211,7 @@ def demo_tiploc_index_matching():
     )
     
     # Register schedules
-    hv.sched_by_headcode["1P42"] = sched_kx_pboro  # First one wins in headcode index
+    hv.sched_by_headcode["1P42"] = [sched_kx_pboro]  # First one wins in headcode index
     hv.sched_by_uid_date[("P12345", "2026-01-17")] = sched_kx_pboro
     hv.sched_by_uid_date[("R67890", "2026-01-17")] = sched_ram_vic
     
