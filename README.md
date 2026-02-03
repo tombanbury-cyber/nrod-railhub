@@ -155,7 +155,7 @@ Network Rail STOMP Feeds
 - **TIPLOC** - Timing Point Location code (e.g. `CLPHMJC` = Clapham Junction)
 - **STANOX** - Station Number (e.g. `87701` = Clapham Junction)
 - **CRS** - 3-letter station code (e.g. `WAT` = Waterloo)
-- **TD Area** - Signalling control area (e.g. `EK` = Eastleigh, `AD` = Ashford)
+- **TD Area** - Signalling control area (e.g. `EK` = East Kent, `AD` = Ashford)
 - **Berth** - Track circuit identifier within TD area
 
 ## Troubleshooting

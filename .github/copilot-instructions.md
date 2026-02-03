@@ -56,7 +56,7 @@ Network Rail STOMP → Listener → HumanView (enrich) → Console + DB → Web 
 - **TIPLOC**: Timing Point Location code (7-char, e.g. `CLPHMJC`)
 - **STANOX**: Station Number (5-digit, e.g. `87701`)
 - **CRS**: 3-letter station code (e. g. `WAT` for Waterloo)
-- **TD Area**:  Signalling area code (2-char, e.g. `EK` for Eastleigh)
+- **TD Area**:  Signalling area code (2-char, e.g. `EK` for East Kent)
 - **Berth**: Track circuit identifier within a TD area (e.g. `0152`)
 
 ## Development Guidelines
@@ -156,7 +156,7 @@ python3 nrod_railhub.py --user USER --password PASS
 python3 nrod_railhub.py --user USER --password PASS \
   --headcode 2C90 --db-path rail.db --web-port 8080
 
-# Filter to TD area (e.g. Eastleigh)
+# Filter to TD area (e.g. East Kent)
 python3 nrod_railhub.py --user USER --password PASS --td-area EK
 
 # Verbose debug mode

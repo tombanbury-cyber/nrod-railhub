@@ -1,7 +1,7 @@
 # Fix for Headcode Collision Issue
 
 ## Problem
-When filtering by TD area (e.g., `--td-area EK`), trains from other geographic regions were appearing with incorrect schedule information. A train observed in the EK (Eastleigh) area might show schedule details from a completely different service running hundreds of miles away.
+When filtering by TD area (e.g., `--td-area EK`), trains from other geographic regions were appearing with incorrect schedule information. A train observed in the EK (East Kent) area might show schedule details from a completely different service running hundreds of miles away.
 
 ## Root Cause
 **Headcodes are not unique in UK rail.** The same headcode (e.g., "1P58", "2C90") is reused for multiple distinct services throughout the day and across different regions.
