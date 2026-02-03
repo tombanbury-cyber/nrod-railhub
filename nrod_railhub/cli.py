@@ -105,7 +105,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
     )
 
     db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
-    db = RailDB(db_path) if db_path else None
+    db = RailDB(db_path, enable_mapper=args.enable_mapper) if db_path else None
     listener = Listener(hv, args, db=db)
     if args.web_port and db_path:
         t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port), daemon=True)
@@ -245,8 +245,8 @@ def parse_args() -> argparse.Namespace:
                    help="SQLite database path for state/event storage (enables DB output)")
     p.add_argument("--web-port", type=int, default=8088,
                    help="If set and --db-path is provided, start tiny web dashboard on this port")
-    p.add_argument("--enable-mapper", action="store_true", default=True,
-                   help="Enable berth-to-signal correlation mapper")
+    p.add_argument("--disable-mapper", dest="enable_mapper", action="store_false", default=True,
+                   help="Disable berth-to-signal correlation mapper (enabled by default)")
     
     return p.parse_args()
 

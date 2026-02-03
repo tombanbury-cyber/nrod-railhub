@@ -45,8 +45,8 @@ def demo_uid_matching():
     ts_brockenhurst = TrustState(train_id="222222", train_uid="B67890", activated=True)
 
     # Setup TD states
-    td_margate = TdState(descr="1J37", area_id="MA", to_berth="0100", last_time_utc="2026-01-17T09:00:00Z")
-    td_brockenhurst = TdState(descr="1J37", area_id="BR", to_berth="0200", last_time_utc="2026-01-17T11:00:00Z")
+    td_margate = TdState(descr="1J37", area_id="MA", to_berth="0100", last_time_ms=iso_to_ms("2026-01-17T09:00:00Z") or 0)
+    td_brockenhurst = TdState(descr="1J37", area_id="BR", to_berth="0200", last_time_ms=iso_to_ms("2026-01-17T11:00:00Z") or 0)
     
     hv.td_by_headcode[("MA", "1J37")] = td_margate
     hv.td_by_headcode[("BR", "1J37")] = td_brockenhurst
@@ -94,7 +94,7 @@ def demo_stanox_matching():
     hv.vstp_by_headcode["2C90"] = vs_clapham  # First candidate
 
     # Setup TD state
-    td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_utc="2026-01-17T12:30:00Z")
+    td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0)
     hv.td_by_headcode[("EK", "2C90")] = td
 
     # Mock SMART to resolve berth to Clapham Junction
@@ -154,7 +154,7 @@ def demo_time_proximity():
     
     hv.vstp_by_headcode["2C90"] = vs1
 
-    td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_utc="2026-01-17T12:29:00+00:00")
+    td = TdState(descr="2C90", area_id="EK", to_berth="0152", last_time_ms=iso_to_ms("2026-01-17T12:29:00+00:00") or 0)
     hv.td_by_headcode[("EK", "2C90")] = td
 
     smart.lookup.return_value = None  # No SMART match
@@ -232,7 +232,7 @@ def demo_tiploc_index_matching():
         descr="1P42",
         area_id="VL",
         to_berth="0152",
-        last_time_utc="2026-01-17T10:25:00+00:00"
+        last_time_ms=iso_to_ms("2026-01-17T10:25:00+00:00") or 0
     )
     hv.td_by_headcode[("VL", "1P42")] = td
     

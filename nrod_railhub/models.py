@@ -49,6 +49,20 @@ def ms_to_iso_utc(ms: Any) -> str:
     return datetime.fromtimestamp(i / 1000, tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def utc_now_ms() -> int:
+    """Return current UTC time as unix timestamp in milliseconds."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def iso_to_ms(iso_str: str) -> Optional[int]:
+    """Convert ISO 8601 timestamp string to unix time in milliseconds."""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def hhmmss_to_hhmm(x: str) -> str:
     s = (x or "").strip()
     if len(s) >= 4 and s[:4].isdigit():
@@ -110,4 +124,4 @@ class TdState:
     area_id: str = ""
     from_berth: str = ""
     to_berth: str = ""
-    last_time_utc: str = ""
+    last_time_ms: int = 0            # unix timestamp in milliseconds

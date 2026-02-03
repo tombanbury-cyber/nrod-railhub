@@ -88,16 +88,23 @@ def start_web_dashboard(db_path: str, port: int) -> None:
 
     @app.get("/")
     def index():
-        counts = q("SELECT (SELECT COUNT(*) FROM td_state) AS td_state, (SELECT COUNT(*) FROM td_event) AS td_event, (SELECT COUNT(*) FROM trust_state) AS trust_state, (SELECT COUNT(*) FROM vstp_state) AS vstp_state")[0]
+        # Count both berth and signal events
+        counts = q("""
+            SELECT 
+                (SELECT COUNT(*) FROM td_state) AS td_state, 
+                (SELECT COUNT(*) FROM td_berth_events) + (SELECT COUNT(*) FROM td_signal_events) AS td_event,
+                (SELECT COUNT(*) FROM trust_state) AS trust_state, 
+                (SELECT COUNT(*) FROM vstp_state) AS vstp_state
+        """)[0]
 
         area = request.args.get("area", "").strip()
         hc_filter = request.args.get("hc", "").strip()
         if area:
-            rows = q("SELECT * FROM td_state WHERE td_area=? ORDER BY last_time_utc DESC LIMIT 200", (area,))
+            rows = q("SELECT * FROM td_state WHERE td_area=? ORDER BY last_time_ms DESC LIMIT 200", (area,))
         elif hc_filter:
-            rows = q("SELECT * FROM td_state WHERE headcode=? ORDER BY last_time_utc DESC LIMIT 200", (hc_filter,))
+            rows = q("SELECT * FROM td_state WHERE headcode=? ORDER BY last_time_ms DESC LIMIT 200", (hc_filter,))
         else:
-            rows = q("SELECT * FROM td_state ORDER BY last_time_utc DESC LIMIT 200")
+            rows = q("SELECT * FROM td_state ORDER BY last_time_ms DESC LIMIT 200")
         areas = [r[0] for r in q("SELECT DISTINCT td_area FROM td_state ORDER BY td_area")]
         body = []
         body.append(f"<p><b>DB:</b> td_state={counts['td_state']} td_event={counts['td_event']} trust_state={counts['trust_state']} vstp_state={counts['vstp_state']}</p>")
@@ -122,7 +129,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             body.append("<tr>" + "".join([
                 f"<td>{r['td_area']}</td>",
                 f"<td><a href='/train?area={r['td_area']}&hc={r['headcode']}'>{r['headcode']}</a></td>",
-                f"<td class='mono dim'>{r['last_time_utc'] if r['last_time_utc'] else ''}</td>",
+                f"<td class='mono dim'>{r['last_time_iso'] if r['last_time_iso'] else ''}</td>",
                 f"<td>{r['from_berth'] if r['from_berth'] else ''}</td>",
                 f"<td>{r['to_berth'] if r['to_berth'] else ''}</td>",
                 f"<td>{loc}</td>",
@@ -143,44 +150,39 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         area = request.args.get("area", "")
         hc = request.args.get("hc", "")
         st = q("SELECT * FROM td_state WHERE td_area=? AND headcode=?", (area, hc))
-        ev = q("SELECT * FROM td_event WHERE td_area=? AND headcode=? ORDER BY ts_utc DESC LIMIT 200", (area, hc))
+        # Query both berth and signal events
+        ev = q("SELECT ts_ms, ts_iso, msg_type, from_berth, to_berth, descr FROM td_berth_events WHERE td_area=? AND headcode=? ORDER BY ts_ms DESC LIMIT 200", (area, hc))
         body = [f"<h2>{area} / {hc}</h2>"]
         body.append(f"<p><a href='/'>Back</a></p>")
         if st:
             r = st[0]
             body.append("<pre>" + str(dict(r)) + "</pre>")
         if ev:
-            body.append("<h3>Recent events</h3><table><tr><th>Time</th><th>Type</th><th>From</th><th>To</th></tr>")
+            body.append("<h3>Recent berth events</h3><table><tr><th>Time</th><th>Type</th><th>From</th><th>To</th></tr>")
             for r in ev:
-                body.append(f"<tr><td class='mono'>{r['ts_utc']}</td><td>{r['event_type']}</td><td>{r['from_berth']}</td><td>{r['to_berth']}</td></tr>")
+                body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['msg_type']}</td><td>{r['from_berth']}</td><td>{r['to_berth']}</td></tr>")
             body.append("</table>")
         return render_page(f"Train {hc}", body, active="home")
 
     @app.get("/events")
     def events():
-        rows = q("SELECT ts_utc, td_area, headcode, event_type, from_berth, to_berth FROM td_event ORDER BY ts_utc DESC LIMIT 500")
-        body = ["<h2>Recent TD events</h2><p></p>"]
+        # Query berth events
+        rows = q("SELECT ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth FROM td_berth_events ORDER BY ts_ms DESC LIMIT 500")
+        body = ["<h2>Recent TD berth events</h2><p></p>"]
         body.append("<table><tr><th>Time</th><th>Area</th><th>Headcode</th><th>Type</th><th>From</th><th>To</th></tr>")
         for r in rows:
-            body.append(f"<tr><td class='mono'>{r['ts_utc']}</td><td>{r['td_area']}</td><td>{r['headcode']}</td><td>{r['event_type']}</td><td>{r['from_berth']}</td><td>{r['to_berth']}</td></tr>")
+            body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['td_area']}</td><td>{r['headcode']}</td><td>{r['msg_type']}</td><td>{r['from_berth']}</td><td>{r['to_berth']}</td></tr>")
         body.append("</table>")
         return render_page("Events - NR RailHub", body, active="events")
 
     @app.get("/signals")
     def signals():
-        # Query trust_state table for signal data
-        rows = q("SELECT * FROM trust_state ORDER BY headcode LIMIT 500")
-        body = ["<h2>Signal Mapper</h2>"]
-        body.append("<table><tr><th>Train ID</th><th>Headcode</th><th>UID</th><th>TOC</th><th>Last Event</th><th>Location</th><th>Delay</th></tr>")
+        # Query TD signal events
+        rows = q("SELECT ts_ms, ts_iso, td_area, msg_type, address, data FROM td_signal_events ORDER BY ts_ms DESC LIMIT 500")
+        body = ["<h2>TD Signal Events (S-Class)</h2>"]
+        body.append("<table><tr><th>Time</th><th>Area</th><th>Type</th><th>Address</th><th>Data</th></tr>")
         for r in rows:
-            train_id = r["train_id"] if "train_id" in r.keys() and r["train_id"] else ""
-            headcode = r["headcode"] if "headcode" in r.keys() and r["headcode"] else ""
-            uid = r["uid"] if "uid" in r.keys() and r["uid"] else ""
-            toc_id = r["toc_id"] if "toc_id" in r.keys() and r["toc_id"] else ""
-            last_event = r["last_event_time"] if "last_event_time" in r.keys() and r["last_event_time"] else ""
-            last_loc = r["last_location"] if "last_location" in r.keys() and r["last_location"] else ""
-            delay = r["last_delay_min"] if "last_delay_min" in r.keys() and r["last_delay_min"] else ""
-            body.append(f"<tr><td class='mono dim'>{train_id}</td><td>{headcode}</td><td>{uid}</td><td>{toc_id}</td><td class='mono dim'>{last_event}</td><td>{last_loc}</td><td>{delay}</td></tr>")
+            body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['td_area']}</td><td>{r['msg_type']}</td><td>{r['address']}</td><td>{r['data'] if r['data'] else ''}</td></tr>")
         body.append("</table>")
         return render_page("Signals - NR RailHub", body, active="signals")
 
@@ -190,44 +192,37 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         area = request.args.get("area", "").strip()
 
         body = ["<h2>Raw TD Events</h2>"]
-        # Determine table name (td_events preferred)
-        table_name = None
-        try:
-            table_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='td_events'")
-            if table_check:
-                table_name = "td_events"
-            else:
-                table_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='td_event'")
-                if table_check:
-                    table_name = "td_event"
-        except Exception:
-            pass
-
-        if not table_name:
-            body.append("<p><i>No TD events table found in DB</i></p>")
-            return render_page("Raw Events - NR RailHub", body, active="raw")
-
-        sql = f"SELECT * FROM {table_name} WHERE 1=1"
+        body.append("<p>This page shows combined berth and signal events.</p>")
+        
+        # Query both berth and signal events
+        berth_sql = "SELECT ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, NULL as address, NULL as data FROM td_berth_events WHERE 1=1"
+        signal_sql = "SELECT ts_ms, ts_iso, td_area, NULL as headcode, msg_type, NULL as from_berth, NULL as to_berth, address, data FROM td_signal_events WHERE 1=1"
+        
         params = []
         if msg_type:
-            sql += " AND event_type=?"
+            berth_sql += " AND msg_type=?"
+            signal_sql += " AND msg_type=?"
+            params.append(msg_type)
             params.append(msg_type)
         if area:
-            sql += " AND td_area=?"
+            berth_sql += " AND td_area=?"
+            signal_sql += " AND td_area=?"
             params.append(area)
-        sql += " ORDER BY ts_utc DESC LIMIT 500"
+            params.append(area)
+        
+        combined_sql = f"SELECT * FROM ({berth_sql} UNION ALL {signal_sql}) ORDER BY ts_ms DESC LIMIT 500"
+        
         try:
-            rows = q(sql, params)
+            rows = q(combined_sql, params)
             if rows:
                 # table header from row keys
                 keys = rows[0].keys()
                 body.append("<table><tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>")
                 for r in rows:
-                    row_data = [str(r[k]) for k in keys]
-                    # keep last two columns monospace for readability (as original code did)
-                    body.append("<tr>" + "".join([f"<td class='{'mono' if i>=len(row_data)-2 else ''}'>{d}</td>" for i, d in enumerate(row_data)]) + "</tr>")
+                    row_data = [str(r[k]) if r[k] is not None else '' for k in keys]
+                    body.append("<tr>" + "".join([f"<td class='mono'>{d}</td>" for d in row_data]) + "</tr>")
                 body.append("</table>")
-                body.append(f"<p class='dim'>Showing {len(rows)} event(s) from {table_name} table</p>")
+                body.append(f"<p class='dim'>Showing {len(rows)} event(s) from combined berth and signal tables</p>")
             else:
                 body.append("<p><i>No events matching filters</i></p>")
         except Exception as e:
@@ -238,8 +233,13 @@ def start_web_dashboard(db_path: str, port: int) -> None:
     def stats():
         body = ["<h2>Stats</h2>"]
         try:
-            counts = q("SELECT (SELECT COUNT(*) FROM td_state) AS td_state, (SELECT COUNT(*) FROM td_event) AS td_event")[0]
-            body.append(f"<p class='dim'>td_state={counts['td_state']} td_event={counts['td_event']}</p>")
+            counts = q("""
+                SELECT 
+                    (SELECT COUNT(*) FROM td_state) AS td_state,
+                    (SELECT COUNT(*) FROM td_berth_events) AS td_berth_events,
+                    (SELECT COUNT(*) FROM td_signal_events) AS td_signal_events
+            """)[0]
+            body.append(f"<p class='dim'>td_state={counts['td_state']} td_berth_events={counts['td_berth_events']} td_signal_events={counts['td_signal_events']}</p>")
         except Exception as e:
             body.append(f"<p><i>Error fetching stats: {e}</i></p>")
         return render_page("Stats - NR RailHub", body, active="stats")

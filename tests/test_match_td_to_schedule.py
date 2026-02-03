@@ -5,7 +5,7 @@ import datetime
 from unittest.mock import Mock
 
 from nrod_railhub.views import HumanView
-from nrod_railhub.models import VstpSchedule, ItpsSchedule, TrustState, TdState
+from nrod_railhub.models import VstpSchedule, ItpsSchedule, TrustState, TdState, iso_to_ms
 
 
 def test_match_via_trust_uid_vstp():
@@ -38,7 +38,7 @@ def test_match_via_trust_uid_vstp():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:30:00Z"
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -80,7 +80,7 @@ def test_match_via_trust_uid_itps():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:30:00Z"
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -119,7 +119,7 @@ def test_match_via_smart_stanox():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:30:00Z"
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -183,7 +183,7 @@ def test_match_via_time_proximity():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:29:00+00:00"
+        last_time_ms=iso_to_ms("2026-01-17T12:29:00+00:00") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -218,7 +218,7 @@ def test_match_ambiguous_fallback():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc=""  # No time available
+        last_time_ms=0  # No time available
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -244,7 +244,7 @@ def test_match_no_candidates():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:30:00Z"
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -318,7 +318,7 @@ def test_match_prefers_uid_over_stanox():
         descr="2C90",
         area_id="EK",
         to_berth="0152",
-        last_time_utc="2026-01-17T12:30:00Z"
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
     )
     hv.td_by_headcode[("EK", "2C90")] = td
 
@@ -403,7 +403,7 @@ def test_tiploc_index_matching_with_reused_headcode():
         descr="1P42",
         area_id="VL",  # Victoria area
         to_berth="0152",
-        last_time_utc="2026-01-17T10:25:00+00:00"
+        last_time_ms=iso_to_ms("2026-01-17T10:25:00+00:00") or 0
     )
     hv.td_by_headcode[("VL", "1P42")] = td
     
