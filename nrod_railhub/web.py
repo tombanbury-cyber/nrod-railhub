@@ -43,6 +43,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             f"<a href='/raw-events' class='navlink {'active' if active=='raw' else ''}'>Raw Events</a>"
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
             f"<a href='/mapper' class='navlink {'active' if active=='mapper' else ''}'>Mapper</a>"
+            f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
             "</div>"
             "<div class='quickfilter'>"
@@ -532,6 +533,271 @@ def start_web_dashboard(db_path: str, port: int) -> None:
         """)
         
         return render_page("Mapper - NR RailHub", body, active="mapper")
+
+    @app.get("/signal-mappings")
+    def signal_mappings():
+        """Signal mappings enquiry screen showing berth-signal correlations."""
+        body = ["<h2>Signal Mappings Enquiry</h2>"]
+        
+        # Check if mapper tables exist
+        try:
+            table_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='berth_signal_scores'")
+            if not table_check:
+                body.append("<p><i>Signal mappings table not found. Ensure database was created with mapper support enabled.</i></p>")
+                return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
+        except Exception as e:
+            body.append(f"<p><i>Error checking signal mappings table: {e}</i></p>")
+            return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
+        
+        # Get filter parameters from query string
+        td_area_filter = request.args.get("area", "").strip()
+        address_filter = request.args.get("address", "").strip()
+        from_berth_filter = request.args.get("from_berth", "").strip()
+        to_berth_filter = request.args.get("to_berth", "").strip()
+        min_score = request.args.get("min_score", "").strip()
+        min_obs = request.args.get("min_obs", "").strip()
+        
+        # Build SQL query with filters
+        # Check if corpus_tiploc table exists for location enrichment
+        corpus_exists = False
+        try:
+            corpus_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='corpus_tiploc'")
+            corpus_exists = len(corpus_check) > 0
+        except Exception:
+            pass
+        
+        if corpus_exists:
+            sql = """
+                SELECT 
+                    bss.td_area,
+                    bss.address,
+                    bss.from_berth,
+                    bss.to_berth,
+                    bss.score,
+                    bss.obs_count,
+                    bss.last_seen_ts,
+                    bss.last_seen_utc,
+                    bss.last_data,
+                    ct.nlcdesc as location_name,
+                    ct.stanox
+                FROM berth_signal_scores bss
+                LEFT JOIN corpus_tiploc ct ON CAST(bss.address AS TEXT) = CAST(ct.stanox AS TEXT)
+                WHERE 1=1
+            """
+        else:
+            sql = """
+                SELECT 
+                    td_area,
+                    address,
+                    from_berth,
+                    to_berth,
+                    score,
+                    obs_count,
+                    last_seen_ts,
+                    last_seen_utc,
+                    last_data,
+                    NULL as location_name,
+                    address as stanox
+                FROM berth_signal_scores
+                WHERE 1=1
+            """
+        params = []
+        
+        # Use the appropriate table alias based on whether corpus exists
+        table_alias = "bss." if corpus_exists else ""
+        
+        if td_area_filter:
+            sql += f" AND {table_alias}td_area = ?"
+            params.append(td_area_filter)
+        if address_filter:
+            sql += f" AND {table_alias}address = ?"
+            params.append(address_filter)
+        if from_berth_filter:
+            sql += f" AND {table_alias}from_berth = ?"
+            params.append(from_berth_filter)
+        if to_berth_filter:
+            sql += f" AND {table_alias}to_berth = ?"
+            params.append(to_berth_filter)
+        if min_score:
+            try:
+                sql += f" AND {table_alias}score >= ?"
+                params.append(float(min_score))
+            except ValueError:
+                pass
+        if min_obs:
+            try:
+                sql += f" AND {table_alias}obs_count >= ?"
+                params.append(int(min_obs))
+            except ValueError:
+                pass
+        
+        sql += f" ORDER BY {table_alias}score DESC LIMIT 500"
+        
+        try:
+            rows = q(sql, params)
+            
+            # Get summary statistics
+            summary_sql = """
+                SELECT 
+                    COUNT(*) as total_mappings,
+                    COUNT(DISTINCT td_area) as total_areas,
+                    COUNT(DISTINCT address) as total_addresses,
+                    SUM(obs_count) as total_observations,
+                    AVG(score) as avg_score,
+                    MAX(score) as max_score
+                FROM berth_signal_scores
+                WHERE 1=1
+            """
+            summary_params = []
+            if td_area_filter:
+                summary_sql += " AND td_area = ?"
+                summary_params.append(td_area_filter)
+            if address_filter:
+                summary_sql += " AND address = ?"
+                summary_params.append(address_filter)
+            if from_berth_filter:
+                summary_sql += " AND from_berth = ?"
+                summary_params.append(from_berth_filter)
+            if to_berth_filter:
+                summary_sql += " AND to_berth = ?"
+                summary_params.append(to_berth_filter)
+            if min_score:
+                try:
+                    summary_sql += " AND score >= ?"
+                    summary_params.append(float(min_score))
+                except ValueError:
+                    pass
+            if min_obs:
+                try:
+                    summary_sql += " AND obs_count >= ?"
+                    summary_params.append(int(min_obs))
+                except ValueError:
+                    pass
+            
+            summary = q(summary_sql, summary_params)[0]
+            
+            # Get list of areas for quick filter
+            areas = q("SELECT DISTINCT td_area FROM berth_signal_scores ORDER BY td_area")
+            
+            body.append("<p class='dim'>")
+            body.append("This screen shows signal address to berth mappings based on observed correlations between TD berth movements and signal events.")
+            body.append("</p>")
+            
+            # Summary statistics
+            body.append("<div style='background:#f7f9fc;padding:12px;border-radius:6px;margin:12px 0'>")
+            body.append(f"<p style='margin:4px 0'><b>Total Mappings:</b> {summary['total_mappings']} | ")
+            body.append(f"<b>TD Areas:</b> {summary['total_areas']} | ")
+            body.append(f"<b>Unique Addresses:</b> {summary['total_addresses']} | ")
+            body.append(f"<b>Total Observations:</b> {summary['total_observations']}</p>")
+            if summary['avg_score']:
+                body.append(f"<p style='margin:4px 0'><b>Avg Score:</b> {summary['avg_score']:.3f} | ")
+                body.append(f"<b>Max Score:</b> {summary['max_score']:.3f}</p>")
+            body.append("</div>")
+            
+            # Area pills
+            body.append("<div style='margin:12px 0'>Quick filter: ")
+            for area_row in areas:
+                area = area_row[0]
+                body.append(f"<a class='pill' href='/signal-mappings?area={area}'>{area}</a>")
+            body.append(" <a class='pill' href='/signal-mappings'>ALL</a></div>")
+            
+            # Filter form
+            body.append("<h3>Filters</h3>")
+            body.append("""
+                <form method='get' style='background:#f7f9fc;padding:15px;border-radius:6px;margin-bottom:16px'>
+                    <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px'>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>TD Area:</label>
+                            <input type='text' name='area' value='""" + td_area_filter + """' placeholder='e.g. EK' style='padding:6px;width:100%'>
+                        </div>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>Signal Address:</label>
+                            <input type='text' name='address' value='""" + address_filter + """' placeholder='e.g. 87701' style='padding:6px;width:100%'>
+                        </div>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>From Berth:</label>
+                            <input type='text' name='from_berth' value='""" + from_berth_filter + """' placeholder='e.g. 0152' style='padding:6px;width:100%'>
+                        </div>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>To Berth:</label>
+                            <input type='text' name='to_berth' value='""" + to_berth_filter + """' placeholder='e.g. 0154' style='padding:6px;width:100%'>
+                        </div>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>Min Score:</label>
+                            <input type='number' step='0.01' name='min_score' value='""" + min_score + """' placeholder='e.g. 0.5' style='padding:6px;width:100%'>
+                        </div>
+                        <div>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>Min Observations:</label>
+                            <input type='number' name='min_obs' value='""" + min_obs + """' placeholder='e.g. 5' style='padding:6px;width:100%'>
+                        </div>
+                    </div>
+                    <div style='margin-top:12px'>
+                        <button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer;margin-right:8px'>Apply Filters</button>
+                        <a href='/signal-mappings' style='padding:8px 16px;background:#eee;color:#222;text-decoration:none;border-radius:6px;font-weight:600'>Clear Filters</a>
+                    </div>
+                </form>
+            """)
+            
+            # Results table
+            body.append(f"<h3>Signal Mappings ({len(rows)} results, max 500 shown)</h3>")
+            
+            if rows:
+                body.append("<table style='font-size:13px'>")
+                body.append("<tr>")
+                body.append("<th>TD Area</th>")
+                body.append("<th>Signal Address</th>")
+                body.append("<th>From Berth</th>")
+                body.append("<th>To Berth</th>")
+                body.append("<th>Score</th>")
+                body.append("<th>Obs Count</th>")
+                body.append("<th>Last Seen</th>")
+                body.append("<th>Location</th>")
+                body.append("<th>Last Data</th>")
+                body.append("</tr>")
+                
+                for r in rows:
+                    # Format score with color coding
+                    score = r['score'] if r['score'] is not None else 0
+                    score_color = '#22c55e' if score > 1.0 else '#f59e0b' if score > 0.5 else '#6b7280'
+                    score_str = f"<span style='color:{score_color};font-weight:600'>{score:.3f}</span>"
+                    
+                    # Format location
+                    loc = ""
+                    if r['location_name']:
+                        loc = r['location_name']
+                        if r['stanox']:
+                            loc += f" ({r['stanox']})"
+                    elif r['stanox']:
+                        loc = r['stanox']
+                    
+                    # Format timestamp
+                    time_str = r['last_seen_utc'] if r['last_seen_utc'] else ""
+                    if time_str:
+                        # Show just the date and time part (remove milliseconds for readability)
+                        time_str = time_str[:19].replace('T', ' ')
+                    
+                    body.append("<tr>")
+                    body.append(f"<td>{r['td_area']}</td>")
+                    body.append(f"<td class='mono'>{r['address']}</td>")
+                    body.append(f"<td>{r['from_berth']}</td>")
+                    body.append(f"<td>{r['to_berth']}</td>")
+                    body.append(f"<td>{score_str}</td>")
+                    body.append(f"<td>{r['obs_count']}</td>")
+                    body.append(f"<td class='mono dim' style='font-size:12px'>{time_str}</td>")
+                    body.append(f"<td>{loc}</td>")
+                    body.append(f"<td class='dim'>{r['last_data'] if r['last_data'] else ''}</td>")
+                    body.append("</tr>")
+                
+                body.append("</table>")
+            else:
+                body.append("<p><i>No mappings found matching the current filters.</i></p>")
+                
+        except Exception as e:
+            body.append(f"<p style='color:red'>Error querying signal mappings: {e}</p>")
+            import traceback
+            body.append(f"<pre style='font-size:11px;background:#f7f9fc;padding:8px'>{traceback.format_exc()}</pre>")
+        
+        return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
 
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
