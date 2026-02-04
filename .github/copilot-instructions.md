@@ -1,3 +1,8 @@
+---
+description: "Repository-wide Copilot custom instructions for nrod-railhub"
+applyTo: "**/*"
+---
+
 # Copilot Instructions for nrod-railhub
 
 ## Project Overview
@@ -112,9 +117,70 @@ Follow the redirect-safe pattern in `LocationResolver._download_corpus()`:
 
 ### Testing
 
-- Manual:  `python3 nrod_railhub.py --user USER --password PASS --headcode 2C90 --verbose`
-- Unit tests: Not yet implemented (contributions welcome)
-- Live testing:  Requires valid Network Rail credentials
+- **Test framework**: pytest
+- **Test files**: Located in `tests/` directory
+- **Running tests**: `pytest -q` (runs all tests)
+- **Manual testing**: `python3 nrod_railhub.py --user USER --password PASS --headcode 2C90 --verbose`
+- **Live testing**: Requires valid Network Rail credentials
+- **Note**: Unit tests exist for reference data parsing; integration tests require live STOMP connection
+
+#### Running Tests
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run all tests
+pytest -q
+
+# Run specific test file
+pytest tests/test_double_encoding.py -v
+
+# Run with coverage (if pytest-cov installed)
+pytest --cov=nrod_railhub tests/
+```
+
+## Build and Validation
+
+### Prerequisites
+
+- Python 3.9+ (type hints and dataclasses required)
+- pip package manager
+- Network Rail credentials (free): https://publicdatafeeds.networkrail.co.uk/
+
+### Installation
+
+```bash
+# Clone repository
+git clone https://github.com/tombanbury-cyber/nrod-railhub.git
+cd nrod-railhub
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Running the Application
+
+```bash
+# Basic monitoring (requires credentials)
+python3 nrod_railhub.py --user YOUR_EMAIL --password YOUR_PASSWORD
+
+# Monitor specific train with web dashboard
+python3 nrod_railhub.py --user USER --password PASS \
+  --headcode 2C90 --db-path rail.db --web-port 8080
+
+# Filter to TD area
+python3 nrod_railhub.py --user USER --password PASS --td-area EK
+```
+
+### Validation Checklist
+
+Before submitting changes:
+- [ ] Run `pytest -q` - all tests must pass
+- [ ] Manually test with live STOMP connection if changing message handling
+- [ ] Test reference data download if changing resolver code
+- [ ] Verify thread safety if modifying shared state
+- [ ] Update this file if adding new CLI arguments or major features
 
 ## Command-Line Interface
 
@@ -191,11 +257,35 @@ The dashboard uses raw HTML (no templates) for simplicity. Runs in daemon thread
 ## Dependencies
 
 ```bash
-pip install stomp.py flask
+pip install -r requirements.txt
 ```
 
-- `stomp.py` - STOMP 1.1 client
-- `flask` - Web dashboard (optional, only if `--web-port` is used)
+**Core dependencies:**
+- `stomp.py>=8.0.0` - STOMP 1.1 client for Network Rail connection
+- `flask>=2.0.0` - Web dashboard (optional, only if `--web-port` is used)
+- `requests>=2.20` - HTTP client for reference data downloads
+- `pyshp>=2.1.3` - Shapefile reading (for SMART data)
+- `pytest>=7.0` - Testing framework
+
+## Project Structure
+
+```
+nrod-railhub/
+├── .github/
+│   ├── copilot-instructions.md   # This file
+│   ├── workflows/                 # CI/CD pipelines
+│   └── CODEOWNERS                # Code ownership rules
+├── nrod_railhub/                 # Main package directory
+├── nrod_railhub.py               # Main application entry point
+├── tests/                        # Test suite
+├── experimental/                 # Experimental features (require owner review)
+├── import_scripts/               # Reference data import utilities
+├── database/                     # Database schema and migrations
+├── requirements.txt              # Python dependencies
+├── README.md                     # User documentation
+├── ARCHITECTURE.md               # Technical architecture
+└── CONTRIBUTING.md               # Development guidelines
+```
 
 ## Resources
 
@@ -211,3 +301,25 @@ When modifying this code:
 2. **Thread safety**: Receiver thread must never crash; wrap DB/state updates in try/except
 3. **Test with live data**: Network Rail data has edge cases; validate with real STOMP connection
 4. **Update this file**: Document new CLI args, DB schema changes, or resolvers
+5. **Run tests**: Execute `pytest -q` before submitting PR
+6. **Code review**: Changes to `experimental/` require owner review (see CODEOWNERS)
+
+### CI/CD Pipelines
+
+The repository uses GitHub Actions for continuous integration:
+
+- **import-and-test.yml**: Runs on push to main and PRs
+  - Executes pytest test suite
+  - Monthly scheduled job to download fresh reference data
+  
+- **experimental-ci.yml**: Runs when `experimental/` directory changes
+  - Validates experimental features separately
+  - Requires owner approval for merges
+
+### Pull Request Guidelines
+
+- Write clear commit messages following conventional commits format
+- Include test coverage for new features
+- Manually verify changes with live STOMP connection when applicable
+- Update documentation (README, ARCHITECTURE, this file) for significant changes
+- Ensure CI checks pass before requesting review
