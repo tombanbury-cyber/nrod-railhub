@@ -102,11 +102,37 @@ def download_file(url: str, username: str, password: str, out_path: str) -> None
 
 
 def read_json_file(path: str) -> Any:
+    """
+    Read and parse JSON file, handling potential double-encoding.
+    
+    Network Rail SMART data is sometimes double-encoded (JSON string within JSON).
+    This function detects and handles that scenario by attempting a second parse
+    if the first parse yields a string rather than a dict/list.
+    
+    Args:
+        path: Path to JSON file (may be gzipped)
+        
+    Returns:
+        Parsed JSON data (dict or list)
+    """
     with open(path, "rb") as f:
         raw = f.read()
     raw = maybe_gunzip_bytes(raw)
     text = raw.decode("utf-8", errors="replace").strip()
-    return json.loads(text)
+    
+    # First parse
+    data = json.loads(text)
+    
+    # Check for double-encoding: if result is a string, try parsing again
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+            print(f"[INFO] Detected and handled double-encoded JSON in {path}")
+        except (json.JSONDecodeError, TypeError):
+            # If second parse fails, return the string (not double-encoded after all)
+            pass
+    
+    return data
 
 
 def connect_db(db_path: str) -> sqlite3.Connection:

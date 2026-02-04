@@ -137,6 +137,9 @@ Network Rail STOMP Feeds
 1. **Connect** - Establishes STOMP connection to Network Rail's broker
 2. **Subscribe** - Listens to VSTP, TRUST, and TD topics
 3. **Enrich** - Downloads CORPUS (station names) and SMART (berth locations)
+   - Automatically handles double-encoded JSON from Network Rail API
+   - Caches reference data locally for performance
+   - Refreshable via `--corpus-refresh` and `--smart-refresh` flags
 4. **Join** - Combines data sources by headcode/UID
 5. **Display** - Renders unified view with delays, locations, and schedules
 
@@ -147,6 +150,22 @@ Network Rail STOMP Feeds
 | **VSTP** | Late-notice schedule changes | New service added for engineering work |
 | **TRUST** | Train activation, arrivals, departures | Train 2C90 departed Woking +3 min late |
 | **TD** | Signaller's view of berth occupancy | Headcode 2C90 moved from berth 0152→0154 |
+| **CORPUS** | Station/location reference data | Maps STANOX 87701 to "Clapham Junction" |
+| **SMART** | Berth stepping reference data | Maps TD area EK berth 0152 to Gillingham platform 1 |
+
+### Reference Data Updates
+
+Reference data (CORPUS and SMART) can be refreshed periodically:
+
+```bash
+# Manual refresh
+python3 nrod_railhub.py --user USER --password PASS --corpus-refresh --smart-refresh
+
+# Automated refresh service (runs every 24 hours)
+python3 -m nrod_railhub.services.ref_import_service
+```
+
+**Note:** Network Rail's SMART data may be double-encoded (JSON string within JSON). The application automatically detects and handles this format transparently.
 
 ## Rail Domain Glossary
 
@@ -157,6 +176,8 @@ Network Rail STOMP Feeds
 - **CRS** - 3-letter station code (e.g. `WAT` = Waterloo)
 - **TD Area** - Signalling control area (e.g. `EK` = East Kent, `AD` = Ashford)
 - **Berth** - Track circuit identifier within TD area
+- **SMART** - Signalling Maintenance Analysis and Renewal Tool (berth reference data)
+- **CORPUS** - Corporate Reference System (location reference data)
 
 ## Troubleshooting
 
