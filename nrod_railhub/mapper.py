@@ -6,9 +6,17 @@ from __future__ import annotations
 import math
 from bisect import bisect_left, bisect_right
 from typing import Any, Dict, List, Tuple
+from datetime import datetime, timezone  # added for fallback last_seen_utc
 
 STEP_TYPES = {"CA", "CB", "CC"}
 SIG_TYPES = {"SF"}
+
+def _ts_to_iso_ms(ts_ms: int) -> str:
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    except Exception:
+        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
 
 def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
     """Exponential weighting function for scoring signal correlations."""
@@ -71,14 +79,21 @@ def process_batch_for_mapper(
                 float(w),
             ))
             
+            # Ensure last_seen_utc is not None (DB schema requires NOT NULL)
+            last_seen_utc = s.get("received_at_utc")
+            if not last_seen_utc:
+                last_seen_utc = _ts_to_iso_ms(s_ts)
+
+            last_seen_ts = int(s_ts) if s_ts else None
+
             score_rows.append((
                 st.get("td_area"),
                 st.get("from_berth"),
                 st.get("to_berth"),
                 str(s.get("address")),
                 float(w),
-                int(s_ts),
-                s.get("received_at_utc"),
+                last_seen_ts,
+                last_seen_utc,
                 s.get("data"),
             ))
     
