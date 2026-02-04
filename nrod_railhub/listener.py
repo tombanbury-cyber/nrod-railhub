@@ -16,6 +16,9 @@ import stomp
 from .models import utc_now_iso, utc_now_ms, ms_to_iso_utc, safe_int
 from .views import HumanView
 from .database import RailDB
+from .logging_config import get_logger
+
+logger = get_logger("listener")
 
 class Listener(stomp.ConnectionListener):
     def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None) -> None:
@@ -87,7 +90,7 @@ class Listener(stomp.ConnectionListener):
             h, p = host_and_port
         except Exception:
             h, p = "?", "?"
-        print(f"[{utc_now_iso()}] Connecting TCP to {h}:{p} ...")
+        logger.info(f"Connecting TCP to {h}:{p} ...")
 
     def on_connected(self, frame) -> None:
         self.connected_at = utc_now_iso()
@@ -100,15 +103,15 @@ class Listener(stomp.ConnectionListener):
             version = frame.headers.get("version", "?")
         except Exception:
             pass
-        print(f"[{self.connected_at}] CONNECTED. version={version} session={session} server={server}")
+        logger.info(f"CONNECTED. version={version} session={session} server={server}")
 
     def on_disconnected(self) -> None:
-        print(f"[{utc_now_iso()}] Disconnected.", file=sys.stderr)
+        logger.error("Disconnected.")
 
     def on_error(self, frame) -> None:
         body = getattr(frame, "body", "")
         hdrs = getattr(frame, "headers", {})
-        print(f"[{utc_now_iso()}] STOMP ERROR headers={hdrs} body={body}", file=sys.stderr)
+        logger.error(f"STOMP ERROR headers={hdrs} body={body}")
 
     def on_message(self, frame) -> None:
         self.last_message_at = utc_now_iso()
@@ -126,7 +129,7 @@ class Listener(stomp.ConnectionListener):
         # Optional raw preview
         if self.args.verbose:
             short = (frame.body[:200] + "…") if frame.body and len(frame.body) > 200 else (frame.body or "")
-            print(f"[{self.last_message_at}] RX {dest or '?'} ({len(frame.body or '')} bytes): {short}")
+            logger.debug(f"RX {dest or '?'} ({len(frame.body or '')} bytes): {short}")
 
         if not frame.body:
             return
@@ -135,7 +138,7 @@ class Listener(stomp.ConnectionListener):
             payload = json.loads(frame.body)
         except Exception:
             if self.args.verbose:
-                print(f"[{utc_now_iso()}] Non-JSON message ignored")
+                logger.debug("Non-JSON message ignored")
             return
 
         items = payload if isinstance(payload, list) else [payload]
@@ -155,9 +158,9 @@ class Listener(stomp.ConnectionListener):
 
                 if self.args.trace_headcode:
                     if self.args.headcode and vs.signalling_id == self.args.headcode:
-                        print(f"[{utc_now_iso()}] TRACE VSTP headcode={vs.signalling_id} uid={vs.uid} start={vs.start_date}")
+                        logger.debug(f"TRACE VSTP headcode={vs.signalling_id} uid={vs.uid} start={vs.start_date}")
                     if self.args.uid and vs.uid == self.args.uid:
-                        print(f"[{utc_now_iso()}] TRACE VSTP uid={vs.uid} headcode={vs.signalling_id}")
+                        logger.debug(f"TRACE VSTP uid={vs.uid} headcode={vs.signalling_id}")
 
                 if self._matches(vs.signalling_id, vs.uid):
                     if self._print_train_update(vs.signalling_id):
@@ -181,12 +184,12 @@ class Listener(stomp.ConnectionListener):
                 # Trace TRUST visibility
                 if self.args.trace_headcode:
                     if self.args.uid and ts.train_uid == self.args.uid:
-                        print(f"[{utc_now_iso()}] TRACE TRUST uid={ts.train_uid} train_id={ts.train_id} time={ts.last_event_time}")
+                        logger.debug(f"TRACE TRUST uid={ts.train_uid} train_id={ts.train_id} time={ts.last_event_time}")
                     if self.args.headcode and (
                         trust_headcode == self.args.headcode
                         or self.hv.trust_by_headcode.get(self.args.headcode) is ts
                     ):
-                        print(f"[{utc_now_iso()}] TRACE TRUST headcode={self.args.headcode} train_id={ts.train_id} uid={ts.train_uid}")
+                        logger.debug(f"TRACE TRUST headcode={self.args.headcode} train_id={ts.train_id} uid={ts.train_uid}")
 
                 # Decide whether to print
                 hc_to_print = None
@@ -247,7 +250,7 @@ class Listener(stomp.ConnectionListener):
                             try:
                                 self._db_err_count = getattr(self, '_db_err_count', 0) + 1
                                 if self._db_err_count <= 5:
-                                    print(f"[{utc_now_iso()}] DB: TD signal event persist failed: {type(e).__name__}: {e}")
+                                    logger.error(f"DB: TD signal event persist failed: {type(e).__name__}: {e}")
                             except Exception:
                                 pass
                     continue
@@ -260,8 +263,8 @@ class Listener(stomp.ConnectionListener):
 
                 if self.args.trace_headcode and self.args.headcode and td.descr == self.args.headcode:
                     td_time_iso = ms_to_iso_utc(td.last_time_ms) if td.last_time_ms else "?"
-                    print(
-                        f"[{utc_now_iso()}] TRACE TD headcode={td.descr} "
+                    logger.debug(
+                        f"TRACE TD headcode={td.descr} "
                         f"area={td.area_id} {td.from_berth}->{td.to_berth} "
                         f"time={td_time_iso}"
                     )
@@ -318,7 +321,7 @@ class Listener(stomp.ConnectionListener):
                         try:
                             self._db_err_count = getattr(self, '_db_err_count', 0) + 1
                             if self._db_err_count <= 5:
-                                print(f"[{utc_now_iso()}] DB: TD berth event persist failed: {type(e).__name__}: {e}")
+                                logger.error(f"DB: TD berth event persist failed: {type(e).__name__}: {e}")
                         except Exception:
                             pass
 
