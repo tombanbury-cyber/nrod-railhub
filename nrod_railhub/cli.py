@@ -184,7 +184,8 @@ def parse_args() -> argparse.Namespace:
         choices=["verbose", "info", "warning", "error"],
         help="Log level (default: error). Options: verbose (debug), info, warning, error",
     )
-    p.add_argument("--verbose", action="store_true", help="Print short trace of every raw message received")
+    p.add_argument("--verbose", action="store_true", 
+                   help="Enable raw STOMP message preview (also sets log-level to verbose if not specified)")
     p.add_argument("--status-every", dest="status_every", type=int, default=15,
                    help="Print status line every N seconds (default 15)")             
 
