@@ -8,6 +8,15 @@ import pytest
 from nrod_railhub.logging_config import setup_logger, get_logger, LOG_LEVEL_MAP
 
 
+@pytest.fixture(autouse=True)
+def cleanup_logger():
+    """Clean up logger handlers after each test."""
+    yield
+    # Clean up the logger after each test
+    logger = logging.getLogger("nrod_railhub")
+    logger.handlers.clear()
+
+
 def test_log_level_map():
     """Test that all log level strings map to valid Python logging levels."""
     assert LOG_LEVEL_MAP["verbose"] == logging.DEBUG

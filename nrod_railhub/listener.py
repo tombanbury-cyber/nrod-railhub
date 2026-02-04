@@ -263,11 +263,7 @@ class Listener(stomp.ConnectionListener):
 
                 if self.args.trace_headcode and self.args.headcode and td.descr == self.args.headcode:
                     td_time_iso = ms_to_iso_utc(td.last_time_ms) if td.last_time_ms else "?"
-                    logger.debug(
-                        f"TRACE TD headcode={td.descr} "
-                        f"area={td.area_id} {td.from_berth}->{td.to_berth} "
-                        f"time={td_time_iso}"
-                    )
+                    logger.debug(f"TRACE TD headcode={td.descr} area={td.area_id} {td.from_berth}->{td.to_berth} time={td_time_iso}")
 
                 if self.args.headcode and td.descr != self.args.headcode:
                     continue
