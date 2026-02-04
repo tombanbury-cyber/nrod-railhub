@@ -11,6 +11,14 @@ from datetime import datetime, timezone  # added for fallback last_seen_utc
 STEP_TYPES = {"CA", "CB", "CC"}
 SIG_TYPES = {"SF"}
 
+# Example: resolve mapper params from DB and call mapper
+# db is your Database instance (nrod_railhub.database.Database or similar)
+cfg = db.get_mapper_config()   # returns {'pre_ms': int, 'post_ms': int, 'tau_ms': int}
+
+pre_ms = int(cfg.get('pre_ms', 1000))
+post_ms = int(cfg.get('post_ms', 5000))
+tau_ms = int(cfg.get('tau_ms', 2500))
+
 def _ts_to_iso_ms(ts_ms: int) -> str:
     try:
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
@@ -25,9 +33,9 @@ def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
 def process_batch_for_mapper(
     evs: List[Dict[str, Any]],
     *,
-    pre_ms: int = 1000,
-    post_ms: int = 5000,
-    tau_ms: int = 2500,
+    pre_ms: int = pre_ms,
+    post_ms: int = post_ms,
+    tau_ms: int = tau_ms,
 ) -> Tuple[List[Tuple], List[Tuple]]:
     """
     Process events and return (obs_rows, score_rows) for DB insertion.
