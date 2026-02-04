@@ -15,6 +15,10 @@ from typing import List
 
 from flask import Flask, request
 
+from .logging_config import get_logger
+
+logger = get_logger("web")
+
 def start_web_dashboard(db_path: str, port: int) -> None:
     app = Flask(__name__)
     db_path = str(pathlib.Path(db_path).expanduser())
@@ -227,6 +231,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             else:
                 body.append("<p><i>No events matching filters</i></p>")
         except Exception as e:
+            logger.error(f"Web dashboard: Error querying events: {e}")
             body.append(f"<p><i>Error querying events: {e}</i></p>")
         return render_page("Raw Events - NR RailHub", body, active="raw")
 
@@ -242,6 +247,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             """)[0]
             body.append(f"<p class='dim'>td_state={counts['td_state']} td_berth_events={counts['td_berth_events']} td_signal_events={counts['td_signal_events']}</p>")
         except Exception as e:
+            logger.error(f"Web dashboard: Error fetching stats: {e}")
             body.append(f"<p><i>Error fetching stats: {e}</i></p>")
         return render_page("Stats - NR RailHub", body, active="stats")
 
@@ -257,6 +263,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 body.append("<p><i>Mapper tables not found. Ensure database was created with mapper support enabled.</i></p>")
                 return render_page("Mapper - NR RailHub", body, active="mapper")
         except Exception as e:
+            logger.error(f"Web dashboard: Error checking mapper tables: {e}")
             body.append(f"<p><i>Error checking mapper tables: {e}</i></p>")
             return render_page("Mapper - NR RailHub", body, active="mapper")
         
@@ -442,6 +449,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                     body.append(f"<p>Deleted: {deleted} | Inserted: {total_inserted} | Observations: {total_observations}</p>")
                     
             except Exception as e:
+                logger.error(f"Web dashboard: Error during mapper rebuild: {e}")
                 body.append(f"<p style='color:red'>Error during rebuild: {e}</p>")
                 import traceback
                 body.append(f"<pre style='font-size:11px;background:#f7f9fc;padding:8px'>{traceback.format_exc()}</pre>")
@@ -546,6 +554,7 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 body.append("<p><i>Signal mappings table not found. Ensure database was created with mapper support enabled.</i></p>")
                 return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
         except Exception as e:
+            logger.error(f"Web dashboard: Error checking signal mappings table: {e}")
             body.append(f"<p><i>Error checking signal mappings table: {e}</i></p>")
             return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
         
@@ -793,11 +802,13 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 body.append("<p><i>No mappings found matching the current filters.</i></p>")
                 
         except Exception as e:
+            logger.error(f"Web dashboard: Error querying signal mappings: {e}")
             body.append(f"<p style='color:red'>Error querying signal mappings: {e}</p>")
             import traceback
             body.append(f"<pre style='font-size:11px;background:#f7f9fc;padding:8px'>{traceback.format_exc()}</pre>")
         
         return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
 
+    logger.info(f"Starting web dashboard on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
