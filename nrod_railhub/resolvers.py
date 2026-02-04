@@ -15,6 +15,9 @@ from urllib.error import URLError, HTTPError
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import CORPUS_URL, SMART_URL, utc_now_iso, hhmmss_to_hhmm
+from .logging_config import get_logger
+
+logger = get_logger("resolvers")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -51,11 +54,11 @@ class LocationResolver:
 
         if force or (not path.exists()):
             if not quiet:
-                print(f"[{utc_now_iso()}] CORPUS: downloading to {path} ...")
+                logger.info(f"CORPUS: downloading to {path} ...")
             self._download_corpus(username, password, str(path))
         else:
             if not quiet:
-                print(f"[{utc_now_iso()}] CORPUS: using cached file {path}")
+                logger.info(f"CORPUS: using cached file {path}")
 
         self._load_corpus_file(str(path), quiet=quiet)
 
@@ -160,7 +163,7 @@ class LocationResolver:
                 try:
                     payload = json.loads(payload)
                     if not quiet:
-                        print(f"[{utc_now_iso()}] CORPUS: detected and handled double-encoded JSON")
+                        logger.debug("CORPUS: detected and handled double-encoded JSON")
                 except (json.JSONDecodeError, TypeError):
                     # If second parse fails, continue with the string (not double-encoded)
                     pass
@@ -176,10 +179,10 @@ class LocationResolver:
         if isinstance(payload, list):
             rows = payload
             if not quiet:
-                print(f"[{utc_now_iso()}] CORPUS format: list")
+                logger.debug("CORPUS format: list")
         elif isinstance(payload, dict):
             if not quiet:
-                print(f"[{utc_now_iso()}] CORPUS format: dict wrapper keys={list(payload.keys())}")
+                logger.debug(f"CORPUS format: dict wrapper keys={list(payload.keys())}")
 
             # Common wrapper keys
             for key in ("TIPLOCDATA", "tiplocdata", "locations", "data"):
@@ -230,8 +233,8 @@ class LocationResolver:
         self.crs_to_name = crs
 
         if not quiet:
-            print(
-                f"[{utc_now_iso()}] CORPUS loaded: "
+            logger.info(
+                f"CORPUS loaded: "
                 f"{len(tiploc)} TIPLOC, {len(stanox)} STANOX, {len(crs)} CRS mappings"
             )
 
@@ -287,7 +290,7 @@ class SmartResolver:
 
         if force or (not path.exists()):
             if not quiet:
-                print(f"[{utc_now_iso()}] SMART: downloading to {path} ...")
+                logger.info(f"SMART: downloading to {path} ...")
             # Re-use LocationResolver's downloader (same auth + redirect rules)
             lr = LocationResolver()
             lr._download_corpus(username, password, str(path).replace("CORPUS", "SMART"))  # legacy fallback
@@ -295,7 +298,7 @@ class SmartResolver:
             self._download_smart(username, password, str(path))
         else:
             if not quiet:
-                print(f"[{utc_now_iso()}] SMART: using cached file {path}")
+                logger.info(f"SMART: using cached file {path}")
 
         self._load_smart_file(str(path), quiet=quiet)
 
@@ -380,7 +383,7 @@ class SmartResolver:
                 try:
                     payload = json.loads(payload)
                     if not quiet:
-                        print(f"[{utc_now_iso()}] SMART: detected and handled double-encoded JSON")
+                        logger.debug("SMART: detected and handled double-encoded JSON")
                 except (json.JSONDecodeError, TypeError):
                     # If second parse fails, continue with the string (not double-encoded)
                     pass
@@ -392,10 +395,10 @@ class SmartResolver:
         if isinstance(payload, list):
             rows = payload
             if not quiet:
-                print(f"[{utc_now_iso()}] SMART format: list")
+                logger.debug("SMART format: list")
         elif isinstance(payload, dict):
             if not quiet:
-                print(f"[{utc_now_iso()}] SMART format: dict wrapper keys={list(payload.keys())}")
+                logger.debug(f"SMART format: dict wrapper keys={list(payload.keys())}")
             for key in ("SMARTDATA", "smartdata", "data", "rows", "SMART", "BERTHDATA"):
                 v = payload.get(key)
                 if isinstance(v, list):
@@ -440,7 +443,7 @@ class SmartResolver:
 
         self.berth_map = mp
         if not quiet:
-            print(f"[{utc_now_iso()}] SMART loaded: {len(self.berth_map)} berth mappings")
+            logger.info(f"SMART loaded: {len(self.berth_map)} berth mappings")
 
     def lookup(self, td_area: str, berth: str) -> Optional[Dict[str, str]]:
         """Look up berth information, with fallback to inferred data.
@@ -828,7 +831,7 @@ class ScheduleResolver:
             if not loc:
                 raise RuntimeError("SCHEDULE: redirect without Location header")
             if not quiet:
-                print(f"[{utc_now_iso()}] SCHEDULE: redirect to {loc[:90]}...")
+                logger.debug(f"SCHEDULE: redirect to {loc[:90]}...")
             # Follow redirect to pre-signed S3 URL without Authorization header.
             req2 = urllib.request.Request(loc, headers={"User-Agent": "nrod-schedule-client/1"})
             with urllib.request.urlopen(req2, timeout=180) as resp2:

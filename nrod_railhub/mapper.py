@@ -8,21 +8,26 @@ from bisect import bisect_left, bisect_right
 from typing import Any, Dict, List, Tuple
 from datetime import datetime, timezone  # added for fallback last_seen_utc
 
+from .logging_config import get_logger
+
+logger = get_logger("mapper")
+
 STEP_TYPES = {"CA", "CB", "CC"}
 SIG_TYPES = {"SF"}
 
-# Example: resolve mapper params from DB and call mapper
-# db is your Database instance (nrod_railhub.database.Database or similar)
-cfg = db.get_mapper_config()   # returns {'pre_ms': int, 'post_ms': int, 'tau_ms': int}
+# Default mapper configuration parameters
+# These can be overridden by passing parameters to process_batch_for_mapper()
+# Or loaded from database via: cfg = db.get_mapper_config()
+pre_ms = 1000   # milliseconds before step to search for signals
+post_ms = 5000  # milliseconds after step to search for signals
+tau_ms = 2500   # time constant for exponential weighting
 
-pre_ms = int(cfg.get('pre_ms', 1000))
-post_ms = int(cfg.get('post_ms', 5000))
-tau_ms = int(cfg.get('tau_ms', 2500))
 
 def _ts_to_iso_ms(ts_ms: int) -> str:
     try:
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Mapper: Failed to convert timestamp {ts_ms}: {e}, using current time")
         return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
@@ -42,6 +47,12 @@ def process_batch_for_mapper(
     
     Matches step events (CA/CB/CC) with signal events (SF) in time window.
     """
+    if not evs:
+        logger.debug("Mapper: No events to process")
+        return [], []
+    
+    logger.debug(f"Mapper: Processing batch of {len(evs)} events (pre={pre_ms}ms, post={post_ms}ms, tau={tau_ms}ms)")
+    
     # Filter and sort signals
     signals = [e for e in evs 
                if e.get("msg_type") in SIG_TYPES 
@@ -57,6 +68,16 @@ def process_batch_for_mapper(
              and e.get("to_berth") 
              and int(e.get("msg_ts", 0)) > 0]
     steps.sort(key=lambda e: int(e["msg_ts"]))
+    
+    logger.debug(f"Mapper: Found {len(signals)} signal events and {len(steps)} step events")
+    
+    if not steps:
+        logger.debug("Mapper: No valid step events to correlate")
+        return [], []
+    
+    if not signals:
+        logger.debug("Mapper: No valid signal events to correlate")
+        return [], []
     
     obs_rows: List[Tuple] = []
     score_rows: List[Tuple] = []
@@ -104,5 +125,7 @@ def process_batch_for_mapper(
                 last_seen_utc,
                 s.get("data"),
             ))
+    
+    logger.debug(f"Mapper: Generated {len(obs_rows)} observations and {len(score_rows)} score entries")
     
     return obs_rows, score_rows

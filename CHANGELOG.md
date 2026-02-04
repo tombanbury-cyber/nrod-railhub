@@ -9,10 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Proper logging system** with configurable log levels
+  - New `logging_config.py` module with centralized logger setup
+  - `--log-level` CLI argument with options: verbose (debug), info, warning, error
+  - Default log level is `error` (minimal output)
+  - Timestamps and proper log formatting
 - Initial documentation suite (README, CONTRIBUTING, ARCHITECTURE, DEPLOYMENT)
 
 ### Changed
-- TBD
+- Replaced all `print()` statements with proper logging calls
+  - Status messages use `logger.info()`
+  - Error messages use `logger.error()`
+  - Debug/trace messages use `logger.debug()`
+- All log messages now include proper timestamps via logger formatter
 
 ### Fixed
 - TBD

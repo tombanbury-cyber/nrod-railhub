@@ -18,6 +18,9 @@ from .views import HumanView
 from .database import RailDB
 from .listener import Listener
 from .web import start_web_dashboard
+from .logging_config import setup_logger, get_logger
+
+logger = get_logger("cli")
 
 def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thread:
     def loop():
@@ -28,7 +31,7 @@ def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thr
             by_dest = ", ".join(
                 f"{k.replace('/topic/', '')}={v}" for k, v in sorted(listener.msg_count_by_dest.items())
             ) or "no-messages"
-            print(f"[{utc_now_iso()}] STATUS connected_at={ca} last_msg={lm} total={listener.msg_count_total} [{by_dest}]")
+            logger.info(f"STATUS connected_at={ca} last_msg={lm} total={listener.msg_count_total} [{by_dest}]")
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()
@@ -72,7 +75,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                 sched_path.parent.mkdir(parents=True, exist_ok=True)
 
                 if args.schedule_refresh or (not sched_path.exists()):
-                    print(f"[{utc_now_iso()}] SCHEDULE: downloading to {sched_path} ...")
+                    logger.info(f"SCHEDULE: downloading to {sched_path} ...")
                     ScheduleResolver().download(
                         username=args.user,
                         password=args.password,
@@ -82,7 +85,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                         quiet=False,
                     )
                 else:
-                    print(f"[{utc_now_iso()}] SCHEDULE: using cached file {sched_path}")
+                    logger.info(f"SCHEDULE: using cached file {sched_path}")
 
                 hv.load_schedule_gz(
                     str(sched_path),
@@ -91,13 +94,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
                     uid_filter=args.uid,
                     quiet=False,
                 )
-                print(f"[{utc_now_iso()}] SCHEDULE: loaded (timetable enrichment enabled)")
+                logger.info("SCHEDULE: loaded (timetable enrichment enabled)")
             except Exception as e:
-                print(f"[{utc_now_iso()}] SCHEDULE: failed to load ({e}); continuing without timetable enrichment")
+                logger.error(f"SCHEDULE: failed to load ({e}); continuing without timetable enrichment")
 
         threading.Thread(target=_schedule_worker, daemon=True).start()
-    print(f"[{utc_now_iso()}] Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
-    print(f"[{utc_now_iso()}] Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
+    logger.info(f"Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
+    logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
 
     conn = stomp.Connection11(
         host_and_ports=[(args.host, args.port)],
@@ -112,10 +115,10 @@ def connect_and_run(args: argparse.Namespace) -> None:
     if args.web_port and db_path:
         t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port), daemon=True)
         t.start()
-        print(f"[{utc_now_iso()}] WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
+        logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
     conn.set_listener("", listener)
 
-    print(f"[{utc_now_iso()}] Connecting (wait=True) ...")
+    logger.info("Connecting (wait=True) ...")
     try:
         # Artemis is picky about host/vhost; set it explicitly like the CLI does.
         conn.connect(
@@ -125,21 +128,21 @@ def connect_and_run(args: argparse.Namespace) -> None:
             headers={"host": args.vhost},
         )
     except Exception as e:
-        print(f"[{utc_now_iso()}] CONNECT FAILED 2: {type(e).__name__}: {e!r}", file=sys.stderr)
+        logger.error(f"CONNECT FAILED 2: {type(e).__name__}: {e!r}")
         return
 
-    print(f"[{utc_now_iso()}] Subscribing to topics...")
+    logger.info("Subscribing to topics...")
     conn.subscribe(destination=TOPIC_VSTP, id="vstp", ack="auto")
-    print(f"[{utc_now_iso()}]   subscribed {TOPIC_VSTP}")
+    logger.info(f"  subscribed {TOPIC_VSTP}")
     conn.subscribe(destination=TOPIC_TRUST, id="trust", ack="auto")
-    print(f"[{utc_now_iso()}]   subscribed {TOPIC_TRUST}")
+    logger.info(f"  subscribed {TOPIC_TRUST}")
     conn.subscribe(destination=TOPIC_TD, id="td", ack="auto")
-    print(f"[{utc_now_iso()}]   subscribed {TOPIC_TD}")
+    logger.info(f"  subscribed {TOPIC_TD}")
 
     if args.headcode:
-        print(f"[{utc_now_iso()}] Filter: headcode={args.headcode}")
+        logger.info(f"Filter: headcode={args.headcode}")
     if args.uid:
-        print(f"[{utc_now_iso()}] Filter: uid={args.uid}")
+        logger.info(f"Filter: uid={args.uid}")
 
     start_status_ticker(listener, interval=args.status_every)
 
@@ -147,7 +150,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print(f"\n[{utc_now_iso()}] Exiting...")
+        logger.info("\nExiting...")
     finally:
         try:
             conn.disconnect()
@@ -175,8 +178,14 @@ def parse_args() -> argparse.Namespace:
         help="Only show console output for these TD area IDs (repeatable, e.g. --td-area EK). Default: show all areas.",
     )
 
-
-    p.add_argument("--verbose", action="store_true", help="Print short trace of every raw message received")
+    p.add_argument(
+        "--log-level",
+        default="error",
+        choices=["verbose", "info", "warning", "error"],
+        help="Log level (default: error). Options: verbose (debug), info, warning, error",
+    )
+    p.add_argument("--verbose", action="store_true", 
+                   help="Enable raw STOMP message preview (also sets log-level to verbose if not specified)")
     p.add_argument("--status-every", dest="status_every", type=int, default=15,
                    help="Print status line every N seconds (default 15)")             
 
