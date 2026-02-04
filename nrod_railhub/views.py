@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import logging
 import pathlib
 import datetime
 from datetime import timezone
@@ -16,8 +15,9 @@ from .models import (
     utc_now_iso, utc_now_ms, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc, safe_int
 )
 from .resolvers import LocationResolver, SmartResolver
+from .logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("views")
 
 class HumanView:
     """In-memory caches so we can join VSTP + TRUST + TD into a readable view."""
@@ -96,14 +96,14 @@ class HumanView:
                 if k_uid == uid:
                     reason = f"matched via TRUST train_uid {uid}"
                     if trace:
-                        print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
                     # No matched_info since we didn't use TIPLOC matching
                     return vs, reason, None
             for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
                 if k_uid == uid:
                     reason = f"matched timetable via TRUST train_uid {uid}"
                     if trace:
-                        print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
                     return ss, reason, None
 
         # 2) TIPLOC-index based matching (new approach)
@@ -195,7 +195,7 @@ class HumanView:
                             if best_delta is not None:
                                 reason += f" delta={best_delta:.0f}s"
                             if trace:
-                                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
                             logger.debug(f"TIPLOC match: {reason}")
                             return best, reason, best_info
 
@@ -210,7 +210,7 @@ class HumanView:
         if not candidates:
             reason = "no candidate schedules for headcode"
             if trace:
-                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
             return None, reason, None
 
         # 4) Legacy SMART stanox matching (scan candidate locations)
@@ -231,7 +231,7 @@ class HumanView:
                             if cand_name and cand_name.strip().lower() == stanox_name.strip().lower():
                                 reason = f"matched by SMART stanox {stanox} -> station name"
                                 if trace:
-                                    print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                                    logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
                                 return cand, reason, None
 
         # 5) Time proximity fallback
@@ -270,12 +270,12 @@ class HumanView:
         if best:
             reason = f"matched by time proximity (delta seconds {best_delta:.0f})"
             if trace:
-                print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
             return best, reason, None
 
         reason = "ambiguous — returned first candidate for headcode"
         if trace:
-            print(f"[{utc_now_iso()}] TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+            logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
         return candidates[0][1], reason, None
 
     def load_schedule_gz(
@@ -429,7 +429,7 @@ class HumanView:
                 kept += 1
 
         if not quiet:
-            print(f"[{utc_now_iso()}] SCHEDULE: loaded {kept} records (scanned {scanned} JSON lines) for {service_date}")
+            logger.info(f"SCHEDULE: loaded {kept} records (scanned {scanned} JSON lines) for {service_date}")
 
     def upsert_vstp(self, msg: Dict[str, Any]) -> Optional[VstpSchedule]:
         root = msg.get("VSTPCIFMsgV1") or msg.get("VSTPCIFMsgV1_1") or msg.get("VSTPCIFMsgV1_0")
