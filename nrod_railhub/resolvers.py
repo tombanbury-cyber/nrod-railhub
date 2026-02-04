@@ -154,6 +154,17 @@ class LocationResolver:
 
         try:
             payload = json.loads(raw.decode("utf-8", errors="replace"))
+            
+            # Handle double-encoded JSON: if result is a string, try parsing again
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                    if not quiet:
+                        print(f"[{utc_now_iso()}] CORPUS: detected and handled double-encoded JSON")
+                except (json.JSONDecodeError, TypeError):
+                    # If second parse fails, continue with the string (not double-encoded)
+                    pass
+                    
         except Exception as e:
             raise RuntimeError(f"CORPUS parse failed (not valid JSON?): {e}") from e
 
@@ -363,6 +374,17 @@ class SmartResolver:
 
         try:
             payload = json.loads(raw.decode("utf-8", errors="replace"))
+            
+            # Handle double-encoded JSON: if result is a string, try parsing again
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                    if not quiet:
+                        print(f"[{utc_now_iso()}] SMART: detected and handled double-encoded JSON")
+                except (json.JSONDecodeError, TypeError):
+                    # If second parse fails, continue with the string (not double-encoded)
+                    pass
+                    
         except Exception as e:
             raise RuntimeError(f"SMART parse failed (not valid JSON?): {e}") from e
 
@@ -374,7 +396,7 @@ class SmartResolver:
         elif isinstance(payload, dict):
             if not quiet:
                 print(f"[{utc_now_iso()}] SMART format: dict wrapper keys={list(payload.keys())}")
-            for key in ("SMARTDATA", "smartdata", "data", "rows", "SMART"):
+            for key in ("SMARTDATA", "smartdata", "data", "rows", "SMART", "BERTHDATA"):
                 v = payload.get(key)
                 if isinstance(v, list):
                     rows = v
