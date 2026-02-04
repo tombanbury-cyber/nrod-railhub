@@ -70,6 +70,7 @@ python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD
 | Option | Description |
 |--------|-------------|
 | `--width N` | Console output width (default:  96) |
+| `--log-level LEVEL` | Set log level: verbose, info, warning, error (default: error) |
 | `--verbose` | Show raw message previews |
 | `--trace-headcode` | Debug filtered train visibility |
 | `--no-only-changes` | Print even when output unchanged |
