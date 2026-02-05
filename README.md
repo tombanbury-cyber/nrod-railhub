@@ -9,6 +9,7 @@ Real-time UK rail monitoring using Network Rail's open data feeds.  Combines VST
 - 💾 **SQLite persistence** - Historical event storage and analysis
 - 🌐 **Web dashboard** - Browser-based train tracking interface
 - 🎯 **Smart filtering** - Track specific trains, areas, or view everything
+- 🖥️ **Interactive mode** - Real-time curses-based terminal dashboard
 
 ## Quick Start
 
@@ -40,8 +41,38 @@ python3 nrod_railhub.py --user USER --password PASS --headcode 2C90
 # Track all trains with web dashboard
 python3 nrod_railhub.py --user USER --password PASS --db-path rail.db --web-port 8080
 
-# Filter to specific signalling area
-python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD
+# Run in interactive mode with real-time terminal dashboard
+python3 nrod_railhub.py --user USER --password PASS --interactive
+
+# Filter to specific signalling area in interactive mode
+python3 nrod_railhub.py --user USER --password PASS --td-area EK --interactive
+```
+
+## Interactive Mode
+
+The `--interactive` flag launches a curses-based real-time terminal dashboard that displays:
+
+- **Connection status** - Live STOMP connection state
+- **Message rates** - Real-time message throughput
+- **Console output** - Scrolling train movement updates
+- **Filters** - Active headcode, UID, and area filters
+
+### Interactive Mode Controls
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit the application |
+| `p` | Pause/resume updates |
+| `c` | Clear console output |
+
+### Example Interactive Mode
+
+```bash
+# Monitor specific train interactively
+python3 nrod_railhub.py --user USER --password PASS --headcode 2C90 --interactive
+
+# Monitor multiple TD areas interactively
+python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD --interactive
 ```
 
 ## Example Output
@@ -69,6 +100,7 @@ python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD
 
 | Option | Description |
 |--------|-------------|
+| `--interactive` | Run in interactive curses mode with real-time dashboard |
 | `--width N` | Console output width (default:  96) |
 | `--log-level LEVEL` | Set log level: verbose, info, warning, error (default: error) |
 | `--verbose` | Show raw message previews |
