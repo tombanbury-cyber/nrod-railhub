@@ -111,7 +111,16 @@ def connect_and_run(args: argparse.Namespace) -> None:
     )
 
     db = RailDB(db_path, enable_mapper=args.enable_mapper) if db_path else None
-    listener = Listener(hv, args, db=db)
+    
+    # Create listener with optional output callback for interactive mode
+    output_callback = None
+    if args.interactive:
+        # In interactive mode, we'll capture output to a queue
+        import queue
+        output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
+    
+    listener = Listener(hv, args, db=db, output_callback=output_callback)
     if args.web_port and db_path:
         t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port), daemon=True)
         t.start()
@@ -146,16 +155,38 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
     start_status_ticker(listener, interval=args.status_every)
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("\nExiting...")
-    finally:
+    # Run in interactive curses mode if requested
+    if args.interactive:
+        from .curses_view import run_interactive_dashboard
+        stop_event = threading.Event()
         try:
-            conn.disconnect()
-        except Exception:
-            pass
+            run_interactive_dashboard(
+                listener=listener,
+                output_queue=output_queue,  # type: ignore[name-defined]
+                headcode=args.headcode,
+                uid=args.uid,
+                td_area=args.td_area,
+            )
+        except KeyboardInterrupt:
+            logger.info("\nExiting interactive mode...")
+        finally:
+            stop_event.set()
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
+    else:
+        # Normal console mode
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("\nExiting...")
+        finally:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -248,6 +279,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--pretty", action="store_true", help="Pretty departure-board output (default)")
     p.add_argument("--raw", action="store_true", help="Use raw/debug output instead of pretty")
+    p.add_argument("--interactive", action="store_true", help="Run in interactive curses mode with real-time dashboard")
     p.add_argument("--width", type=int, default=96, help="Pretty output width (default 96)")
 
     p.add_argument("--trace-headcode", action="store_true",
