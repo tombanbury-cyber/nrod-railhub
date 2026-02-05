@@ -180,7 +180,7 @@ def _render_footer(stdscr, h: int, w: int) -> None:
         pass
 
 
-def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, stop_event: threading.Event) -> None:
+def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, output_queue: "queue.Queue[str]", stop_event: threading.Event) -> None:
     """Main dashboard rendering loop."""
     stdscr.nodelay(True)
     stdscr.timeout(50)
@@ -210,6 +210,16 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
             state.last_message_time = listener.last_message_at
             state.total_messages = listener.msg_count_total
             state.msg_count_by_dest = dict(listener.msg_count_by_dest)
+            
+            # Pull output from queue
+            try:
+                while True:
+                    line = output_queue.get_nowait()
+                    if line:
+                        state.add_console_line(line)
+                        state.note_message("output")  # Track for rate calculation
+            except queue.Empty:
+                pass
         
         # Render UI
         stdscr.erase()
@@ -230,6 +240,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
 
 def run_interactive_dashboard(
     listener: Listener,
+    output_queue: "queue.Queue[str]",
     headcode: Optional[str] = None,
     uid: Optional[str] = None,
     td_area: Optional[List[str]] = None,
@@ -239,6 +250,7 @@ def run_interactive_dashboard(
     
     Args:
         listener: The STOMP listener instance
+        output_queue: Queue containing console output lines from the listener
         headcode: Optional headcode filter
         uid: Optional UID filter
         td_area: Optional list of TD area filters
@@ -251,26 +263,7 @@ def run_interactive_dashboard(
     
     stop_event = threading.Event()
     
-    # Intercept console output from listener/HumanView
-    # This is a simple approach - in production you might want to use a custom logging handler
-    original_print = __builtins__.print
-    
-    def intercepted_print(*args, **kwargs):
-        """Intercept print calls and add to dashboard console."""
-        import io
-        buffer = io.StringIO()
-        kwargs['file'] = buffer
-        original_print(*args, **kwargs)
-        line = buffer.getvalue().rstrip()
-        if line:
-            state.add_console_line(line)
-    
-    # Temporarily replace print
-    __builtins__.print = intercepted_print
-    
     try:
-        curses.wrapper(dashboard_loop, state=state, listener=listener, stop_event=stop_event)
+        curses.wrapper(dashboard_loop, state=state, listener=listener, output_queue=output_queue, stop_event=stop_event)
     finally:
-        # Restore original print
-        __builtins__.print = original_print
         stop_event.set()

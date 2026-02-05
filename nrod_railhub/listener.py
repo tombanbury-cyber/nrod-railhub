@@ -21,10 +21,12 @@ from .logging_config import get_logger
 logger = get_logger("listener")
 
 class Listener(stomp.ConnectionListener):
-    def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None) -> None:
+    def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None, 
+                 output_callback: Optional[callable] = None) -> None:
         self.hv = hv
         self.args = args
         self.db = db
+        self.output_callback = output_callback  # Optional callback for custom output handling
 
         self.connected_at: Optional[str] = None
         self.last_message_at: Optional[str] = None
@@ -83,7 +85,11 @@ class Listener(stomp.ConnectionListener):
             self._last_output[key] = text
             self._last_output_ts[key] = now
 
-        print(text)
+        # Use output callback if provided, otherwise print to console
+        if self.output_callback:
+            self.output_callback(text)
+        else:
+            print(text)
         return True
     def on_connecting(self, host_and_port):
         try:

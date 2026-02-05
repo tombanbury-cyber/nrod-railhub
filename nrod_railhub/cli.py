@@ -111,7 +111,16 @@ def connect_and_run(args: argparse.Namespace) -> None:
     )
 
     db = RailDB(db_path, enable_mapper=args.enable_mapper) if db_path else None
-    listener = Listener(hv, args, db=db)
+    
+    # Create listener with optional output callback for interactive mode
+    output_callback = None
+    if args.interactive:
+        # In interactive mode, we'll capture output to a queue
+        import queue
+        output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
+    
+    listener = Listener(hv, args, db=db, output_callback=output_callback)
     if args.web_port and db_path:
         t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port), daemon=True)
         t.start()
@@ -153,6 +162,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         try:
             run_interactive_dashboard(
                 listener=listener,
+                output_queue=output_queue,  # type: ignore[name-defined]
                 headcode=args.headcode,
                 uid=args.uid,
                 td_area=args.td_area,
