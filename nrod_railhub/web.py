@@ -411,12 +411,23 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                         
                         if unique_events:
                             # Reprocess with new parameters
-                            _, score_rows = process_batch_for_mapper(
+                            obs_rows, score_rows = process_batch_for_mapper(
                                 unique_events,
                                 pre_ms=pre_ms,
                                 post_ms=post_ms,
                                 tau_ms=tau_ms
                             )
+                            
+                            if obs_rows:
+                                # Insert observations (ignore duplicates via unique index)
+                                cursor.executemany("""
+                                    INSERT INTO berth_signal_observations (
+                                        td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
+                                        signal_event_id, signal_timestamp, address, data, dt_ms, weight
+                                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                                    ON CONFLICT(td_area, step_timestamp, signal_timestamp, address) DO NOTHING
+                                """, obs_rows)
+                            
                             
                             if score_rows:
                                 # Insert new scores (accumulate if duplicate)
