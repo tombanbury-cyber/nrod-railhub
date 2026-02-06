@@ -18,6 +18,17 @@ SIG_TYPES = {"SF"}
 # Default mapper configuration parameters
 # These can be overridden by passing parameters to process_batch_for_mapper()
 # Or loaded from database via: cfg = db.get_mapper_config()
+
+#try:
+#    config = db.get_mapper_config()
+#    pre_ms_current = config.get("pre_ms", 1000)
+#    post_ms_current = config.get("post_ms", 5000)
+#    tau_ms_current = config.get("tau_ms", 2500)
+#except Exception:
+#    pre_ms_current = 1000
+#    post_ms_current = 5000
+#    tau_ms_current = 2500
+
 pre_ms = 1000   # milliseconds before step to search for signals
 post_ms = 5000  # milliseconds after step to search for signals
 tau_ms = 2500   # time constant for exponential weighting
