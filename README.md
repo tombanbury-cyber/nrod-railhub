@@ -291,7 +291,7 @@ MIT License - see LICENSE file
 
 ## Acknowledgements
 
-- [Network Rail Open Data Feeds](https://publicdatafeeds.networkrail.co. uk/)
+- [Network Rail Open Data Feeds](https://publicdatafeeds.networkrail.co.uk/)
 - [OpenRailData Wiki](https://wiki.openraildata.com/)
 - [stomp.py](https://github.com/jasonrbriggs/stomp.py) by Jason R Briggs
 
