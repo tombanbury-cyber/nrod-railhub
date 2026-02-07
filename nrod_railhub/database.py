@@ -133,6 +133,21 @@ class RailDB:
                 );
                 """
             )
+            
+            # Add new columns to existing tables if they don't exist (for schema migration)
+            try:
+                cursor = self._conn.cursor()
+                
+                # Check if last_event_time_ms column exists in trust_state
+                cursor.execute("PRAGMA table_info(trust_state)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if "last_event_time_ms" not in columns:
+                    cursor.execute("ALTER TABLE trust_state ADD COLUMN last_event_time_ms INTEGER")
+                    
+            except Exception:
+                # If migration fails, it's likely the column already exists or table doesn't exist yet
+                pass
 
     def close(self) -> None:
         try:
