@@ -9,6 +9,10 @@ simple and inline to avoid adding new dependencies.
 
 from __future__ import annotations
 
+import time
+import json
+from datetime import datetime
+
 import pathlib
 import sqlite3
 from typing import List
@@ -235,20 +239,241 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             body.append(f"<p><i>Error querying events: {e}</i></p>")
         return render_page("Raw Events - NR RailHub", body, active="raw")
 
+
+
+    # --- API endpoints: time-series data for charts ---
+    
+    @app.get("/api/stats/messages-per-second")
+    def api_messages_per_second():
+        """
+        Returns JSON:
+          { "labels": [ISO timestamps], "data": [counts per second] }
+        Last 5 minutes, grouped per-second.
+        """
+        try:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (5 * 60 * 1000)  # last 5 minutes
+            sql = """
+                SELECT ((ts_ms / 1000) * 1000) AS sec_ts, COUNT(*) AS cnt
+                FROM (
+                    SELECT ts_ms FROM td_signal_events WHERE ts_ms >= ?
+                    UNION ALL
+                    SELECT ts_ms FROM td_berth_events WHERE ts_ms >= ?
+                )
+                GROUP BY sec_ts
+                ORDER BY sec_ts
+            """
+            rows = q(sql, (start_ms, start_ms))
+            labels = []
+            data = []
+            # Build a full per-second array (fill missing seconds with 0)
+            sec_points = {}
+            for r in rows:
+                sec_points[int(r["sec_ts"])] = int(r["cnt"])
+            for s in range(int(start_ms / 1000), int(now_ms / 1000) + 1):
+                ts_ms = s * 1000
+                labels.append(datetime.utcfromtimestamp(s).isoformat() + "Z")
+                data.append(sec_points.get(ts_ms, 0))
+            return json.dumps({"labels": labels, "data": data})
+        except Exception as e:
+            logger.error(f"API messages-per-second error: {e}")
+            return json.dumps({"error": str(e)})
+    
+    @app.get("/api/stats/records-per-minute")
+    def api_records_per_minute():
+        """
+        Returns JSON:
+          { "labels": [ISO timestamps], "data": [counts per minute] }
+        Last 60 minutes, grouped per-minute (berth+signal).
+        """
+        try:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (60 * 60 * 1000)  # last 60 minutes
+            sql = """
+                SELECT ((ts_ms / 60000) * 60000) AS minute_ts, COUNT(*) AS cnt
+                FROM (
+                    SELECT ts_ms FROM td_signal_events WHERE ts_ms >= ?
+                    UNION ALL
+                    SELECT ts_ms FROM td_berth_events WHERE ts_ms >= ?
+                )
+                GROUP BY minute_ts
+                ORDER BY minute_ts
+            """
+            rows = q(sql, (start_ms, start_ms))
+            minute_points = {int(r["minute_ts"]): int(r["cnt"]) for r in rows}
+            labels = []
+            data = []
+            start_min = int(start_ms / 60000)
+            end_min = int(now_ms / 60000)
+            for m in range(start_min, end_min + 1):
+                ts_ms = m * 60000
+                labels.append(datetime.utcfromtimestamp(m * 60).isoformat() + "Z")
+                data.append(minute_points.get(ts_ms, 0))
+            return json.dumps({"labels": labels, "data": data})
+        except Exception as e:
+            logger.error(f"API records-per-minute error: {e}")
+            return json.dumps({"error": str(e)})
+
+
+
+    
+
+    # --- Rich /stats page with cards and charts ---
+    
     @app.get("/stats")
     def stats():
         body = ["<h2>Stats</h2>"]
+        # Inline CSS for simple cards (keeps style self-contained like other pages)
+        body.append("""
+        <style>
+          .stat-row { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:16px; }
+          .stat-card { background:#fff; border:1px solid #e6e9ef; padding:12px; border-radius:8px; min-width:220px; flex:1 1 220px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+          .stat-card h3 { margin:0 0 8px 0; font-size:14px; }
+          .top-list { font-size:13px; margin:0; padding-left:18px; color:#222; }
+          .chart-wrap { display:flex; gap:16px; flex-wrap:wrap; }
+          .chart-card { flex:1 1 420px; min-width:320px; background:#fff; padding:12px; border-radius:8px; border:1px solid #eee; }
+          .dim { color:#666; margin-bottom:8px; }
+        </style>
+        """)
+    
         try:
+            # basic totals (existing)
             counts = q("""
                 SELECT 
                     (SELECT COUNT(*) FROM td_state) AS td_state,
                     (SELECT COUNT(*) FROM td_berth_events) AS td_berth_events,
                     (SELECT COUNT(*) FROM td_signal_events) AS td_signal_events
             """)[0]
-            body.append(f"<p class='dim'>td_state={counts['td_state']} td_berth_events={counts['td_berth_events']} td_signal_events={counts['td_signal_events']}</p>")
+    
+            # Top 10 signals by event count
+            top_signals = q("""
+                SELECT address, COUNT(*) AS cnt
+                FROM td_signal_events
+                WHERE address IS NOT NULL
+                GROUP BY address
+                ORDER BY cnt DESC
+                LIMIT 10
+            """)
+    
+            # Top 10 berths combining from_berth and to_berth
+            top_berths = q("""
+                SELECT berth, SUM(cnt) AS total
+                FROM (
+                    SELECT from_berth AS berth, COUNT(*) AS cnt FROM td_berth_events WHERE from_berth IS NOT NULL GROUP BY from_berth
+                    UNION ALL
+                    SELECT to_berth AS berth, COUNT(*) AS cnt FROM td_berth_events WHERE to_berth IS NOT NULL GROUP BY to_berth
+                )
+                GROUP BY berth
+                ORDER BY total DESC
+                LIMIT 10
+            """)
+    
+            # Top 10 TD areas
+            top_areas = q("""
+                SELECT td_area, COUNT(*) AS cnt FROM (
+                    SELECT td_area FROM td_signal_events
+                    UNION ALL
+                    SELECT td_area FROM td_berth_events
+                ) GROUP BY td_area ORDER BY cnt DESC LIMIT 10
+            """)
+    
+            # Top 10 headcodes (from td_berth_events)
+            top_headcodes = q("""
+                SELECT headcode, COUNT(*) AS cnt FROM td_berth_events
+                WHERE headcode IS NOT NULL
+                GROUP BY headcode
+                ORDER BY cnt DESC
+                LIMIT 10
+            """)
+    
+            # Compose summary cards
+            body.append("<div class='stat-row'>")
+            body.append(f"<div class='stat-card'><h3>Total tracked trains</h3><div class='dim'>{counts['td_state']}</div></div>")
+            body.append(f"<div class='stat-card'><h3>Total berth events</h3><div class='dim'>{counts['td_berth_events']}</div></div>")
+            body.append(f"<div class='stat-card'><h3>Total signal events</h3><div class='dim'>{counts['td_signal_events']}</div></div>")
+            body.append("</div>")
+    
+            # Top lists
+            body.append("<div class='stat-row'>")
+            # Signals
+            s_html = "<div class='stat-card'><h3>Top 10 Signal Addresses</h3><ol class='top-list'>"
+            for r in top_signals:
+                s_html += f"<li>{r['address']} — {r['cnt']}</li>"
+            s_html += "</ol></div>"
+            body.append(s_html)
+            # Berths
+            b_html = "<div class='stat-card'><h3>Top 10 Berths</h3><ol class='top-list'>"
+            for r in top_berths:
+                b_html += f"<li>{r['berth']} — {r['total']}</li>"
+            b_html += "</ol></div>"
+            body.append(b_html)
+            # Areas
+            a_html = "<div class='stat-card'><h3>Top 10 Areas</h3><ol class='top-list'>"
+            for r in top_areas:
+                a_html += f"<li>{r['td_area']} — {r['cnt']}</li>"
+            a_html += "</ol></div>"
+            body.append(a_html)
+            # Headcodes
+            h_html = "<div class='stat-card'><h3>Top 10 Headcodes</h3><ol class='top-list'>"
+            for r in top_headcodes:
+                h_html += f"<li>{r['headcode']} — {r['cnt']}</li>"
+            h_html += "</ol></div>"
+            body.append(h_html)
+    
+            body.append("</div>")
+    
+            # Charts area (Chart.js via CDN)
+            body.append("""
+            <div class='chart-wrap'>
+              <div class='chart-card'>
+                <h3>Messages per second (last 5 min)</h3>
+                <canvas id='msgRateChart' height='160'></canvas>
+              </div>
+              <div class='chart-card'>
+                <h3>Records inserted per minute (last 60 min)</h3>
+                <canvas id='recordsChart' height='160'></canvas>
+              </div>
+            </div>
+    
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            <script>
+            async function drawCharts() {
+              try {
+                const m = await fetch('/api/stats/messages-per-second').then(r=>r.json());
+                const r = await fetch('/api/stats/records-per-minute').then(r=>r.json());
+    
+                const ctx1 = document.getElementById('msgRateChart').getContext('2d');
+                window.msgRateChart = new Chart(ctx1, {
+                  type: 'line',
+                  data: {
+                    labels: m.labels,
+                    datasets: [{ label: 'msgs/sec', data: m.data, borderColor: '#1976d2', backgroundColor:'rgba(25,118,210,0.06)', fill:true, pointRadius:0 }]
+                  },
+                  options: { responsive:true, scales:{ x:{display:false}, y:{beginAtZero:true} } }
+                });
+    
+                const ctx2 = document.getElementById('recordsChart').getContext('2d');
+                window.recordsChart = new Chart(ctx2, {
+                  type: 'bar',
+                  data: {
+                    labels: r.labels,
+                    datasets: [{ label: 'records/min', data: r.data, backgroundColor:'#4caf50' }]
+                  },
+                  options: { responsive:true, scales:{ x:{display:false}, y:{beginAtZero:true} } }
+                });
+              } catch (err) {
+                console.error('Chart draw error', err);
+              }
+            }
+            drawCharts();
+            // Optionally refresh charts every 30s
+            setInterval(drawCharts, 30 * 1000);
+            </script>
+            """)
         except Exception as e:
             logger.error(f"Web dashboard: Error fetching stats: {e}")
             body.append(f"<p><i>Error fetching stats: {e}</i></p>")
+    
         return render_page("Stats - NR RailHub", body, active="stats")
 
     @app.route("/mapper", methods=["GET", "POST"])
