@@ -10,9 +10,30 @@ from typing import Optional
 
 
 class RailDB:
-    """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history."""
+    """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
+    
+    Features:
+    - TD state/events: Current train positions and historical berth/signal events
+    - TRUST state: Real-time train movement updates
+    - VSTP state: Very Short Term Planning schedule changes
+    - Mapper integration: Automatic berth-to-signal correlation (when enabled)
+    
+    Mapper Behavior:
+    When enable_mapper=True:
+    - TD berth and signal events are collected in a batch
+    - Batch is processed periodically (every 10s) or when reaching batch_size (100 events)
+    - Mapper correlates step events (CA/CB/CC) with signal events (SF) in time window
+    - Configuration (pre_ms, post_ms, tau_ms) is loaded from mapper_config table
+    - Results stored in berth_signal_observations and berth_signal_scores tables
+    """
 
     def __init__(self, path: str, enable_mapper: bool = True) -> None:
+        """Initialize RailDB.
+        
+        Args:
+            path: Path to SQLite database file
+            enable_mapper: If True, enables automatic berth-to-signal correlation
+        """
         self.path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
