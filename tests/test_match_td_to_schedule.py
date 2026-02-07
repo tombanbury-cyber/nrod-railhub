@@ -141,6 +141,18 @@ def test_match_via_smart_stanox():
     
     resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
     
+    # Mock stanox_for_tiploc for area validation
+    def mock_stanox_for_tiploc(tiploc):
+        if tiploc == "CLPHMJC":
+            return "87701"
+        elif tiploc == "VICTRIC":
+            return "87709"
+        elif tiploc == "MARGAT":
+            return "88600"
+        return None
+    
+    resolver.stanox_for_tiploc.side_effect = mock_stanox_for_tiploc
+    
     # Mock tiploc_to_name for TIPLOC index lookup
     resolver.tiploc_to_name = {
         "CLPHMJC": "Clapham Junction",

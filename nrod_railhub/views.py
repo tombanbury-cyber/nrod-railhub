@@ -84,7 +84,7 @@ class HumanView:
             Defaults to True if validation cannot be performed (no data).
         """
         # If we have berth resolution via SMART, check if schedule calls at the matched STANOX
-        if td_state and self.smart:
+        if td_state and self.smart and self.resolver:
             berth = td_state.to_berth or td_state.from_berth
             if berth:
                 hit = self.smart.lookup(td_area, berth)
@@ -92,12 +92,15 @@ class HumanView:
                     stanox = str(hit['stanox'])
                     # Check if any schedule location matches this STANOX
                     locations = getattr(schedule, 'locations', []) or []
-                    for loc in locations:
-                        tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, 'tiploc', '')
-                        if tiploc and self.resolver:
-                            loc_stanox = self.resolver.stanox_for_tiploc(tiploc)
-                            if loc_stanox == stanox:
-                                return True
+                    if locations:  # Only validate if we have locations
+                        for loc in locations:
+                            tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, 'tiploc', '')
+                            if tiploc:
+                                loc_stanox = self.resolver.stanox_for_tiploc(tiploc)
+                                if loc_stanox == stanox:
+                                    return True
+                        # We resolved the berth, have locations, but found no match
+                        return False
         # Default: assume match (can't validate without data)
         return True
 
