@@ -170,8 +170,7 @@ class Listener(stomp.ConnectionListener):
                             headcode=vs.signalling_id or "",
                             start_date=vs.start_date or "",
                             end_date=vs.end_date or "",
-                            locations=vs.locations,
-                            raw=None  # Stop writing raw JSON by default
+                            raw=item
                         )
                         logger.debug(f"DB: persisted VSTP uid={vs.uid} headcode={vs.signalling_id} start={vs.start_date}")
                     except Exception as e:
@@ -196,21 +195,11 @@ class Listener(stomp.ConnectionListener):
                     continue
 
                 body = item.get("body", {})
-                header = item.get("header", {})
                 trust_headcode = (
                     body.get("train_reporting_number")
                     or body.get("reporting_number")
                     or ""
                 ).strip()
-                
-                # Extract numeric timestamp in milliseconds (prefer body fields, fallback to header)
-                last_event_time_ms = (
-                    safe_int(body.get("event_timestamp")) or
-                    safe_int(body.get("actual_timestamp")) or
-                    safe_int(body.get("creation_timestamp")) or
-                    safe_int(body.get("origin_dep_timestamp")) or
-                    safe_int(header.get("msg_queue_timestamp"))
-                )
 
                 # Persist TRUST to DB if available
                 if self.db:
@@ -223,8 +212,7 @@ class Listener(stomp.ConnectionListener):
                             last_event_time=ts.last_event_time or "",
                             last_location=ts.last_location or "",
                             last_delay_min=ts.last_delay_min,
-                            last_event_time_ms=last_event_time_ms,
-                            raw=None,  # Stop writing raw JSON by default
+                            raw=body,
                         )
                         logger.debug(f"DB: persisted TRUST train_id={ts.train_id} headcode={trust_headcode} uid={ts.train_uid}")
                     except Exception as e:

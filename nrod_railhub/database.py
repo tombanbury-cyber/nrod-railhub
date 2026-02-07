@@ -107,7 +107,6 @@ class RailDB:
                     last_event_time TEXT,
                     last_location TEXT,
                     last_delay_min INTEGER,
-                    last_event_time_ms INTEGER,
                     raw_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_trust_state_headcode ON trust_state(headcode);
@@ -121,33 +120,8 @@ class RailDB:
                     PRIMARY KEY (uid, start_date)
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_state_headcode ON vstp_state(headcode);
-                
-                CREATE TABLE IF NOT EXISTS vstp_location (
-                    uid TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    stop_index INTEGER NOT NULL,
-                    tiploc TEXT,
-                    planned_arr TEXT,
-                    planned_dep TEXT,
-                    PRIMARY KEY (uid, start_date, stop_index)
-                );
                 """
             )
-            
-            # Add new columns to existing tables if they don't exist (for schema migration)
-            try:
-                cursor = self._conn.cursor()
-                
-                # Check if last_event_time_ms column exists in trust_state
-                cursor.execute("PRAGMA table_info(trust_state)")
-                columns = [row[1] for row in cursor.fetchall()]
-                
-                if "last_event_time_ms" not in columns:
-                    cursor.execute("ALTER TABLE trust_state ADD COLUMN last_event_time_ms INTEGER")
-                    
-            except Exception:
-                # If migration fails, it's likely the column already exists or table doesn't exist yet
-                pass
 
     def close(self) -> None:
         try:
@@ -270,12 +244,12 @@ class RailDB:
                 (area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox, location_name, platform, sched_dep, sched_arr, origin_name, dest_name, uid),
             )
 
-    def upsert_trust(self, train_id: str, headcode: str, uid: str, toc_id: str, last_event_time: str, last_location: str, last_delay_min: int | None, last_event_time_ms: int | None = None, raw: dict | None = None) -> None:
+    def upsert_trust(self, train_id: str, headcode: str, uid: str, toc_id: str, last_event_time: str, last_location: str, last_delay_min: int | None, raw: dict) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO trust_state(train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, last_event_time_ms, raw_json)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                INSERT INTO trust_state(train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, raw_json)
+                VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(train_id) DO UPDATE SET
                     headcode=excluded.headcode,
                     uid=excluded.uid,
@@ -283,17 +257,15 @@ class RailDB:
                     last_event_time=excluded.last_event_time,
                     last_location=excluded.last_location,
                     last_delay_min=excluded.last_delay_min,
-                    last_event_time_ms=excluded.last_event_time_ms,
-                    raw_json=CASE WHEN excluded.raw_json IS NOT NULL THEN excluded.raw_json ELSE trust_state.raw_json END
+                    raw_json=excluded.raw_json
                 """,
-                (train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, last_event_time_ms, json.dumps(raw, separators=(',',':')) if raw else None),
+                (train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, json.dumps(raw, separators=(',',':'))),
             )
 
-    def upsert_vstp(self, uid: str, headcode: str, start_date: str, end_date: str, locations: list[tuple[str, str, str]] | None = None, raw: dict | None = None) -> None:
+    def upsert_vstp(self, uid: str, headcode: str, start_date: str, end_date: str, raw: dict) -> None:
         if not uid or not start_date:
             return
         with self._lock, self._conn:
-            # Upsert summary row in vstp_state
             self._conn.execute(
                 """
                 INSERT INTO vstp_state(uid, headcode, start_date, end_date, raw_json)
@@ -301,25 +273,10 @@ class RailDB:
                 ON CONFLICT(uid, start_date) DO UPDATE SET
                     headcode=excluded.headcode,
                     end_date=excluded.end_date,
-                    raw_json=CASE WHEN excluded.raw_json IS NOT NULL THEN excluded.raw_json ELSE vstp_state.raw_json END
+                    raw_json=excluded.raw_json
                 """,
-                (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':')) if raw else None),
+                (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':'))),
             )
-            
-            # If locations provided, clear old ones and insert new ones
-            if locations is not None:
-                self._conn.execute(
-                    "DELETE FROM vstp_location WHERE uid=? AND start_date=?",
-                    (uid, start_date)
-                )
-                for stop_index, (tiploc, arr, dep) in enumerate(locations):
-                    self._conn.execute(
-                        """
-                        INSERT INTO vstp_location(uid, start_date, stop_index, tiploc, planned_arr, planned_dep)
-                        VALUES (?,?,?,?,?,?)
-                        """,
-                        (uid, start_date, stop_index, tiploc, arr, dep)
-                    )
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""

@@ -89,23 +89,13 @@ def test_vstp_message_persists_to_db():
     cursor = conn.cursor()
     cursor.execute("SELECT uid, headcode, start_date, end_date FROM vstp_state WHERE uid=?", ("C12345",))
     row = cursor.fetchone()
+    conn.close()
     
     assert row is not None, "VSTP message should be persisted to database"
     assert row[0] == "C12345", f"Expected uid='C12345', got '{row[0]}'"
     assert row[1] == "2C90", f"Expected headcode='2C90', got '{row[1]}'"
     assert row[2] == "2026-01-17", f"Expected start_date='2026-01-17', got '{row[2]}'"
     assert row[3] == "2026-01-17", f"Expected end_date='2026-01-17', got '{row[3]}'"
-    
-    # Verify vstp_location table has entries
-    cursor.execute("SELECT tiploc, planned_arr, planned_dep FROM vstp_location WHERE uid=? AND start_date=? ORDER BY stop_index", ("C12345", "2026-01-17"))
-    location_rows = cursor.fetchall()
-    conn.close()
-    
-    assert len(location_rows) == 2, f"Expected 2 location rows, got {len(location_rows)}"
-    assert location_rows[0][0] == "CLPHMJC", f"Expected first location 'CLPHMJC', got '{location_rows[0][0]}'"
-    assert location_rows[0][1] == "12:30", f"Expected first arrival '12:30', got '{location_rows[0][1]}'"
-    assert location_rows[0][2] == "12:31", f"Expected first departure '12:31', got '{location_rows[0][2]}'"
-    assert location_rows[1][0] == "VICTRIC", f"Expected second location 'VICTRIC', got '{location_rows[1][0]}'"
     
     # Cleanup
     db.close()
@@ -188,7 +178,7 @@ def test_trust_message_persists_to_db():
     # Verify database was updated
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute("SELECT train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, last_event_time_ms FROM trust_state WHERE train_id=?", ("123456789",))
+    cursor.execute("SELECT train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min FROM trust_state WHERE train_id=?", ("123456789",))
     row = cursor.fetchone()
     conn.close()
     
@@ -200,7 +190,6 @@ def test_trust_message_persists_to_db():
     assert row[4] == "2026-01-17T12:30:00Z", f"Expected last_event_time='2026-01-17T12:30:00Z', got '{row[4]}'"
     assert row[5] == "87701", f"Expected last_location='87701', got '{row[5]}'"
     assert row[6] == 0, f"Expected last_delay_min=0, got {row[6]}"
-    assert row[7] == 1737116400000, f"Expected last_event_time_ms=1737116400000, got {row[7]}"
     
     # Cleanup
     db.close()
