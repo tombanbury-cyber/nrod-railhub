@@ -116,6 +116,7 @@ class TrustState:
     last_event_time: str = ""
     last_location: str = ""          # stanox-ish if present
     last_delay_min: Optional[int] = None
+    last_event_time_ms: Optional[int] = None  # unix timestamp in milliseconds
 
 
 @dataclass

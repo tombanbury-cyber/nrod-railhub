@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Default log level is `error` (minimal output)
   - Timestamps and proper log formatting
 - Initial documentation suite (README, CONTRIBUTING, ARCHITECTURE, DEPLOYMENT)
+- **Decoded field persistence for VSTP and TRUST messages**
+  - New `last_event_time_ms` column in `trust_state` table stores numeric unix timestamps (milliseconds)
+  - New `vstp_location` table stores decoded VSTP schedule locations for SQL queries without JSON parsing
+  - TRUST and VSTP messages now persist decoded fields instead of raw JSON by default
 
 ### Changed
 - Replaced all `print()` statements with proper logging calls
@@ -22,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Error messages use `logger.error()`
   - Debug/trace messages use `logger.debug()`
 - All log messages now include proper timestamps via logger formatter
+- Database persistence now stores decoded fields with backward-compatible schema (raw_json columns remain for legacy data)
 
 ### Fixed
 - TBD
