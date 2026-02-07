@@ -8,7 +8,7 @@ import json
 import pathlib
 import datetime
 from datetime import timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
@@ -59,6 +59,9 @@ class HumanView:
         
         Iterates through SMART berth_map to find the area where this STANOX appears.
         Returns the first matching area, or None if not found.
+        
+        Note: This performs a linear scan through berth_map. For large datasets,
+        consider building a reverse STANOX→area index if this becomes a bottleneck.
         """
         if not self.smart:
             return None
@@ -68,7 +71,12 @@ class HumanView:
                 return area
         return None
 
-    def _schedule_passes_through_area(self, schedule: Any, td_area: str, td_state: Optional[TdState]) -> bool:
+    def _schedule_passes_through_area(
+        self, 
+        schedule: Union[VstpSchedule, ItpsSchedule], 
+        td_area: str, 
+        td_state: Optional[TdState]
+    ) -> bool:
         """Check if schedule route intersects with TD area using berth/STANOX matching.
         
         If we have berth resolution via SMART, check if the schedule calls at the matched STANOX.
@@ -676,9 +684,10 @@ class HumanView:
             inferred = self.headcode_by_uid.get(st.train_uid)
             if inferred:
                 self.trust_by_headcode[inferred] = st
-                headcode = inferred  # Use inferred headcode for area-scoped indexing
+                # Update headcode for use in area-scoped indexing below
+                headcode = inferred
 
-        # NEW: Infer TD area from location STANOX and populate area-scoped index
+        # Infer TD area from location STANOX and populate area-scoped index
         if st.last_location and headcode and self.smart:
             inferred_area = self._area_from_stanox(st.last_location)
             if inferred_area:

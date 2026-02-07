@@ -341,9 +341,9 @@ def test_two_trains_same_headcode_different_areas():
     # Test matching in EK area - should match London train
     sched_ek, reason_ek, _ = hv.match_td_to_schedule("EK", "2C90")
     assert sched_ek is vs_london, f"EK area should match London train, got UID {getattr(sched_ek, 'uid', None)}"
-    assert "C12345" in reason_ek or "area-scoped" in reason_ek, f"Reason: {reason_ek}"
+    assert "area-scoped" in reason_ek and "C12345" in reason_ek, f"Reason should mention area-scoped and UID C12345: {reason_ek}"
     
     # Test matching in AD area - should match Kent train
     sched_ad, reason_ad, _ = hv.match_td_to_schedule("AD", "2C90")
     assert sched_ad is vs_kent, f"AD area should match Kent train, got UID {getattr(sched_ad, 'uid', None)}"
-    assert "C67890" in reason_ad or "area-scoped" in reason_ad, f"Reason: {reason_ad}"
+    assert "area-scoped" in reason_ad and "C67890" in reason_ad, f"Reason should mention area-scoped and UID C67890: {reason_ad}"
