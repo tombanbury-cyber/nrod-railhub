@@ -204,6 +204,7 @@ class Listener(stomp.ConnectionListener):
                 # Persist TRUST to DB if available
                 if self.db:
                     try:
+                        # Update summary/latest row (existing behaviour)
                         self.db.upsert_trust(
                             train_id=ts.train_id,
                             headcode=trust_headcode,
@@ -217,6 +218,19 @@ class Listener(stomp.ConnectionListener):
                         logger.debug(f"DB: persisted TRUST train_id={ts.train_id} headcode={trust_headcode} uid={ts.train_uid}")
                     except Exception as e:
                         logger.warning(f"DB: failed to persist TRUST train_id={getattr(ts, 'train_id', '?')}: {e!r}")
+
+                    # Persist full decoded TRUST message into trust_messages history table
+                    try:
+                        self.db.insert_trust_message(body)
+                        logger.debug(f"DB: inserted TRUST message history train_id={getattr(body,'train_id',getattr(ts,'train_id','?'))} actual_ts={body.get('actual_timestamp')}")
+                    except Exception as e:
+                        # Don't kill the receiver thread; log a few DB errors for diagnosis
+                        try:
+                            self._db_err_count = getattr(self, '_db_err_count', 0) + 1
+                            if self._db_err_count <= 5:
+                                logger.error(f"DB: TRUST message persist failed: {type(e).__name__}: {e}")
+                        except Exception:
+                            pass
 
                 # Trace TRUST visibility
                 if self.args.trace_headcode:
@@ -253,7 +267,7 @@ class Listener(stomp.ConnectionListener):
             # TD
             # ------------------------------------------------------------
             # ------------------------------------------------------------
-            # TD (wrapped as CA_MSG/CC_MSG/SF_MSG/etc)
+            # TD (wrapped as CA_MSG/CC_MSG/SF_MSG etc)
             # ------------------------------------------------------------
             td_msg = self._unwrap_td_item(item)
             if td_msg and "msg_type" in td_msg and ("descr" in td_msg or "to" in td_msg or "from" in td_msg or "address" in td_msg):
@@ -401,6 +415,3 @@ class Listener(stomp.ConnectionListener):
                 return v
 
         return None
-
-
-
