@@ -10,9 +10,30 @@ from typing import Optional
 
 
 class RailDB:
-    """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history."""
+    """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
+    
+    Features:
+    - TD state/events: Current train positions and historical berth/signal events
+    - TRUST state: Real-time train movement updates
+    - VSTP state: Very Short Term Planning schedule changes
+    - Mapper integration: Automatic berth-to-signal correlation (when enabled)
+    
+    Mapper Behavior:
+    When enable_mapper=True:
+    - TD berth and signal events are collected in a batch
+    - Batch is processed periodically (every 10s) or when reaching batch_size (100 events)
+    - Mapper correlates step events (CA/CB/CC) with signal events (SF) in time window
+    - Configuration (pre_ms, post_ms, tau_ms) is loaded from mapper_config table
+    - Results stored in berth_signal_observations and berth_signal_scores tables
+    """
 
     def __init__(self, path: str, enable_mapper: bool = True) -> None:
+        """Initialize RailDB.
+        
+        Args:
+            path: Path to SQLite database file
+            enable_mapper: If True, enables automatic berth-to-signal correlation
+        """
         self.path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
@@ -21,8 +42,14 @@ class RailDB:
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._init_schema()
+        self.enable_mapper = enable_mapper
         if enable_mapper:
             self.ensure_mapper_schema()
+            # Initialize batch processing for mapper
+            self._event_batch: list = []
+            self._batch_lock = threading.Lock()
+            self._batch_size = 100  # Process when we hit this many events
+            self._start_batch_processor()
 
     def _init_schema(self) -> None:
         with self._conn:
@@ -109,6 +136,20 @@ class RailDB:
                 "INSERT INTO td_berth_events(ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr) VALUES (?,?,?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr),
             )
+        
+        # Add to mapper batch if enabled
+        if self.enable_mapper:
+            self._add_event_to_batch({
+                'msg_type': msg_type,
+                'msg_ts': ts_ms,
+                'td_area': area,
+                'from_berth': from_berth,
+                'to_berth': to_berth,
+                'descr': descr,
+                'address': None,
+                'data': None,
+                'received_at_utc': ts_iso
+            })
 
     def insert_td_signal_event(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str = "") -> None:
         """Insert a TD signal event (S-Class: SF, SG, SH)."""
@@ -116,6 +157,65 @@ class RailDB:
             self._conn.execute(
                 "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, msg_type, address, data or ""),
+            )
+        
+        # Add to mapper batch if enabled
+        if self.enable_mapper:
+            self._add_event_to_batch({
+                'msg_type': msg_type,
+                'msg_ts': ts_ms,
+                'td_area': area,
+                'address': address,
+                'data': data,
+                'received_at_utc': ts_iso,
+                'from_berth': None,
+                'to_berth': None,
+                'descr': None
+            })
+
+    def insert_observation(self, obs_row: tuple) -> None:
+        """Insert a berth-signal observation from mapper.
+        
+        Args:
+            obs_row: Tuple of (td_area, step_event_id, step_timestamp, from_berth, 
+                     to_berth, descr, signal_event_id, signal_timestamp, address, 
+                     data, dt_ms, weight)
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO berth_signal_observations (
+                    td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
+                    signal_event_id, signal_timestamp, address, data, dt_ms, weight
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(td_area, step_timestamp, signal_timestamp, address) DO NOTHING
+                """,
+                obs_row
+            )
+    
+    def insert_score(self, score_row: tuple) -> None:
+        """Insert or update a berth-signal correlation score from mapper.
+        
+        Args:
+            score_row: Tuple of (td_area, from_berth, to_berth, address, score, 
+                       last_seen_ts, last_seen_utc, last_data)
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO berth_signal_scores (
+                    td_area, from_berth, to_berth, address, score, last_seen_ts, last_seen_utc, last_data
+                )
+                VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(td_area, from_berth, to_berth, address)
+                DO UPDATE SET
+                    score = score + excluded.score,
+                    obs_count = obs_count + 1,
+                    last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
+                    last_seen_utc = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_utc ELSE last_seen_utc END,
+                    last_data = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_data ELSE last_data END
+                """,
+                score_row
             )
 
     def upsert_td_state(self, area: str, headcode: str, last_time_ms: int, last_time_iso: str, from_berth: str, to_berth: str,
@@ -177,6 +277,85 @@ class RailDB:
                 """,
                 (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':'))),
             )
+
+    def _add_event_to_batch(self, event: dict) -> None:
+        """Add an event to the mapper batch for processing."""
+        if not self.enable_mapper:
+            return
+        
+        with self._batch_lock:
+            self._event_batch.append(event)
+            
+            # Process batch if it reaches the threshold
+            if len(self._event_batch) >= self._batch_size:
+                self._process_mapper_batch()
+    
+    def _process_mapper_batch(self) -> None:
+        """Process accumulated events through the mapper."""
+        if not self._event_batch:
+            return
+        
+        from .mapper import process_batch_for_mapper
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
+        # Get mapper config from database
+        config = self.get_mapper_config()
+        pre_ms = config.get('pre_ms', 1000)
+        post_ms = config.get('post_ms', 5000)
+        tau_ms = config.get('tau_ms', 2500)
+        
+        # Copy and clear batch
+        events_to_process = self._event_batch[:]
+        self._event_batch = []
+        
+        try:
+            obs_rows, score_rows = process_batch_for_mapper(
+                events_to_process,
+                pre_ms=pre_ms,
+                post_ms=post_ms,
+                tau_ms=tau_ms
+            )
+            
+            # Insert observations
+            for obs_row in obs_rows:
+                try:
+                    self.insert_observation(obs_row)
+                except Exception as e:
+                    logger.error(f"Failed to insert observation: {e}")
+            
+            # Insert scores
+            for score_row in score_rows:
+                try:
+                    self.insert_score(score_row)
+                except Exception as e:
+                    logger.error(f"Failed to insert score: {e}")
+            
+            if obs_rows or score_rows:
+                logger.debug(f"Mapper: processed {len(events_to_process)} events -> {len(obs_rows)} observations, {len(score_rows)} scores")
+        except Exception as e:
+            logger.error(f"Mapper batch processing failed: {e}")
+    
+    def _start_batch_processor(self) -> None:
+        """Start a background thread to periodically process mapper batches."""
+        import time
+        
+        def batch_processor():
+            from .logging_config import get_logger
+            logger = get_logger("database")
+            
+            while True:
+                time.sleep(10)  # Process every 10 seconds
+                
+                with self._batch_lock:
+                    if self._event_batch:
+                        try:
+                            self._process_mapper_batch()
+                        except Exception as e:
+                            logger.error(f"Batch processor error: {e}")
+        
+        t = threading.Thread(target=batch_processor, daemon=True, name="mapper-batch-processor")
+        t.start()
 
     
     
