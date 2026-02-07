@@ -162,6 +162,20 @@ class Listener(stomp.ConnectionListener):
                 if not vs:
                     continue
 
+                # Persist VSTP to DB if available
+                if self.db:
+                    try:
+                        self.db.upsert_vstp(
+                            uid=vs.uid,
+                            headcode=vs.signalling_id or "",
+                            start_date=vs.start_date or "",
+                            end_date=vs.end_date or "",
+                            raw=item
+                        )
+                        logger.debug(f"DB: persisted VSTP uid={vs.uid} headcode={vs.signalling_id} start={vs.start_date}")
+                    except Exception as e:
+                        logger.warning(f"DB: failed to persist VSTP uid={getattr(vs, 'uid', '?')}: {e!r}")
+
                 if self.args.trace_headcode:
                     if self.args.headcode and vs.signalling_id == self.args.headcode:
                         logger.debug(f"TRACE VSTP headcode={vs.signalling_id} uid={vs.uid} start={vs.start_date}")
@@ -186,6 +200,23 @@ class Listener(stomp.ConnectionListener):
                     or body.get("reporting_number")
                     or ""
                 ).strip()
+
+                # Persist TRUST to DB if available
+                if self.db:
+                    try:
+                        self.db.upsert_trust(
+                            train_id=ts.train_id,
+                            headcode=trust_headcode,
+                            uid=ts.train_uid or "",
+                            toc_id=ts.toc_id or "",
+                            last_event_time=ts.last_event_time or "",
+                            last_location=ts.last_location or "",
+                            last_delay_min=ts.last_delay_min,
+                            raw=body,
+                        )
+                        logger.debug(f"DB: persisted TRUST train_id={ts.train_id} headcode={trust_headcode} uid={ts.train_uid}")
+                    except Exception as e:
+                        logger.warning(f"DB: failed to persist TRUST train_id={getattr(ts, 'train_id', '?')}: {e!r}")
 
                 # Trace TRUST visibility
                 if self.args.trace_headcode:
