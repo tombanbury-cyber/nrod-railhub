@@ -8,6 +8,8 @@ import sqlite3
 import threading
 from typing import Optional
 
+from .models import safe_int
+
 
 class RailDB:
     """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
@@ -120,6 +122,41 @@ class RailDB:
                     PRIMARY KEY (uid, start_date)
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_state_headcode ON vstp_state(headcode);
+
+                -- New table: store fully decoded TRUST messages (history)
+                CREATE TABLE IF NOT EXISTS trust_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    train_id TEXT,
+                    actual_timestamp_ms INTEGER,
+                    gbtt_timestamp_ms INTEGER,
+                    planned_timestamp_ms INTEGER,
+                    planned_event_type TEXT,
+                    event_type TEXT,
+                    event_source TEXT,
+                    correction_ind INTEGER,
+                    offroute_ind INTEGER,
+                    direction_ind TEXT,
+                    line_ind TEXT,
+                    platform TEXT,
+                    route TEXT,
+                    train_service_code TEXT,
+                    division_code TEXT,
+                    toc_id TEXT,
+                    timetable_variation INTEGER,
+                    variation_status TEXT,
+                    next_report_stanox TEXT,
+                    next_report_run_time INTEGER,
+                    train_terminated INTEGER,
+                    delay_monitoring_point INTEGER,
+                    reporting_stanox TEXT,
+                    auto_expected INTEGER,
+                    raw_json TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    UNIQUE(train_id, actual_timestamp_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_trust_messages_train_id ON trust_messages(train_id);
+                CREATE INDEX IF NOT EXISTS idx_trust_messages_actual_ts ON trust_messages(actual_timestamp_ms);
                 """
             )
 
@@ -277,6 +314,106 @@ class RailDB:
                 """,
                 (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':'))),
             )
+
+    def insert_trust_message(self, body: dict) -> None:
+        """
+        Persist a fully decoded TRUST message into trust_messages.
+
+        - Coerces timestamps (strings of epoch ms) to integers.
+        - Coerces boolean-like strings ("true"/"false", "1"/"0") to integers 1/0.
+        - Inserts using INSERT OR IGNORE to avoid duplicate rows for the same (train_id, actual_timestamp_ms).
+        """
+        if not isinstance(body, dict):
+            return
+
+        def _to_int(val):
+            if val is None:
+                return None
+            try:
+                return int(str(val).strip())
+            except Exception:
+                return None
+
+        def _to_bool_int(val):
+            if val is None:
+                return None
+            s = str(val).strip().lower()
+            if s in ("true", "t", "1", "yes", "y"):
+                return 1
+            if s in ("false", "f", "0", "no", "n"):
+                return 0
+            return None
+
+        train_id = (body.get("train_id") or body.get("trainId") or "").strip() or None
+        actual_ts = _to_int(body.get("actual_timestamp") or body.get("actualTimestamp") or body.get("time"))
+        gbtt_ts = _to_int(body.get("gbtt_timestamp") or body.get("gbttTimestamp"))
+        planned_ts = _to_int(body.get("planned_timestamp") or body.get("plannedTimestamp"))
+        planned_event_type = (body.get("planned_event_type") or body.get("plannedEventType") or "").strip() or None
+        event_type = (body.get("event_type") or body.get("eventType") or "").strip() or None
+        event_source = (body.get("event_source") or body.get("eventSource") or "").strip() or None
+        correction_ind = _to_bool_int(body.get("correction_ind") or body.get("correctionInd"))
+        offroute_ind = _to_bool_int(body.get("offroute_ind") or body.get("offrouteInd"))
+        direction_ind = (body.get("direction_ind") or body.get("directionInd") or "").strip() or None
+        line_ind = (body.get("line_ind") or body.get("lineInd") or "").strip() or None
+        platform = (body.get("platform") or "").strip() or None
+        route = (body.get("route") or "").strip() or None
+        train_service_code = (body.get("train_service_code") or body.get("trainServiceCode") or "").strip() or None
+        division_code = (body.get("division_code") or body.get("divisionCode") or "").strip() or None
+        toc_id = (body.get("toc_id") or body.get("tocId") or "").strip() or None
+        timetable_variation = _to_int(body.get("timetable_variation") or body.get("timetableVariation"))
+        variation_status = (body.get("variation_status") or body.get("variationStatus") or "").strip() or None
+        next_report_stanox = (body.get("next_report_stanox") or body.get("nextReportStanox") or "").strip() or None
+        next_report_run_time = _to_int(body.get("next_report_run_time") or body.get("nextReportRunTime"))
+        train_terminated = _to_bool_int(body.get("train_terminated") or body.get("trainTerminated"))
+        delay_monitoring_point = _to_bool_int(body.get("delay_monitoring_point") or body.get("delayMonitoringPoint"))
+        reporting_stanox = (body.get("reporting_stanox") or body.get("reportingStanox") or "").strip() or None
+        auto_expected = _to_bool_int(body.get("auto_expected") or body.get("autoExpected"))
+
+        raw_compact = json.dumps(body, separators=(',',':'))
+
+        with self._lock, self._conn:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO trust_messages (
+                        train_id, actual_timestamp_ms, gbtt_timestamp_ms, planned_timestamp_ms,
+                        planned_event_type, event_type, event_source, correction_ind, offroute_ind,
+                        direction_ind, line_ind, platform, route, train_service_code, division_code,
+                        toc_id, timetable_variation, variation_status, next_report_stanox, next_report_run_time,
+                        train_terminated, delay_monitoring_point, reporting_stanox, auto_expected, raw_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        train_id,
+                        actual_ts,
+                        gbtt_ts,
+                        planned_ts,
+                        planned_event_type,
+                        event_type,
+                        event_source,
+                        correction_ind,
+                        offroute_ind,
+                        direction_ind,
+                        line_ind,
+                        platform,
+                        route,
+                        train_service_code,
+                        division_code,
+                        toc_id,
+                        timetable_variation,
+                        variation_status,
+                        next_report_stanox,
+                        next_report_run_time,
+                        train_terminated,
+                        delay_monitoring_point,
+                        reporting_stanox,
+                        auto_expected,
+                        raw_compact,
+                    ),
+                )
+            except Exception:
+                # Let callers handle/log if needed — but don't raise in DB internals
+                raise
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""
@@ -600,5 +737,3 @@ class RailDB:
                 'inserted': total_inserted,
                 'observations_processed': total_observations
             }
-
-
