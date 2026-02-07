@@ -40,6 +40,7 @@ class LocationResolver:
         self.tiploc_to_name: Dict[str, str] = {}
         self.stanox_to_name: Dict[str, str] = {}
         self.crs_to_name: Dict[str, str] = {}
+        self.tiploc_to_stanox: Dict[str, str] = {}  # TIPLOC -> STANOX mapping
 
     def load_or_download(
         self,
@@ -206,6 +207,7 @@ class LocationResolver:
         tiploc: Dict[str, str] = {}
         stanox: Dict[str, str] = {}
         crs: Dict[str, str] = {}
+        tiploc_stanox: Dict[str, str] = {}
 
         for row in rows:
             if not isinstance(row, dict):
@@ -227,10 +229,14 @@ class LocationResolver:
                 stanox[stx] = name
             if three and three not in crs:
                 crs[three] = name
+            # Build TIPLOC -> STANOX mapping
+            if tip and stx and tip not in tiploc_stanox:
+                tiploc_stanox[tip] = stx
 
         self.tiploc_to_name = tiploc
         self.stanox_to_name = stanox
         self.crs_to_name = crs
+        self.tiploc_to_stanox = tiploc_stanox
 
         if not quiet:
             logger.info(
@@ -248,6 +254,10 @@ class LocationResolver:
 
     def name_for_crs(self, code: str) -> str:
         return self.crs_to_name.get((code or "").strip().upper(), "")
+
+    def stanox_for_tiploc(self, code: str) -> Optional[str]:
+        """Return STANOX for a given TIPLOC, or None if not found."""
+        return self.tiploc_to_stanox.get((code or "").strip().upper())
 
 
 class SmartResolver:

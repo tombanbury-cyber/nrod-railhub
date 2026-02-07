@@ -8,7 +8,7 @@ import json
 import pathlib
 import datetime
 from datetime import timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
@@ -46,10 +46,71 @@ class HumanView:
 
         self.headcode_by_uid: Dict[str, str] = {}
 
+        # Area-scoped TRUST index for handling headcode reuse across regions
+        self.trust_by_area_headcode: Dict[Tuple[str, str], TrustState] = {}
+
     @staticmethod
     def _normalize_tiploc(tiploc: str) -> str:
         """Normalize TIPLOC for consistent indexing (upper-case, stripped)."""
         return (tiploc or "").strip().upper()
+
+    def _area_from_stanox(self, stanox: str) -> Optional[str]:
+        """Infer TD area from STANOX using SMART reverse lookup.
+        
+        Iterates through SMART berth_map to find the area where this STANOX appears.
+        Returns the first matching area, or None if not found.
+        
+        Note: This performs a linear scan through berth_map. For large datasets,
+        consider building a reverse STANOX→area index if this becomes a bottleneck.
+        """
+        if not self.smart:
+            return None
+        # Iterate through SMART berth_map to find area for this STANOX
+        for (area, berth), data in self.smart.berth_map.items():
+            if data.get('stanox') == stanox:
+                return area
+        return None
+
+    def _schedule_passes_through_area(
+        self, 
+        schedule: Union[VstpSchedule, ItpsSchedule], 
+        td_area: str, 
+        td_state: Optional[TdState]
+    ) -> bool:
+        """Check if schedule route intersects with TD area using berth/STANOX matching.
+        
+        If we have berth resolution via SMART, check if the schedule calls at the matched STANOX.
+        This helps filter out schedules that share the same headcode but serve different routes.
+        
+        Args:
+            schedule: VstpSchedule or ItpsSchedule object
+            td_area: TD area code (e.g., "EK")
+            td_state: Current TD state for the train (may be None)
+            
+        Returns:
+            True if schedule route passes through the TD area, False otherwise.
+            Defaults to True if validation cannot be performed (no data).
+        """
+        # If we have berth resolution via SMART, check if schedule calls at the matched STANOX
+        if td_state and self.smart and self.resolver:
+            berth = td_state.to_berth or td_state.from_berth
+            if berth:
+                hit = self.smart.lookup(td_area, berth)
+                if hit and hit.get('stanox'):
+                    stanox = str(hit['stanox'])
+                    # Check if any schedule location matches this STANOX
+                    locations = getattr(schedule, 'locations', []) or []
+                    if locations:  # Only validate if we have locations
+                        for loc in locations:
+                            tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, 'tiploc', '')
+                            if tiploc:
+                                loc_stanox = self.resolver.stanox_for_tiploc(tiploc)
+                                if loc_stanox == stanox:
+                                    return True
+                        # We resolved the berth, have locations, but found no match
+                        return False
+        # Default: assume match (can't validate without data)
+        return True
 
     def _build_station_to_tiplocs_index(self) -> Dict[str, List[str]]:
         """Build a reverse index: station name (lowercase) → list of TIPLOCs.
@@ -88,7 +149,26 @@ class HumanView:
         """
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
 
-        # 1) TRUST -> train_uid -> lookup (highest priority)
+        # 1a) Area-scoped TRUST -> train_uid -> lookup (highest priority)
+        ts_area = self.trust_by_area_headcode.get((td_area, headcode))
+        if ts_area and ts_area.train_uid:
+            uid = ts_area.train_uid
+            # Try exact UID match in VSTP
+            for (k_uid, k_date), vs in list(self.vstp_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched via area-scoped TRUST train_uid {uid} (area={td_area})"
+                    if trace:
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return vs, reason, None
+            # Try exact UID match in ITPS
+            for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched timetable via area-scoped TRUST train_uid {uid} (area={td_area})"
+                    if trace:
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return ss, reason, None
+
+        # 1) TRUST -> train_uid -> lookup (fallback to global if no area match)
         ts = self.trust_by_headcode.get(headcode) or None
         if ts and ts.train_uid:
             uid = ts.train_uid
@@ -199,14 +279,28 @@ class HumanView:
                             logger.debug(f"TIPLOC match: {reason}")
                             return best, reason, best_info
 
-        # 3) Fallback: Candidate schedules by headcode (now handling multiple schedules per headcode)
+        # 3) Fallback: Candidate schedules by headcode (with area-route validation)
         candidates = []
         vs_list = self.vstp_by_headcode.get(headcode, [])
         for vs in vs_list:
-            candidates.append(("VSTP", vs))
+            if self._schedule_passes_through_area(vs, td_area, td):
+                candidates.append(("VSTP", vs))
         ss_list = self.sched_by_headcode.get(headcode, [])
         for ss in ss_list:
-            candidates.append(("SCHEDULE", ss))
+            if self._schedule_passes_through_area(ss, td_area, td):
+                candidates.append(("SCHEDULE", ss))
+        
+        # Add diagnostic logging when multiple candidates exist
+        if trace or len(candidates) > 1:
+            logger.debug(f"MATCH DEBUG: headcode={headcode} td_area={td_area}")
+            logger.debug(f"  Found {len(candidates)} candidate schedules after area filtering")
+            for typ, cand in candidates:
+                locations = getattr(cand, 'locations', []) or []
+                origin = locations[0][0] if locations else "?"
+                dest = locations[-1][0] if locations else "?"
+                uid = getattr(cand, 'uid', '?')
+                logger.debug(f"    {typ}: {origin} → {dest} (UID={uid})")
+        
         if not candidates:
             reason = "no candidate schedules for headcode"
             if trace:
@@ -590,7 +684,18 @@ class HumanView:
             inferred = self.headcode_by_uid.get(st.train_uid)
             if inferred:
                 self.trust_by_headcode[inferred] = st
+                # Update headcode for use in area-scoped indexing below
+                headcode = inferred
 
+        # Infer TD area from location STANOX and populate area-scoped index
+        if st.last_location and headcode and self.smart:
+            inferred_area = self._area_from_stanox(st.last_location)
+            if inferred_area:
+                self.trust_by_area_headcode[(inferred_area, headcode)] = st
+                logger.debug(
+                    f"TRUST area-scoped: train_id={train_id} headcode={headcode} "
+                    f"stanox={st.last_location} -> area={inferred_area}"
+                )
 
         return st
 
