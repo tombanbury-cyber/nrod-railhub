@@ -19,6 +19,20 @@ from .logging_config import get_logger
 
 logger = get_logger("views")
 
+# Geographic keyword filtering for TD area route validation
+TD_AREA_REGIONS = {
+    "EK": {
+        "keywords": [
+            "MARGATE", "RAMSGATE", "DOVER", "CANTERBURY", "ASHFORD",
+            "GILLINGHAM", "FAVERSHAM", "SITTINGBOURNE", "THANET",
+            "FOLKESTONE", "BROADSTAIRS", "ROCHESTER", "STROOD",
+            "RAINHAM", "GRAVESEND", "EBBSFLEET", "DARTFORD"
+        ],
+        "allow_london_routes": True,
+        "london_keywords": ["LONDON", "VICTORIA", "CHARING", "ST PANCRAS", "KINGS CROSS"]
+    }
+}
+
 class HumanView:
     """In-memory caches so we can join VSTP + TRUST + TD into a readable view."""
 
@@ -77,9 +91,11 @@ class HumanView:
         td_area: str, 
         td_state: Optional[TdState]
     ) -> bool:
-        """Check if schedule route intersects with TD area using berth/STANOX matching.
+        """Check if schedule route intersects with TD area using two-stage validation.
         
-        If we have berth resolution via SMART, check if the schedule calls at the matched STANOX.
+        Stage 1: Precise STANOX matching (if berth resolution available via SMART)
+        Stage 2: Geographic keyword filtering (if area has configured regions)
+        
         This helps filter out schedules that share the same headcode but serve different routes.
         
         Args:
@@ -89,9 +105,9 @@ class HumanView:
             
         Returns:
             True if schedule route passes through the TD area, False otherwise.
-            Defaults to True if validation cannot be performed (no data).
+            Returns True if validation cannot be performed (no data).
         """
-        # If we have berth resolution via SMART, check if schedule calls at the matched STANOX
+        # Stage 1: Precise STANOX matching (existing logic)
         if td_state and self.smart and self.resolver:
             berth = td_state.to_berth or td_state.from_berth
             if berth:
@@ -109,6 +125,35 @@ class HumanView:
                                     return True
                         # We resolved the berth, have locations, but found no match
                         return False
+        
+        # Stage 2: Geographic keyword filtering (NEW)
+        if td_area in TD_AREA_REGIONS and self.resolver:
+            area_config = TD_AREA_REGIONS[td_area]
+            keywords = area_config.get('keywords', [])
+            allow_london = area_config.get('allow_london_routes', False)
+            london_keywords = area_config.get('london_keywords', [])
+            
+            locations = getattr(schedule, 'locations', []) or []
+            if locations:
+                # Check each location's station name against keywords
+                for loc in locations:
+                    tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, 'tiploc', '')
+                    if tiploc:
+                        station_name = self.resolver.name_for_tiploc(tiploc)
+                        if station_name:
+                            station_upper = station_name.upper()
+                            # Check for regional keywords
+                            for keyword in keywords:
+                                if keyword in station_upper:
+                                    return True
+                            # Check for London keywords if allowed
+                            if allow_london:
+                                for keyword in london_keywords:
+                                    if keyword in station_upper:
+                                        return True
+                # No keyword match found - reject schedule
+                return False
+        
         # Default: assume match (can't validate without data)
         return True
 

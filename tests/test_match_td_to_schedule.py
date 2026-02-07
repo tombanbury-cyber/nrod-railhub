@@ -201,6 +201,12 @@ def test_match_via_time_proximity():
 
     # Mock SMART to return None (no match)
     smart.lookup.return_value = None
+    
+    # Mock name_for_tiploc to return Kent station names (passes keyword filter)
+    def mock_name_for_tiploc(tiploc):
+        names = {"CLPHMJC": "Gillingham", "VICTRIC": "Dover", "MARGAT": "Margate"}
+        return names.get(tiploc.upper(), "")
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
 
     # Test matching - should pick vs1 based on time proximity
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
@@ -236,6 +242,12 @@ def test_match_ambiguous_fallback():
 
     # Mock SMART to return None
     smart.lookup.return_value = None
+    
+    # Mock name_for_tiploc to return Kent station names (passes keyword filter)
+    def mock_name_for_tiploc(tiploc):
+        names = {"CLPHMJC": "Gillingham", "VICTRIC": "Dover"}
+        return names.get(tiploc.upper(), "")
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
 
     # Test matching - should return first candidate as ambiguous
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
@@ -285,6 +297,12 @@ def test_match_without_td_state():
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
     hv.vstp_by_headcode["2C90"] = [vs]
+    
+    # Mock name_for_tiploc to return Kent station names (passes keyword filter)
+    def mock_name_for_tiploc(tiploc):
+        names = {"CLPHMJC": "Gillingham", "VICTRIC": "Dover"}
+        return names.get(tiploc.upper(), "")
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
 
     # Test matching without TD state - should still return schedule
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
