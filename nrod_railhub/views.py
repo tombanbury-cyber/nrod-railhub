@@ -138,7 +138,26 @@ class HumanView:
         """
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
 
-        # 1) TRUST -> train_uid -> lookup (highest priority)
+        # 1a) Area-scoped TRUST -> train_uid -> lookup (highest priority)
+        ts_area = self.trust_by_area_headcode.get((td_area, headcode))
+        if ts_area and ts_area.train_uid:
+            uid = ts_area.train_uid
+            # Try exact UID match in VSTP
+            for (k_uid, k_date), vs in list(self.vstp_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched via area-scoped TRUST train_uid {uid} (area={td_area})"
+                    if trace:
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return vs, reason, None
+            # Try exact UID match in ITPS
+            for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
+                if k_uid == uid:
+                    reason = f"matched timetable via area-scoped TRUST train_uid {uid} (area={td_area})"
+                    if trace:
+                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                    return ss, reason, None
+
+        # 1) TRUST -> train_uid -> lookup (fallback to global if no area match)
         ts = self.trust_by_headcode.get(headcode) or None
         if ts and ts.train_uid:
             uid = ts.train_uid
@@ -249,14 +268,28 @@ class HumanView:
                             logger.debug(f"TIPLOC match: {reason}")
                             return best, reason, best_info
 
-        # 3) Fallback: Candidate schedules by headcode (now handling multiple schedules per headcode)
+        # 3) Fallback: Candidate schedules by headcode (with area-route validation)
         candidates = []
         vs_list = self.vstp_by_headcode.get(headcode, [])
         for vs in vs_list:
-            candidates.append(("VSTP", vs))
+            if self._schedule_passes_through_area(vs, td_area, td):
+                candidates.append(("VSTP", vs))
         ss_list = self.sched_by_headcode.get(headcode, [])
         for ss in ss_list:
-            candidates.append(("SCHEDULE", ss))
+            if self._schedule_passes_through_area(ss, td_area, td):
+                candidates.append(("SCHEDULE", ss))
+        
+        # Add diagnostic logging when multiple candidates exist
+        if trace or len(candidates) > 1:
+            logger.debug(f"MATCH DEBUG: headcode={headcode} td_area={td_area}")
+            logger.debug(f"  Found {len(candidates)} candidate schedules after area filtering")
+            for typ, cand in candidates:
+                locations = getattr(cand, 'locations', []) or []
+                origin = locations[0][0] if locations else "?"
+                dest = locations[-1][0] if locations else "?"
+                uid = getattr(cand, 'uid', '?')
+                logger.debug(f"    {typ}: {origin} → {dest} (UID={uid})")
+        
         if not candidates:
             reason = "no candidate schedules for headcode"
             if trace:
@@ -640,7 +673,17 @@ class HumanView:
             inferred = self.headcode_by_uid.get(st.train_uid)
             if inferred:
                 self.trust_by_headcode[inferred] = st
+                headcode = inferred  # Use inferred headcode for area-scoped indexing
 
+        # NEW: Infer TD area from location STANOX and populate area-scoped index
+        if st.last_location and headcode and self.smart:
+            inferred_area = self._area_from_stanox(st.last_location)
+            if inferred_area:
+                self.trust_by_area_headcode[(inferred_area, headcode)] = st
+                logger.debug(
+                    f"TRUST area-scoped: train_id={train_id} headcode={headcode} "
+                    f"stanox={st.last_location} -> area={inferred_area}"
+                )
 
         return st
 
