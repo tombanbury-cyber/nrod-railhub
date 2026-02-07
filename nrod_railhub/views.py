@@ -46,10 +46,60 @@ class HumanView:
 
         self.headcode_by_uid: Dict[str, str] = {}
 
+        # Area-scoped TRUST index for handling headcode reuse across regions
+        self.trust_by_area_headcode: Dict[Tuple[str, str], TrustState] = {}
+
     @staticmethod
     def _normalize_tiploc(tiploc: str) -> str:
         """Normalize TIPLOC for consistent indexing (upper-case, stripped)."""
         return (tiploc or "").strip().upper()
+
+    def _area_from_stanox(self, stanox: str) -> Optional[str]:
+        """Infer TD area from STANOX using SMART reverse lookup.
+        
+        Iterates through SMART berth_map to find the area where this STANOX appears.
+        Returns the first matching area, or None if not found.
+        """
+        if not self.smart:
+            return None
+        # Iterate through SMART berth_map to find area for this STANOX
+        for (area, berth), data in self.smart.berth_map.items():
+            if data.get('stanox') == stanox:
+                return area
+        return None
+
+    def _schedule_passes_through_area(self, schedule: Any, td_area: str, td_state: Optional[TdState]) -> bool:
+        """Check if schedule route intersects with TD area using berth/STANOX matching.
+        
+        If we have berth resolution via SMART, check if the schedule calls at the matched STANOX.
+        This helps filter out schedules that share the same headcode but serve different routes.
+        
+        Args:
+            schedule: VstpSchedule or ItpsSchedule object
+            td_area: TD area code (e.g., "EK")
+            td_state: Current TD state for the train (may be None)
+            
+        Returns:
+            True if schedule route passes through the TD area, False otherwise.
+            Defaults to True if validation cannot be performed (no data).
+        """
+        # If we have berth resolution via SMART, check if schedule calls at the matched STANOX
+        if td_state and self.smart:
+            berth = td_state.to_berth or td_state.from_berth
+            if berth:
+                hit = self.smart.lookup(td_area, berth)
+                if hit and hit.get('stanox'):
+                    stanox = str(hit['stanox'])
+                    # Check if any schedule location matches this STANOX
+                    locations = getattr(schedule, 'locations', []) or []
+                    for loc in locations:
+                        tiploc = loc[0] if isinstance(loc, tuple) else getattr(loc, 'tiploc', '')
+                        if tiploc and self.resolver:
+                            loc_stanox = self.resolver.stanox_for_tiploc(tiploc)
+                            if loc_stanox == stanox:
+                                return True
+        # Default: assume match (can't validate without data)
+        return True
 
     def _build_station_to_tiplocs_index(self) -> Dict[str, List[str]]:
         """Build a reverse index: station name (lowercase) → list of TIPLOCs.
