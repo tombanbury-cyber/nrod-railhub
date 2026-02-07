@@ -145,15 +145,24 @@ def test_schedule_passes_through_area_default_true():
         locations=[("CLPHMJC", "12:30", "12:31")]
     )
     
-    # Test with no TD state
-    result = hv._schedule_passes_through_area(vs, "EK", None)
-    assert result is True
+    # Mock name_for_tiploc to return empty string (no validation possible)
+    resolver.name_for_tiploc.return_value = ""
     
-    # Test with TD state but SMART lookup fails
+    # Test with no TD state - should trigger keyword filtering for EK, but no station names available
+    result = hv._schedule_passes_through_area(vs, "EK", None)
+    # Since EK area has keyword filtering configured but no station names are available,
+    # it should return False (no match found)
+    assert result is False
+    
+    # Test with a non-configured area (no keyword filtering)
+    result = hv._schedule_passes_through_area(vs, "XX", None)
+    assert result is True  # Should default to True for unconfigured areas
+    
+    # Test with TD state but SMART lookup fails - should still apply keyword filtering for EK
     td = TdState(descr="2C90", area_id="EK", to_berth="0152")
     smart.lookup.return_value = None
     result = hv._schedule_passes_through_area(vs, "EK", td)
-    assert result is True
+    assert result is False  # EK has keyword filtering, no match found
 
 
 def test_upsert_trust_populates_area_index():
@@ -347,3 +356,177 @@ def test_two_trains_same_headcode_different_areas():
     sched_ad, reason_ad, _ = hv.match_td_to_schedule("AD", "2C90")
     assert sched_ad is vs_kent, f"AD area should match Kent train, got UID {getattr(sched_ad, 'uid', None)}"
     assert "area-scoped" in reason_ad and "C67890" in reason_ad, f"Reason should mention area-scoped and UID C67890: {reason_ad}"
+
+
+def test_ek_rejects_manchester_route():
+    """Test that EK area rejects Manchester route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: Manchester Victoria → Leeds
+    vs_manchester = VstpSchedule(
+        uid="C99999",
+        signalling_id="1J24",
+        start_date="2026-01-17",
+        locations=[("MNCRPIC", "10:00", "10:01"), ("LEEDS", "11:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "MNCRPIC": "Manchester Piccadilly",
+            "LEEDS": "Leeds"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should reject (no Kent or London keywords)
+    result = hv._schedule_passes_through_area(vs_manchester, "EK", None)
+    assert result is False, "EK area should reject Manchester route"
+
+
+def test_ek_rejects_newcastle_route():
+    """Test that EK area rejects Newcastle route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: Newcastle → Middlesbrough
+    vs_newcastle = VstpSchedule(
+        uid="C88888",
+        signalling_id="2W32",
+        start_date="2026-01-17",
+        locations=[("NWCSTLE", "09:00", "09:01"), ("MDLSBRO", "10:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "NWCSTLE": "Newcastle",
+            "MDLSBRO": "Middlesbrough"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should reject (no Kent or London keywords)
+    result = hv._schedule_passes_through_area(vs_newcastle, "EK", None)
+    assert result is False, "EK area should reject Newcastle route"
+
+
+def test_ek_rejects_wales_route():
+    """Test that EK area rejects Wales route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: Aberystwyth → Shrewsbury
+    vs_wales = VstpSchedule(
+        uid="C77777",
+        signalling_id="1S20",
+        start_date="2026-01-17",
+        locations=[("ABRYSTW", "08:00", "08:01"), ("SHRWSBY", "10:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "ABRYSTW": "Aberystwyth",
+            "SHRWSBY": "Shrewsbury"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should reject (no Kent or London keywords)
+    result = hv._schedule_passes_through_area(vs_wales, "EK", None)
+    assert result is False, "EK area should reject Wales route"
+
+
+def test_ek_accepts_kent_route():
+    """Test that EK area accepts Kent route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: Canterbury → Margate
+    vs_kent = VstpSchedule(
+        uid="C66666",
+        signalling_id="2K90",
+        start_date="2026-01-17",
+        locations=[("CTRBURY", "12:00", "12:01"), ("MARGAT", "12:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "CTRBURY": "Canterbury East",
+            "MARGAT": "Margate"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should accept (has Kent keywords)
+    result = hv._schedule_passes_through_area(vs_kent, "EK", None)
+    assert result is True, "EK area should accept Kent route"
+
+
+def test_ek_accepts_london_to_kent_route():
+    """Test that EK area accepts London to Kent route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: London Victoria → Dover
+    vs_london_kent = VstpSchedule(
+        uid="C55555",
+        signalling_id="2V90",
+        start_date="2026-01-17",
+        locations=[("VICTRIC", "10:00", "10:01"), ("DOVERP", "11:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "VICTRIC": "London Victoria",
+            "DOVERP": "Dover Priory"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should accept (has London and Kent keywords)
+    result = hv._schedule_passes_through_area(vs_london_kent, "EK", None)
+    assert result is True, "EK area should accept London to Kent route"
+
+
+def test_ek_accepts_london_only_route():
+    """Test that EK area accepts London-only route via geographic keyword filtering."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+    
+    # Create schedule: London Victoria → London St Pancras
+    vs_london_only = VstpSchedule(
+        uid="C44444",
+        signalling_id="2L90",
+        start_date="2026-01-17",
+        locations=[("VICTRIC", "09:00", "09:01"), ("STPANCI", "09:30", "")]
+    )
+    
+    # Mock resolver to return station names
+    def mock_name_for_tiploc(tiploc):
+        names = {
+            "VICTRIC": "London Victoria",
+            "STPANCI": "London St Pancras International"
+        }
+        return names.get(tiploc.upper(), "")
+    
+    resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
+    
+    # Test - should accept (has London keywords and allow_london_routes is True)
+    result = hv._schedule_passes_through_area(vs_london_only, "EK", None)
+    assert result is True, "EK area should accept London-only route when allow_london_routes is True"
