@@ -509,7 +509,7 @@ def test_ek_accepts_london_only_route():
     smart = Mock()
     hv = HumanView(resolver=resolver, smart=smart)
     
-    # Create schedule: London Victoria → London St Pancras (via Southeastern)
+    # Create schedule: London Victoria → London St Pancras
     vs_london_only = VstpSchedule(
         uid="C44444",
         signalling_id="2L90",

@@ -105,7 +105,9 @@ class HumanView:
             
         Returns:
             True if schedule route passes through the TD area, False otherwise.
-            Returns True if validation cannot be performed (no data).
+            Returns True only when neither STANOX validation nor keyword filtering 
+            can be performed (i.e., no TD state/berth data AND area not configured 
+            in TD_AREA_REGIONS).
         """
         # Stage 1: Precise STANOX matching (existing logic)
         if td_state and self.smart and self.resolver:
