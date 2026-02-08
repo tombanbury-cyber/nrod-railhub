@@ -1504,7 +1504,6 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             
             elif action == "purge":
                 # Manual purge now
-                import time
                 now_ms = int(time.time() * 1000)
                 
                 retain_trust_days = request.form.get("retain_trust_days", "").strip()

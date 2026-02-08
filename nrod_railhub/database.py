@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from typing import Optional, Any
 
 from .models import safe_int
@@ -225,7 +226,6 @@ class RailDB:
 
     def _start_retention_thread(self) -> None:
         """Start background thread for periodic data retention."""
-        import time
         from .logging_config import get_logger
         
         def retention_worker():
@@ -253,10 +253,6 @@ class RailDB:
         )
         self._retention_thread.start()
     
-    def _retention_worker(self) -> None:
-        """Worker function for retention thread (compatibility method)."""
-        pass  # Logic moved to _start_retention_thread for consistency
-    
     def stop_retention(self) -> None:
         """Stop the retention background thread."""
         if self._retention_thread and self._retention_thread.is_alive():
@@ -272,8 +268,6 @@ class RailDB:
         Returns:
             Dict with counts: {'trust_messages': int, 'vstp_schedules': int}
         """
-        import time
-        
         result = {'trust_messages': 0, 'vstp_schedules': 0}
         now_ms = int(time.time() * 1000)
         
@@ -323,7 +317,6 @@ class RailDB:
                 
                 # Small sleep to avoid starving other operations
                 if deleted >= batch_size:
-                    import time
                     time.sleep(0.1)
         
         return total_deleted
@@ -373,7 +366,6 @@ class RailDB:
                 
                 # Small sleep to avoid starving other operations
                 if deleted >= batch_size:
-                    import time
                     time.sleep(0.1)
         
         return total_deleted
