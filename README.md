@@ -48,6 +48,47 @@ python3 nrod_railhub.py --user USER --password PASS --interactive
 python3 nrod_railhub.py --user USER --password PASS --td-area EK --interactive
 ```
 
+## Configuration File
+
+As an alternative to passing command-line arguments, you can use a YAML configuration file. This is especially useful for persistent settings like credentials and cache paths.
+
+### Creating a Configuration File
+
+Copy the sample configuration:
+
+```bash
+cp config.sample.yaml config.yaml
+```
+
+Edit `config.yaml` with your credentials and preferences:
+
+```yaml
+# Network Rail credentials
+user: your_email@example.com
+password: your_password
+
+# Display options
+width: 120
+log_level: info
+
+# Filtering
+headcode: 2C90  # Optional: monitor specific train
+```
+
+### Using the Configuration File
+
+```bash
+# Use config file (command-line args still override config values)
+python3 nrod_railhub.py --config config.yaml
+
+# Override specific config values via command line
+python3 nrod_railhub.py --config config.yaml --headcode 1A23 --width 150
+```
+
+**Note:** Command-line arguments always take precedence over configuration file values, allowing flexible overrides.
+
+For a complete list of all available configuration options with descriptions, see [config.sample.yaml](config.sample.yaml).
+
 ## Interactive Mode
 
 The `--interactive` flag launches a curses-based real-time terminal dashboard that displays:
@@ -91,6 +132,7 @@ python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD --
 
 | Option | Description |
 |--------|-------------|
+| `--config PATH` | Path to YAML configuration file (command-line args override config) |
 | `--user` | Network Rail username (required) |
 | `--password` | Network Rail password (required) |
 | `--headcode XXXX` | Filter to specific headcode (e.g. 2C90) |

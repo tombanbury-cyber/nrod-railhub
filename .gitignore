@@ -45,3 +45,8 @@ dist/
 build/
 *.egg-info/
 *.egg
+
+# Config files (use config.sample.yaml as template)
+config.yaml
+*_config.yaml
+test_config.yaml
