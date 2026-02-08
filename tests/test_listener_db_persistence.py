@@ -311,3 +311,124 @@ def test_db_error_does_not_crash_listener():
     # Cleanup
     import os
     os.unlink(db_path)
+
+
+def test_vstp_schedule_locations_persisted():
+    """Test that VSTP schedule locations are persisted to vstp_schedules and vstp_schedule_locations."""
+    # Create temporary database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
+        db_path = tmp_db.name
+    
+    # Setup components
+    db = RailDB(db_path, enable_mapper=False)
+    hv = Mock(spec=HumanView)
+    
+    # Mock argparse namespace
+    args = argparse.Namespace(
+        verbose=False,
+        trace_headcode=False,
+        headcode=None,
+        uid=None,
+        td_area=None,
+        width=96,
+        only_changes=True,
+        repeat_after=300
+    )
+    
+    # Create listener with database
+    listener = Listener(hv, args, db=db)
+    
+    # Mock HumanView.upsert_vstp to return a VstpSchedule
+    vstp_schedule = VstpSchedule(
+        uid="C67890",
+        signalling_id="1A23",
+        start_date="2026-02-08",
+        end_date="2026-02-08",
+        locations=[("CLPHMJC", "14:30", "14:32"), ("VICTRIC", "14:45", "14:47")]
+    )
+    hv.upsert_vstp.return_value = vstp_schedule
+    
+    # Create a VSTP message with proper structure for insert_vstp_schedule
+    vstp_message = {
+        "VSTPCIFMsgV1": {
+            "CIF_train_uid": "C67890",
+            "schedule_start_date": "2026-02-08",
+            "schedule_end_date": "2026-02-08",
+            "transaction_type": "Create",
+            "train_status": "P",
+            "schedule": {
+                "schedule_segment": {
+                    "signalling_id": "1A23",
+                    "CIF_train_service_code": "12345678",
+                    "schedule_location": [
+                        {
+                            "location": {
+                                "tiploc": {
+                                    "tiploc_id": "CLPHMJC"
+                                }
+                            },
+                            "scheduled_departure_time": "1430",
+                            "scheduled_arrival_time": "1432"
+                        },
+                        {
+                            "location": {
+                                "tiploc": {
+                                    "tiploc_id": "VICTRIC"
+                                }
+                            },
+                            "scheduled_departure_time": "1445",
+                            "scheduled_arrival_time": "1447"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    
+    # Create frame mock
+    frame = Mock()
+    frame.body = json.dumps([vstp_message])
+    frame.headers = {"destination": "/topic/VSTP_ALL"}
+    
+    # Process the message
+    listener.on_message(frame)
+    
+    # Verify HumanView was called
+    assert hv.upsert_vstp.called
+    
+    # Verify vstp_state was updated
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT uid, headcode, start_date FROM vstp_state WHERE uid=?", ("C67890",))
+    state_row = cursor.fetchone()
+    assert state_row is not None, "VSTP state should be persisted"
+    assert state_row[0] == "C67890"
+    assert state_row[1] == "1A23"
+    assert state_row[2] == "2026-02-08"
+    
+    # Verify vstp_schedules header was created
+    cursor.execute("SELECT uid, schedule_start_date, signalling_id FROM vstp_schedules WHERE uid=?", ("C67890",))
+    schedule_row = cursor.fetchone()
+    assert schedule_row is not None, "VSTP schedule header should be persisted"
+    assert schedule_row[0] == "C67890"
+    assert schedule_row[1] == "2026-02-08"
+    assert schedule_row[2] == "1A23"
+    
+    # Verify vstp_schedule_locations were created
+    cursor.execute(
+        "SELECT tiploc, scheduled_departure_time, scheduled_arrival_time FROM vstp_schedule_locations WHERE uid=? ORDER BY location_index",
+        ("C67890",)
+    )
+    location_rows = cursor.fetchall()
+    conn.close()
+    
+    assert len(location_rows) == 2, f"Expected 2 location rows, got {len(location_rows)}"
+    assert location_rows[0][0] == "CLPHMJC", f"First location should be CLPHMJC, got {location_rows[0][0]}"
+    assert location_rows[0][1] == "1430", f"First departure should be 1430, got {location_rows[0][1]}"
+    assert location_rows[1][0] == "VICTRIC", f"Second location should be VICTRIC, got {location_rows[1][0]}"
+    assert location_rows[1][1] == "1445", f"Second departure should be 1445, got {location_rows[1][1]}"
+    
+    # Cleanup
+    db.close()
+    import os
+    os.unlink(db_path)
