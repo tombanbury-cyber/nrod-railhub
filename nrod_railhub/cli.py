@@ -15,7 +15,7 @@ import stomp
 import yaml
 
 from .models import NR_HOST, NR_PORT, TOPIC_VSTP, TOPIC_TRUST, TOPIC_TD, utc_now_iso
-from .resolvers import LocationResolver, SmartResolver, ScheduleResolver
+from .resolvers import LocationResolver, SmartResolver, ScheduleResolver, TOCResolver
 from .views import HumanView
 from .database import RailDB
 from .listener import Listener
@@ -134,6 +134,11 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.smart_refresh,
         quiet=False,
     )
+    
+    # Initialize TOC resolver
+    toc_resolver = TOCResolver()
+    logger.info(f"TOC: loaded {len(toc_resolver.TOC_DATA)} TOC codes")
+    
     hv = HumanView(resolver=resolver, smart=smart)
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
@@ -192,6 +197,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
         retention_check_interval_s=getattr(args, 'retention_interval', 3600),
         retention_batch_size=getattr(args, 'retention_batch_size', 1000),
     ) if db_path else None
+    
+    # Populate TOC reference data in database if available
+    if db and toc_resolver:
+        try:
+            toc_resolver.populate_database(db, quiet=False)
+        except Exception as e:
+            logger.error(f"Failed to populate TOC reference data: {e}")
     
     # Create listener with optional output callback for interactive mode
     output_callback = None
