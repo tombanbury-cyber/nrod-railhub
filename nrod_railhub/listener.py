@@ -174,6 +174,14 @@ class Listener(stomp.ConnectionListener):
                     except Exception as e:
                         logger.warning(f"DB: failed to persist VSTP uid={getattr(vs, 'uid', '?')}: {e!r}")
 
+                    # Persist full expanded schedule (header + per-location rows)
+                    try:
+                        # insert_vstp_schedule expects the raw VSTP message dict
+                        self.db.insert_vstp_schedule(item)
+                        logger.debug(f"DB: persisted VSTP schedule locations uid={getattr(vs,'uid','?')} start={getattr(vs,'start_date','?')}")
+                    except Exception as e:
+                        logger.warning(f"DB: failed to insert VSTP schedule locations uid={getattr(vs,'uid','?')}: {e!r}")
+
                 if self.args.trace_headcode:
                     if self.args.headcode and vs.signalling_id == self.args.headcode:
                         logger.debug(f"TRACE VSTP headcode={vs.signalling_id} uid={vs.uid} start={vs.start_date}")
