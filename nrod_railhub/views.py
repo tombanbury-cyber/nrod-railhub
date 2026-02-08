@@ -14,7 +14,7 @@ from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
     utc_now_iso, utc_now_ms, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc, safe_int
 )
-from .resolvers import LocationResolver, SmartResolver
+from .resolvers import LocationResolver, SmartResolver, TOCResolver
 from .logging_config import get_logger
 
 logger = get_logger("views")
@@ -36,10 +36,12 @@ TD_AREA_REGIONS = {
 class HumanView:
     """In-memory caches so we can join VSTP + TRUST + TD into a readable view."""
 
-    def __init__(self, resolver: Optional[LocationResolver] = None, smart: Optional[SmartResolver] = None) -> None:
+    def __init__(self, resolver: Optional[LocationResolver] = None, smart: Optional[SmartResolver] = None, 
+                 toc_resolver: Optional[TOCResolver] = None) -> None:
 
         self.resolver = resolver
         self.smart = smart
+        self.toc_resolver = toc_resolver
 
         self.vstp_by_uid_date: Dict[Tuple[str, str], VstpSchedule] = {}
         self.vstp_by_headcode: Dict[str, List[VstpSchedule]] = {}
@@ -691,7 +693,16 @@ class HumanView:
         st = self.trust_by_train_id.get(train_id) or TrustState(train_id=train_id)
 
         st.train_uid = (body.get("train_uid") or body.get("CIF_train_uid") or st.train_uid or "").strip()
-        st.toc_id = (body.get("toc_id") or st.toc_id or "").strip()
+        
+        # Normalize TOC identifier using resolver
+        raw_toc_id = (body.get("toc_id") or st.toc_id or "").strip()
+        if raw_toc_id and self.toc_resolver:
+            # Try to resolve to canonical 2-character code
+            canonical_toc = self.toc_resolver.resolve_toc_code(raw_toc_id)
+            st.toc_id = canonical_toc if canonical_toc else raw_toc_id
+        else:
+            st.toc_id = raw_toc_id
+        
         st.schedule_source = (body.get("schedule_source") or st.schedule_source or "").strip()
 
         msg_type = (body.get("msg_type") or "").strip()
