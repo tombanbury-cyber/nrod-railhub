@@ -1,0 +1,8 @@
+# Test configuration for nrod-railhub
+user: test_user@example.com
+password: test_password
+headcode: 2C90
+width: 120
+log_level: info
+corpus_refresh: false
+verbose: false
