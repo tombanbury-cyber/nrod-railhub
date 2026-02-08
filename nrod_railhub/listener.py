@@ -22,11 +22,15 @@ logger = get_logger("listener")
 
 class Listener(stomp.ConnectionListener):
     def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None, 
-                 output_callback: Optional[callable] = None) -> None:
+                 output_callback: Optional[callable] = None,
+                 trust_callback: Optional[callable] = None,
+                 db_callback: Optional[callable] = None) -> None:
         self.hv = hv
         self.args = args
         self.db = db
-        self.output_callback = output_callback  # Optional callback for custom output handling
+        self.output_callback = output_callback  # Optional callback for custom output handling (TD messages)
+        self.trust_callback = trust_callback  # Optional callback for TRUST messages
+        self.db_callback = db_callback  # Optional callback for database operations
 
         self.connected_at: Optional[str] = None
         self.last_message_at: Optional[str] = None
@@ -171,6 +175,9 @@ class Listener(stomp.ConnectionListener):
                             raw=item
                         )
                         logger.debug(f"DB: persisted VSTP uid={vs.uid} headcode={vs.signalling_id} start={vs.start_date}")
+                        # Send DB operation to db callback if available
+                        if self.db_callback:
+                            self.db_callback(f"VSTP upsert: uid={vs.uid} hc={vs.signalling_id or '?'}")
                     except Exception as e:
                         logger.warning(f"DB: failed to persist VSTP uid={getattr(vs, 'uid', '?')}: {e!r}")
 
@@ -179,6 +186,9 @@ class Listener(stomp.ConnectionListener):
                         # insert_vstp_schedule expects the raw VSTP message dict
                         self.db.insert_vstp_schedule(item)
                         logger.debug(f"DB: persisted VSTP schedule locations uid={getattr(vs,'uid','?')} start={getattr(vs,'start_date','?')}")
+                        # Send DB operation to db callback if available
+                        if self.db_callback:
+                            self.db_callback(f"VSTP schedule insert: uid={getattr(vs,'uid','?')}")
                     except Exception as e:
                         logger.warning(f"DB: failed to insert VSTP schedule locations uid={getattr(vs,'uid','?')}: {e!r}")
 
@@ -206,6 +216,12 @@ class Listener(stomp.ConnectionListener):
                     or body.get("reporting_number")
                     or ""
                 ).strip()
+                
+                # Send TRUST message to trust callback if available
+                if self.trust_callback:
+                    msg_type = item.get("header", {}).get("msg_type", "")
+                    trust_msg = f"TRUST {msg_type}: train_id={ts.train_id} hc={trust_headcode} uid={ts.train_uid or '?'} loc={ts.last_location or '?'}"
+                    self.trust_callback(trust_msg)
 
                 # Persist TRUST to DB if available
                 if self.db:
@@ -221,6 +237,9 @@ class Listener(stomp.ConnectionListener):
                             raw=body,
                         )
                         logger.debug(f"DB: persisted TRUST train_id={ts.train_id} headcode={trust_headcode} uid={ts.train_uid}")
+                        # Send DB operation to db callback if available
+                        if self.db_callback:
+                            self.db_callback(f"TRUST upsert: train_id={ts.train_id} hc={trust_headcode}")
                     except Exception as e:
                         logger.warning(f"DB: failed to persist TRUST train_id={getattr(ts, 'train_id', '?')}: {e!r}")
 
@@ -228,6 +247,9 @@ class Listener(stomp.ConnectionListener):
                     try:
                         self.db.insert_trust_message(body)
                         logger.debug(f"DB: inserted TRUST message history train_id={getattr(body,'train_id',getattr(ts,'train_id','?'))} actual_ts={body.get('actual_timestamp')}")
+                        # Send DB operation to db callback if available
+                        if self.db_callback:
+                            self.db_callback(f"TRUST insert: train_id={getattr(body,'train_id',getattr(ts,'train_id','?'))}")
                     except Exception as e:
                         # Don't kill the receiver thread; log a few DB errors for diagnosis
                         try:

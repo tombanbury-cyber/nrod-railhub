@@ -7,6 +7,7 @@ Adapted from experimental/td_feed_dashboard.py to work with the main nrod_railhu
 """
 
 import curses
+import logging
 import queue
 import threading
 import time
@@ -27,6 +28,22 @@ CP_DIM = 5
 CP_BORDER = 6
 
 
+class QueueHandler(logging.Handler):
+    """Logging handler that sends log messages to a queue."""
+    
+    def __init__(self, log_queue: "queue.Queue[str]"):
+        super().__init__()
+        self.log_queue = log_queue
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            if not self.log_queue.full():
+                self.log_queue.put(msg)
+        except Exception:
+            self.handleError(record)
+
+
 @dataclass
 class InteractiveDashboardState:
     """State for the interactive curses dashboard."""
@@ -42,13 +59,31 @@ class InteractiveDashboardState:
     total_messages: int = 0
     msg_count_by_dest: dict = field(default_factory=dict)
     
-    # Ring buffer for recent console output
+    # Ring buffer for recent console output (TD messages)
     console_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    
+    # Ring buffer for TRUST messages
+    trust_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    
+    # Ring buffer for error log messages
+    error_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    
+    # Ring buffer for database insert messages
+    db_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    
+    # Ring buffer for HTTP request messages
+    http_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
     
     # Message rate tracking
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     
+    # Page navigation
+    current_page: int = 0  # 0=TD, 1=TRUST, 2=Error, 3=DB, 4=HTTP
+    
     paused: bool = False
+    
+    # Last redraw time for periodic refresh
+    last_redraw: float = field(default_factory=time.time)
     
     def note_message(self, destination: str) -> None:
         """Record a message receipt."""
@@ -59,6 +94,22 @@ class InteractiveDashboardState:
     def add_console_line(self, line: str) -> None:
         """Add a line to the console output."""
         self.console_lines.append(line)
+    
+    def add_trust_line(self, line: str) -> None:
+        """Add a line to the TRUST messages output."""
+        self.trust_lines.append(line)
+    
+    def add_error_line(self, line: str) -> None:
+        """Add a line to the error log."""
+        self.error_lines.append(line)
+    
+    def add_db_line(self, line: str) -> None:
+        """Add a line to the database inserts log."""
+        self.db_lines.append(line)
+    
+    def add_http_line(self, line: str) -> None:
+        """Add a line to the HTTP requests log."""
+        self.http_lines.append(line)
     
     def rate_messages_per_min(self) -> float:
         """Calculate message rate per minute."""
@@ -153,13 +204,33 @@ def _render_header(stdscr, state: InteractiveDashboardState, header_h: int, w: i
 
 
 def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: int, w: int) -> None:
-    """Render the console output section."""
+    """Render the console output section based on current page."""
     console = stdscr.derwin(body_h, w, y0, 0)
-    _draw_box_title(console, " Console Output ", _cattr(CP_TITLE, curses.A_BOLD))
+    
+    # Page titles and content
+    page_names = [
+        "TD Messages",
+        "TRUST Messages", 
+        "Error Log",
+        "Database Inserts",
+        "HTTP Requests"
+    ]
+    page_lines = [
+        state.console_lines,
+        state.trust_lines,
+        state.error_lines,
+        state.db_lines,
+        state.http_lines
+    ]
+    
+    current_page_name = page_names[state.current_page]
+    current_lines = page_lines[state.current_page]
+    
+    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/5) ", _cattr(CP_TITLE, curses.A_BOLD))
     
     # Show recent lines
     max_lines = max(0, body_h - 2)
-    lines = list(state.console_lines)[-max_lines:]
+    lines = list(current_lines)[-max_lines:]
     
     for i, line in enumerate(lines):
         y = i + 1
@@ -173,19 +244,22 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
 def _render_footer(stdscr, h: int, w: int) -> None:
     """Render the footer with key bindings."""
     footer_y = h - 1
-    help_text = "q=quit  p=pause  c=clear"
+    help_text = "q=quit  p=pause  c=clear  Tab/1-5=pages"
     try:
         stdscr.addnstr(footer_y, 2, help_text, w - 4, _cattr(CP_DIM))
     except curses.error:
         pass
 
 
-def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, output_queue: "queue.Queue[str]", stop_event: threading.Event) -> None:
+def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, queues: dict, stop_event: threading.Event) -> None:
     """Main dashboard rendering loop."""
     stdscr.nodelay(True)
     stdscr.timeout(50)
     stdscr.keypad(True)
     _init_colors()
+    
+    # Periodic redraw interval (seconds) to prevent screen corruption
+    REDRAW_INTERVAL = 5.0
     
     while not stop_event.is_set():
         try:
@@ -201,7 +275,21 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
             elif ch in (ord("p"), ord("P")):
                 state.paused = not state.paused
             elif ch in (ord("c"), ord("C")):
-                state.console_lines.clear()
+                # Clear current page's buffer
+                page_buffers = [
+                    state.console_lines,
+                    state.trust_lines,
+                    state.error_lines,
+                    state.db_lines,
+                    state.http_lines
+                ]
+                if 0 <= state.current_page < len(page_buffers):
+                    page_buffers[state.current_page].clear()
+            elif ch == ord("\t") or ch == 9:  # Tab key
+                state.current_page = (state.current_page + 1) % 5
+            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
+                # Number keys 1-5 for direct page access
+                state.current_page = ch - ord("1")
         
         # Update state from listener
         if not state.paused:
@@ -211,15 +299,32 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
             state.total_messages = listener.msg_count_total
             state.msg_count_by_dest = dict(listener.msg_count_by_dest)
             
-            # Pull output from queue
-            try:
-                while True:
-                    line = output_queue.get_nowait()
-                    if line:
-                        state.add_console_line(line)
-                        state.note_message("output")  # Track for rate calculation
-            except queue.Empty:
-                pass
+            # Pull output from all queues
+            queue_handlers = [
+                (queues.get('td'), state.add_console_line),
+                (queues.get('trust'), state.add_trust_line),
+                (queues.get('error'), state.add_error_line),
+                (queues.get('db'), state.add_db_line),
+                (queues.get('http'), state.add_http_line),
+            ]
+            
+            for queue_obj, add_method in queue_handlers:
+                if queue_obj:
+                    try:
+                        while True:
+                            line = queue_obj.get_nowait()
+                            if line:
+                                add_method(line)
+                                if queue_obj == queues.get('td'):
+                                    state.note_message("output")  # Track for rate calculation
+                    except queue.Empty:
+                        pass
+        
+        # Check if periodic redraw is needed
+        current_time = time.time()
+        if current_time - state.last_redraw >= REDRAW_INTERVAL:
+            stdscr.clear()  # Force full redraw
+            state.last_redraw = current_time
         
         # Render UI
         stdscr.erase()
@@ -241,6 +346,10 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
 def run_interactive_dashboard(
     listener: Listener,
     output_queue: "queue.Queue[str]",
+    trust_queue: Optional["queue.Queue[str]"] = None,
+    error_queue: Optional["queue.Queue[str]"] = None,
+    db_queue: Optional["queue.Queue[str]"] = None,
+    http_queue: Optional["queue.Queue[str]"] = None,
     headcode: Optional[str] = None,
     uid: Optional[str] = None,
     td_area: Optional[List[str]] = None,
@@ -250,7 +359,11 @@ def run_interactive_dashboard(
     
     Args:
         listener: The STOMP listener instance
-        output_queue: Queue containing console output lines from the listener
+        output_queue: Queue containing console output lines from the listener (TD messages)
+        trust_queue: Optional queue for TRUST messages
+        error_queue: Optional queue for error log messages
+        db_queue: Optional queue for database insert messages
+        http_queue: Optional queue for HTTP request messages
         headcode: Optional headcode filter
         uid: Optional UID filter
         td_area: Optional list of TD area filters
@@ -263,7 +376,16 @@ def run_interactive_dashboard(
     
     stop_event = threading.Event()
     
+    # Store queues for access in dashboard loop
+    queues = {
+        'td': output_queue,
+        'trust': trust_queue,
+        'error': error_queue,
+        'db': db_queue,
+        'http': http_queue,
+    }
+    
     try:
-        curses.wrapper(dashboard_loop, state=state, listener=listener, output_queue=output_queue, stop_event=stop_event)
+        curses.wrapper(dashboard_loop, state=state, listener=listener, queues=queues, stop_event=stop_event)
     finally:
         stop_event.set()

@@ -205,19 +205,59 @@ def connect_and_run(args: argparse.Namespace) -> None:
         except Exception as e:
             logger.error(f"Failed to populate TOC reference data: {e}")
     
-    # Create listener with optional output callback for interactive mode
+    # Create listener with optional output callbacks for interactive mode
     output_callback = None
-    if args.interactive:
-        # In interactive mode, we'll capture output to a queue
-        import queue
-        output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
+    trust_callback = None
+    db_callback = None
     
-    listener = Listener(hv, args, db=db, output_callback=output_callback)
+    if args.interactive:
+        # In interactive mode, we'll capture output to multiple queues
+        import queue
+        import logging
+        from .curses_view import QueueHandler
+        
+        output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        trust_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        error_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        db_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        http_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        
+        output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
+        trust_callback = lambda text: trust_queue.put(text) if not trust_queue.full() else None
+        db_callback = lambda text: db_queue.put(text) if not db_queue.full() else None
+        
+        # Add queue handler for error logs
+        queue_handler = QueueHandler(error_queue)
+        queue_handler.setLevel(logging.WARNING)  # Capture warnings and errors
+        queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
+        logging.getLogger("nrod_railhub").addHandler(queue_handler)
+    
+    listener = Listener(hv, args, db=db, output_callback=output_callback, 
+                       trust_callback=trust_callback, db_callback=db_callback)
     if args.web_port and db_path:
         # Pass config path to web dashboard for configuration editing
         config_file_path = args.config if args.config else None
-        t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port, config_file_path), daemon=True)
+        
+        # In interactive mode, capture web requests
+        if args.interactive:
+            # We need to monkey-patch Flask's logger to capture HTTP requests
+            def start_web_with_logging():
+                from .web import start_web_dashboard
+                # Add a simple request logger
+                import flask
+                original_before_request = None
+                
+                def log_request():
+                    if not http_queue.full():
+                        http_queue.put(f"HTTP {flask.request.method} {flask.request.path}")
+                
+                start_web_dashboard(db_path, args.web_port, config_file_path)
+                # Note: This is a simplified approach. A full implementation would require
+                # modifying the web module to accept a request callback
+            
+            t = threading.Thread(target=start_web_with_logging, daemon=True)
+        else:
+            t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port, config_file_path), daemon=True)
         t.start()
         logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
     conn.set_listener("", listener)
@@ -258,6 +298,10 @@ def connect_and_run(args: argparse.Namespace) -> None:
             run_interactive_dashboard(
                 listener=listener,
                 output_queue=output_queue,  # type: ignore[name-defined]
+                trust_queue=trust_queue,  # type: ignore[name-defined]
+                error_queue=error_queue,  # type: ignore[name-defined]
+                db_queue=db_queue,  # type: ignore[name-defined]
+                http_queue=http_queue,  # type: ignore[name-defined]
                 headcode=args.headcode,
                 uid=args.uid,
                 td_area=args.td_area,

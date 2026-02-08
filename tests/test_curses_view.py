@@ -3,11 +3,13 @@
 
 import pytest
 import queue
+import time
 from unittest.mock import Mock, MagicMock
 from nrod_railhub.curses_view import (
     InteractiveDashboardState,
     _init_colors,
     _cattr,
+    QueueHandler,
 )
 
 
@@ -25,6 +27,11 @@ def test_interactive_dashboard_state_creation():
     assert state.connected is False
     assert state.total_messages == 0
     assert len(state.console_lines) == 0
+    assert len(state.trust_lines) == 0
+    assert len(state.error_lines) == 0
+    assert len(state.db_lines) == 0
+    assert len(state.http_lines) == 0
+    assert state.current_page == 0
 
 
 def test_dashboard_state_note_message():
@@ -52,6 +59,50 @@ def test_dashboard_state_add_console_line():
     assert list(state.console_lines) == ["Line 1", "Line 2", "Line 3"]
 
 
+def test_dashboard_state_add_trust_line():
+    """Test adding TRUST lines to dashboard state."""
+    state = InteractiveDashboardState()
+    
+    state.add_trust_line("TRUST message 1")
+    state.add_trust_line("TRUST message 2")
+    
+    assert len(state.trust_lines) == 2
+    assert list(state.trust_lines) == ["TRUST message 1", "TRUST message 2"]
+
+
+def test_dashboard_state_add_error_line():
+    """Test adding error lines to dashboard state."""
+    state = InteractiveDashboardState()
+    
+    state.add_error_line("Error 1")
+    state.add_error_line("Error 2")
+    
+    assert len(state.error_lines) == 2
+    assert list(state.error_lines) == ["Error 1", "Error 2"]
+
+
+def test_dashboard_state_add_db_line():
+    """Test adding database lines to dashboard state."""
+    state = InteractiveDashboardState()
+    
+    state.add_db_line("DB insert 1")
+    state.add_db_line("DB insert 2")
+    
+    assert len(state.db_lines) == 2
+    assert list(state.db_lines) == ["DB insert 1", "DB insert 2"]
+
+
+def test_dashboard_state_add_http_line():
+    """Test adding HTTP lines to dashboard state."""
+    state = InteractiveDashboardState()
+    
+    state.add_http_line("GET /")
+    state.add_http_line("POST /api")
+    
+    assert len(state.http_lines) == 2
+    assert list(state.http_lines) == ["GET /", "POST /api"]
+
+
 def test_dashboard_state_console_lines_maxlen():
     """Test that console lines respect maxlen."""
     state = InteractiveDashboardState()
@@ -68,8 +119,6 @@ def test_dashboard_state_console_lines_maxlen():
 
 def test_dashboard_state_rate_messages_per_min():
     """Test message rate calculation."""
-    import time
-    
     state = InteractiveDashboardState()
     
     # Rate should be 0 with no messages
@@ -92,6 +141,24 @@ def test_dashboard_state_rate_messages_per_min():
     assert 600 <= rate <= 700
 
 
+def test_dashboard_state_page_navigation():
+    """Test page navigation in dashboard state."""
+    state = InteractiveDashboardState()
+    
+    assert state.current_page == 0
+    
+    # Simulate page changes
+    state.current_page = 1
+    assert state.current_page == 1
+    
+    state.current_page = 4
+    assert state.current_page == 4
+    
+    # Test wraparound
+    state.current_page = (state.current_page + 1) % 5
+    assert state.current_page == 0
+
+
 def test_cattr_function():
     """Test color attribute function (basic functionality)."""
     # Should not crash even if curses isn't initialized
@@ -107,3 +174,31 @@ def test_init_colors_no_crash():
     except Exception as e:
         # If it does raise an exception, it should be handled
         pytest.fail(f"_init_colors raised an exception: {e}")
+
+
+def test_queue_handler():
+    """Test QueueHandler for logging."""
+    import logging
+    
+    log_queue = queue.Queue(maxsize=10)
+    handler = QueueHandler(log_queue)
+    handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    
+    # Create a test logger
+    test_logger = logging.getLogger('test_queue_handler')
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.INFO)
+    
+    # Log some messages
+    test_logger.info("Test info message")
+    test_logger.warning("Test warning message")
+    
+    # Check that messages were added to queue
+    assert log_queue.qsize() == 2
+    
+    msg1 = log_queue.get_nowait()
+    assert "INFO: Test info message" in msg1
+    
+    msg2 = log_queue.get_nowait()
+    assert "WARNING: Test warning message" in msg2
+
