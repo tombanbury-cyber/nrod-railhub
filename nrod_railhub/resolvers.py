@@ -852,3 +852,150 @@ class ScheduleResolver:
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, out_gz)
+
+
+class TOCResolver:
+    """
+    Resolves TOC (Train Operating Company) codes to human-readable names.
+    
+    Provides a mapping of 2-character TOC codes to full company names.
+    Data is based on Network Rail open data TOC codes.
+    """
+    
+    # TOC reference data (updated as of 2024)
+    # Source: Network Rail Open Data Wiki and Rail Data Marketplace
+    TOC_DATA = {
+        'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger'},
+        'CC': {'name': 'c2c', 'sector': 'Passenger'},
+        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger'},
+        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger'},
+        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger'},
+        'ES': {'name': 'Eurostar', 'sector': 'Passenger'},
+        'EX': {'name': 'Express Passenger', 'sector': 'Passenger'},
+        'FC': {'name': 'First Capital Connect', 'sector': 'Passenger'},
+        'GC': {'name': 'Grand Central', 'sector': 'Passenger'},
+        'GN': {'name': 'Great Northern', 'sector': 'Passenger'},
+        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger'},
+        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger'},
+        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger'},
+        'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger'},
+        'HT': {'name': 'Hull Trains', 'sector': 'Passenger'},
+        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger'},
+        'IL': {'name': 'Island Line', 'sector': 'Passenger'},
+        'LE': {'name': 'Greater Anglia', 'sector': 'Passenger'},
+        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger'},
+        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger'},
+        'LO': {'name': 'London Overground', 'sector': 'Passenger'},
+        'LT': {'name': 'London Underground', 'sector': 'Passenger'},
+        'ME': {'name': 'Merseyrail', 'sector': 'Passenger'},
+        'NC': {'name': 'Northern Trains', 'sector': 'Passenger'},
+        'NT': {'name': 'Northern Rail', 'sector': 'Passenger'},
+        'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage'},
+        'PE': {'name': 'Penmere', 'sector': 'Freight'},
+        'PO': {'name': 'Provincial', 'sector': 'Passenger'},
+        'SE': {'name': 'Southeastern', 'sector': 'Passenger'},
+        'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger'},
+        'SN': {'name': 'Southern', 'sector': 'Passenger'},
+        'SR': {'name': 'ScotRail', 'sector': 'Passenger'},
+        'SW': {'name': 'South Western Railway', 'sector': 'Passenger'},
+        'SX': {'name': 'Stansted Express', 'sector': 'Passenger'},
+        'TL': {'name': 'Thameslink', 'sector': 'Passenger'},
+        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger'},
+        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger'},
+        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger'},
+        'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter'},
+        'XC': {'name': 'CrossCountry', 'sector': 'Passenger'},
+        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger'},
+        'ZZ': {'name': 'Unidentified', 'sector': 'Unknown'},
+        # Freight operators
+        'DB': {'name': 'DB Cargo UK', 'sector': 'Freight'},
+        'DG': {'name': 'Direct Rail Services', 'sector': 'Freight'},
+        'DQ': {'name': 'Devon & Cornwall Railways', 'sector': 'Freight'},
+        'DR': {'name': 'Direct Rail Services', 'sector': 'Freight'},
+        'EA': {'name': 'Europorte', 'sector': 'Freight'},
+        'ED': {'name': 'Edison Rail', 'sector': 'Freight'},
+        'FL': {'name': 'First Greater Western Link', 'sector': 'Freight'},
+        'FR': {'name': 'Freightliner', 'sector': 'Freight'},
+        'FS': {'name': 'Freightliner Heavy Haul', 'sector': 'Freight'},
+        'GB': {'name': 'GBRf (GB Railfreight)', 'sector': 'Freight'},
+        'GV': {'name': 'Govia', 'sector': 'Freight'},
+        'RF': {'name': 'Railfreight', 'sector': 'Freight'},
+        'RM': {'name': 'Rail Operations Group', 'sector': 'Freight'},
+        'RT': {'name': 'Rail Operations Group', 'sector': 'Freight'},
+        'WH': {'name': 'West Highland Railway', 'sector': 'Freight'},
+        # Network Rail and test
+        'NR': {'name': 'Network Rail', 'sector': 'Infrastructure'},
+        'NW': {'name': 'Network Rail West', 'sector': 'Infrastructure'},
+        'NT': {'name': 'Network Rail Test Train', 'sector': 'Test'},
+        'TT': {'name': 'Test Train', 'sector': 'Test'},
+        'XX': {'name': 'Test / Unknown', 'sector': 'Test'},
+    }
+    
+    def __init__(self) -> None:
+        self.toc_map: Dict[str, str] = {}
+        self._load_static_data()
+    
+    def _load_static_data(self) -> None:
+        """Load static TOC data into the resolver."""
+        for code, data in self.TOC_DATA.items():
+            self.toc_map[code] = data['name']
+    
+    def get_toc_name(self, toc_code: str) -> Optional[str]:
+        """
+        Get the full name for a TOC code.
+        
+        Args:
+            toc_code: 2-character TOC code (e.g., 'SW', 'GW')
+            
+        Returns:
+            Full TOC name if found, None otherwise
+        """
+        if not toc_code:
+            return None
+        code = toc_code.strip().upper()
+        return self.toc_map.get(code)
+    
+    def get_all_tocs(self) -> List[Dict[str, str]]:
+        """
+        Get all TOC reference data.
+        
+        Returns:
+            List of dicts with keys: toc_code, toc_name, sector
+        """
+        result = []
+        for code, data in sorted(self.TOC_DATA.items()):
+            result.append({
+                'toc_code': code,
+                'toc_name': data['name'],
+                'sector': data.get('sector', 'Unknown')
+            })
+        return result
+    
+    def populate_database(self, db: Any, quiet: bool = False) -> int:
+        """
+        Populate the database with TOC reference data.
+        
+        Args:
+            db: RailDB instance
+            quiet: If True, suppress log messages
+            
+        Returns:
+            Number of TOC entries inserted/updated
+        """
+        count = 0
+        for code, data in self.TOC_DATA.items():
+            try:
+                db.upsert_toc(
+                    toc_code=code,
+                    toc_name=data['name'],
+                    sector=data.get('sector')
+                )
+                count += 1
+            except Exception as e:
+                if not quiet:
+                    logger.error(f"Failed to insert TOC {code}: {e}")
+        
+        if not quiet:
+            logger.info(f"Populated {count} TOC entries in database")
+        
+        return count

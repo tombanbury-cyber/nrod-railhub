@@ -221,6 +221,16 @@ class RailDB:
                     created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_loc_uid ON vstp_schedule_locations(uid);
+                
+                -- TOC (Train Operating Company) reference data
+                CREATE TABLE IF NOT EXISTS toc_reference (
+                    toc_code TEXT PRIMARY KEY,
+                    toc_name TEXT NOT NULL,
+                    business_code TEXT,
+                    atoc_code TEXT,
+                    sector TEXT,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
                 """
             )
 
@@ -792,6 +802,73 @@ class RailDB:
             except Exception:
                 # Propagate exception to caller so caller can log
                 raise
+
+    def upsert_toc(self, toc_code: str, toc_name: str, business_code: Optional[str] = None, 
+                   atoc_code: Optional[str] = None, sector: Optional[str] = None) -> None:
+        """
+        Insert or update a TOC reference entry.
+        
+        Args:
+            toc_code: 2-character TOC code (e.g., 'SW' for South Western Railway)
+            toc_name: Full name of the train operating company
+            business_code: Business code if available
+            atoc_code: ATOC membership code if available
+            sector: Sector classification (e.g., 'Passenger', 'Freight')
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO toc_reference(toc_code, toc_name, business_code, atoc_code, sector)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(toc_code) DO UPDATE SET
+                    toc_name=excluded.toc_name,
+                    business_code=excluded.business_code,
+                    atoc_code=excluded.atoc_code,
+                    sector=excluded.sector,
+                    updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                """,
+                (toc_code, toc_name, business_code, atoc_code, sector),
+            )
+    
+    def get_all_tocs(self) -> list[dict]:
+        """
+        Retrieve all TOC reference data.
+        
+        Returns:
+            List of dicts with keys: toc_code, toc_name, business_code, atoc_code, sector, updated_at_utc
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT toc_code, toc_name, business_code, atoc_code, sector, updated_at_utc FROM toc_reference ORDER BY toc_code"
+            )
+            return [
+                {
+                    'toc_code': row[0],
+                    'toc_name': row[1],
+                    'business_code': row[2],
+                    'atoc_code': row[3],
+                    'sector': row[4],
+                    'updated_at_utc': row[5]
+                }
+                for row in cursor.fetchall()
+            ]
+    
+    def get_toc_name(self, toc_code: str) -> Optional[str]:
+        """
+        Get TOC name for a given TOC code.
+        
+        Args:
+            toc_code: 2-character TOC code
+            
+        Returns:
+            TOC name if found, None otherwise
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT toc_name FROM toc_reference WHERE toc_code=?", (toc_code,))
+            row = cursor.fetchone()
+            return row[0] if row else None
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""

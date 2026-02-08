@@ -81,6 +81,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
             f"<a href='/trust' class='navlink {'active' if active=='trust' else ''}'>TRUST</a>"
             f"<a href='/vstp' class='navlink {'active' if active=='vstp' else ''}'>VSTP</a>"
+            f"<a href='/tocs' class='navlink {'active' if active=='tocs' else ''}'>TOCs</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
             "</div>"
@@ -242,6 +243,9 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 config_data["uid"] = uid if uid else None
                 td_area_str = request.form.get("td_area", "").strip()
                 config_data["td_area"] = [a.strip() for a in td_area_str.split(",") if a.strip()] if td_area_str else []
+                # TOC filter (multi-select list)
+                toc_codes = request.form.getlist("toc_filter")
+                config_data["toc_filter"] = [t.strip() for t in toc_codes if t.strip()] if toc_codes else []
                 
                 # Display Options
                 config_data["width"] = int(request.form.get("width", 96))
@@ -498,6 +502,35 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>UID Filter:</label><input type='text' name='uid' value=\"{config_data.get('uid', '')}\" placeholder='e.g., C43876' style='width:150px;padding:6px'></div>")
         td_area_val = ','.join(config_data.get('td_area', [])) if isinstance(config_data.get('td_area'), list) else ''
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>TD Area Filter:</label><input type='text' name='td_area' value=\"{td_area_val}\" placeholder='e.g., EK,WR' style='width:200px;padding:6px'><span class='dim' style='margin-left:8px'>Comma-separated</span></div>")
+        
+        # TOC Filter (multi-select)
+        body.append("<div style='margin-bottom:10px'>")
+        body.append("<label style='display:inline-block;width:180px;vertical-align:top'>TOC Filter:</label>")
+        body.append("<div style='display:inline-block;max-height:200px;overflow-y:auto;border:1px solid #ccc;padding:8px;border-radius:4px;background:white'>")
+        
+        # Get TOC codes from database
+        try:
+            toc_rows = q("SELECT toc_code, toc_name FROM toc_reference ORDER BY toc_code")
+            selected_tocs = config_data.get('toc_filter', [])
+            if not isinstance(selected_tocs, list):
+                selected_tocs = []
+            
+            if toc_rows:
+                for toc_row in toc_rows:
+                    code = toc_row['toc_code']
+                    name = toc_row['toc_name']
+                    checked = 'checked' if code in selected_tocs else ''
+                    body.append(f"<div style='margin:2px 0'><label style='display:block'><input type='checkbox' name='toc_filter' value='{code}' {checked}> <span class='mono' style='font-weight:600'>{code}</span> - {name}</label></div>")
+            else:
+                body.append("<p class='dim' style='margin:0'>No TOC data available</p>")
+        except Exception as e:
+            logger.error(f"Failed to load TOC list for config: {e}")
+            body.append(f"<p class='dim' style='margin:0'>Error loading TOC list: {e}</p>")
+        
+        body.append("</div>")
+        body.append("<br><span class='dim' style='margin-left:188px'>Select TOCs to filter TRUST messages (leave unchecked for all)</span>")
+        body.append("</div>")
+        
         body.append("</fieldset>")
         
         # Display Options Section
@@ -618,6 +651,12 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         headcode = request.args.get("headcode", "").strip()
         view = request.args.get("view", "state").strip()  # 'state' or 'messages'
         
+        # Load TOC filter from config
+        config_data = load_yaml_config()
+        toc_filter = config_data.get('toc_filter', [])
+        if not isinstance(toc_filter, list):
+            toc_filter = []
+        
         body = []
         
         if view == "messages":
@@ -625,12 +664,22 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             body.append("<h2>TRUST Messages History</h2>")
             body.append("<p><a href='/trust?view=state'>Switch to Current State View</a></p>")
             
-            sql = "SELECT id, train_id, actual_timestamp_ms, event_type, reporting_stanox, toc_id, timetable_variation, variation_status, platform, created_at_utc FROM trust_messages WHERE 1=1"
+            sql = """SELECT tm.id, tm.train_id, tm.actual_timestamp_ms, tm.event_type, tm.reporting_stanox, 
+                     tm.toc_id, tr.toc_name, tm.timetable_variation, tm.variation_status, tm.platform, tm.created_at_utc 
+                     FROM trust_messages tm 
+                     LEFT JOIN toc_reference tr ON tm.toc_id = tr.toc_code 
+                     WHERE 1=1"""
             params = []
             
             if train_id:
-                sql += " AND train_id=?"
+                sql += " AND tm.train_id=?"
                 params.append(train_id)
+            
+            # Apply TOC filter if configured
+            if toc_filter:
+                placeholders = ','.join('?' * len(toc_filter))
+                sql += f" AND tm.toc_id IN ({placeholders})"
+                params.extend(toc_filter)
             
             sql += " ORDER BY actual_timestamp_ms DESC LIMIT 500"
             
@@ -643,6 +692,9 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                     for r in rows:
                         ts = datetime.fromtimestamp(r['actual_timestamp_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S') if r['actual_timestamp_ms'] else ''
                         variation = r['timetable_variation'] if r['timetable_variation'] is not None else ''
+                        # Display TOC name with code in tooltip
+                        toc_display = r['toc_name'] if r['toc_name'] else (r['toc_id'] or '')
+                        toc_code = r['toc_id'] or ''
                         body.append(
                             f"<tr>"
                             f"<td>{r['id']}</td>"
@@ -650,7 +702,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                             f"<td class='mono'>{ts}</td>"
                             f"<td>{r['event_type'] or ''}</td>"
                             f"<td>{r['reporting_stanox'] or ''}</td>"
-                            f"<td>{r['toc_id'] or ''}</td>"
+                            f"<td title='{toc_code}'>{toc_display}</td>"
                             f"<td>{variation}</td>"
                             f"<td>{r['variation_status'] or ''}</td>"
                             f"<td>{r['platform'] or ''}</td>"
@@ -668,15 +720,25 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             body.append("<h2>TRUST Current State</h2>")
             body.append("<p><a href='/trust?view=messages'>Switch to Messages History View</a></p>")
             
-            sql = "SELECT train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min FROM trust_state WHERE 1=1"
+            sql = """SELECT ts.train_id, ts.headcode, ts.uid, ts.toc_id, tr.toc_name, 
+                     ts.last_event_time, ts.last_location, ts.last_delay_min 
+                     FROM trust_state ts 
+                     LEFT JOIN toc_reference tr ON ts.toc_id = tr.toc_code 
+                     WHERE 1=1"""
             params = []
             
             if train_id:
-                sql += " AND train_id=?"
+                sql += " AND ts.train_id=?"
                 params.append(train_id)
             if headcode:
-                sql += " AND headcode=?"
+                sql += " AND ts.headcode=?"
                 params.append(headcode)
+            
+            # Apply TOC filter if configured
+            if toc_filter:
+                placeholders = ','.join('?' * len(toc_filter))
+                sql += f" AND ts.toc_id IN ({placeholders})"
+                params.extend(toc_filter)
             
             sql += " ORDER BY last_event_time DESC LIMIT 500"
             
@@ -688,12 +750,15 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                     body.append("<tr><th>Train ID</th><th>Headcode</th><th>UID</th><th>TOC</th><th>Last Event Time</th><th>Last Location</th><th>Delay (min)</th><th>Actions</th></tr>")
                     for r in rows:
                         delay_display = f"{r['last_delay_min']}" if r['last_delay_min'] is not None else 'N/A'
+                        # Display TOC name with code in tooltip
+                        toc_display = r['toc_name'] if r['toc_name'] else (r['toc_id'] or '')
+                        toc_code = r['toc_id'] or ''
                         body.append(
                             f"<tr>"
                             f"<td class='mono'>{r['train_id']}</td>"
                             f"<td><b>{r['headcode'] or ''}</b></td>"
                             f"<td class='mono'>{r['uid'] or ''}</td>"
-                            f"<td>{r['toc_id'] or ''}</td>"
+                            f"<td title='{toc_code}'>{toc_display}</td>"
                             f"<td class='mono'>{r['last_event_time'] or ''}</td>"
                             f"<td>{r['last_location'] or ''}</td>"
                             f"<td>{delay_display}</td>"
@@ -844,6 +909,36 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 body.append(f"<p><i>Error querying vstp_schedules: {e}</i></p>")
         
         return render_page("VSTP - NR RailHub", body, active="vstp")
+
+    @app.get("/tocs")
+    def tocs():
+        """Display Train Operating Company (TOC) reference data."""
+        body = ["<h2>Train Operating Companies (TOCs)</h2>"]
+        body.append("<p>Reference data for UK train operating companies. TOC codes are used in TRUST messages.</p>")
+        
+        try:
+            rows = q("SELECT toc_code, toc_name, sector, updated_at_utc FROM toc_reference ORDER BY toc_code")
+            if rows:
+                body.append(f"<p class='dim'>Showing {len(rows)} TOC(s)</p>")
+                body.append("<table>")
+                body.append("<tr><th>TOC Code</th><th>TOC Name</th><th>Sector</th><th>Last Updated</th></tr>")
+                for r in rows:
+                    body.append(
+                        f"<tr>"
+                        f"<td class='mono'><b>{r['toc_code']}</b></td>"
+                        f"<td>{r['toc_name']}</td>"
+                        f"<td>{r['sector'] or ''}</td>"
+                        f"<td class='mono dim'>{r['updated_at_utc'][:19] if r['updated_at_utc'] else ''}</td>"
+                        f"</tr>"
+                    )
+                body.append("</table>")
+            else:
+                body.append("<p><i>No TOC reference data found. Make sure the application has been started with a database path.</i></p>")
+        except Exception as e:
+            logger.error(f"Web dashboard: Error querying toc_reference: {e}")
+            body.append(f"<p><i>Error querying toc_reference: {e}</i></p>")
+        
+        return render_page("TOCs - NR RailHub", body, active="tocs")
 
     @app.get("/raw-events")
     def raw_events():
