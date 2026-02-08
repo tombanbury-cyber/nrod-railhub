@@ -91,12 +91,23 @@ For a complete list of all available configuration options with descriptions, se
 
 ## Interactive Mode
 
-The `--interactive` flag launches a curses-based real-time terminal dashboard that displays:
+The `--interactive` flag launches a curses-based real-time terminal dashboard with multiple pages for monitoring different aspects of the rail data system.
 
+### Pages
+
+The interactive dashboard has 5 pages accessible via Tab or number keys:
+
+1. **TD Messages** (Page 1) - Train Describer berth stepping and signal events
+2. **TRUST Messages** (Page 2) - Train movement and activation messages
+3. **Error Log** (Page 3) - Warning and error messages from all components
+4. **Database Inserts** (Page 4) - Database operations (TRUST/VSTP/TD upserts)
+5. **HTTP Requests** (Page 5) - Web dashboard requests (when web server is enabled)
+
+Each page displays:
 - **Connection status** - Live STOMP connection state
 - **Message rates** - Real-time message throughput
-- **Console output** - Scrolling train movement updates
 - **Filters** - Active headcode, UID, and area filters
+- **Page-specific content** - Scrolling updates for that data type
 
 ### Interactive Mode Controls
 
@@ -104,7 +115,13 @@ The `--interactive` flag launches a curses-based real-time terminal dashboard th
 |-----|--------|
 | `q` | Quit the application |
 | `p` | Pause/resume updates |
-| `c` | Clear console output |
+| `c` | Clear current page buffer |
+| `Tab` | Cycle through pages (1→2→3→4→5→1) |
+| `1-5` | Jump directly to page 1-5 |
+
+### Periodic Redraw
+
+The dashboard automatically redraws every 5 seconds to prevent screen corruption from terminal resize or other issues.
 
 ### Example Interactive Mode
 
@@ -114,6 +131,9 @@ python3 nrod_railhub.py --user USER --password PASS --headcode 2C90 --interactiv
 
 # Monitor multiple TD areas interactively
 python3 nrod_railhub.py --user USER --password PASS --td-area EK --td-area AD --interactive
+
+# Interactive mode with web dashboard (HTTP requests visible on page 5)
+python3 nrod_railhub.py --user USER --password PASS --interactive --db-path rail.db --web-port 8080
 ```
 
 ## Example Output
