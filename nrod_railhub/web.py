@@ -50,6 +50,8 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             f"<a href='/events' class='navlink {'active' if active=='events' else ''}'>Events</a>"
             f"<a href='/raw-events' class='navlink {'active' if active=='raw' else ''}'>Raw Events</a>"
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
+            f"<a href='/trust' class='navlink {'active' if active=='trust' else ''}'>TRUST</a>"
+            f"<a href='/vstp' class='navlink {'active' if active=='vstp' else ''}'>VSTP</a>"
             f"<a href='/mapper' class='navlink {'active' if active=='mapper' else ''}'>Mapper</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
@@ -194,6 +196,241 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['td_area']}</td><td>{r['msg_type']}</td><td>{r['address']}</td><td>{r['data'] if r['data'] else ''}</td></tr>")
         body.append("</table>")
         return render_page("Signals - NR RailHub", body, active="signals")
+
+    @app.get("/trust")
+    def trust():
+        """Display current TRUST state and recent TRUST messages."""
+        # Get filter parameters
+        train_id = request.args.get("train_id", "").strip()
+        headcode = request.args.get("headcode", "").strip()
+        view = request.args.get("view", "state").strip()  # 'state' or 'messages'
+        
+        body = []
+        
+        if view == "messages":
+            # Show trust_messages history
+            body.append("<h2>TRUST Messages History</h2>")
+            body.append("<p><a href='/trust?view=state'>Switch to Current State View</a></p>")
+            
+            sql = "SELECT id, train_id, actual_timestamp_ms, event_type, reporting_stanox, toc_id, timetable_variation, variation_status, platform, created_at_utc FROM trust_messages WHERE 1=1"
+            params = []
+            
+            if train_id:
+                sql += " AND train_id=?"
+                params.append(train_id)
+            
+            sql += " ORDER BY actual_timestamp_ms DESC LIMIT 500"
+            
+            try:
+                rows = q(sql, params)
+                if rows:
+                    body.append(f"<p class='dim'>Showing {len(rows)} message(s)</p>")
+                    body.append("<table>")
+                    body.append("<tr><th>ID</th><th>Train ID</th><th>Timestamp</th><th>Event Type</th><th>STANOX</th><th>TOC</th><th>Variation (min)</th><th>Status</th><th>Platform</th><th>Created</th></tr>")
+                    for r in rows:
+                        ts = datetime.fromtimestamp(r['actual_timestamp_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S') if r['actual_timestamp_ms'] else ''
+                        variation = r['timetable_variation'] if r['timetable_variation'] is not None else ''
+                        body.append(
+                            f"<tr>"
+                            f"<td>{r['id']}</td>"
+                            f"<td class='mono'>{r['train_id']}</td>"
+                            f"<td class='mono'>{ts}</td>"
+                            f"<td>{r['event_type'] or ''}</td>"
+                            f"<td>{r['reporting_stanox'] or ''}</td>"
+                            f"<td>{r['toc_id'] or ''}</td>"
+                            f"<td>{variation}</td>"
+                            f"<td>{r['variation_status'] or ''}</td>"
+                            f"<td>{r['platform'] or ''}</td>"
+                            f"<td class='mono dim'>{r['created_at_utc'][:19] if r['created_at_utc'] else ''}</td>"
+                            f"</tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No TRUST messages found</i></p>")
+            except Exception as e:
+                logger.error(f"Web dashboard: Error querying trust_messages: {e}")
+                body.append(f"<p><i>Error querying trust_messages: {e}</i></p>")
+        else:
+            # Show trust_state (current state)
+            body.append("<h2>TRUST Current State</h2>")
+            body.append("<p><a href='/trust?view=messages'>Switch to Messages History View</a></p>")
+            
+            sql = "SELECT train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min FROM trust_state WHERE 1=1"
+            params = []
+            
+            if train_id:
+                sql += " AND train_id=?"
+                params.append(train_id)
+            if headcode:
+                sql += " AND headcode=?"
+                params.append(headcode)
+            
+            sql += " ORDER BY last_event_time DESC LIMIT 500"
+            
+            try:
+                rows = q(sql, params)
+                if rows:
+                    body.append(f"<p class='dim'>Showing {len(rows)} train(s)</p>")
+                    body.append("<table>")
+                    body.append("<tr><th>Train ID</th><th>Headcode</th><th>UID</th><th>TOC</th><th>Last Event Time</th><th>Last Location</th><th>Delay (min)</th><th>Actions</th></tr>")
+                    for r in rows:
+                        delay_display = f"{r['last_delay_min']}" if r['last_delay_min'] is not None else 'N/A'
+                        body.append(
+                            f"<tr>"
+                            f"<td class='mono'>{r['train_id']}</td>"
+                            f"<td><b>{r['headcode'] or ''}</b></td>"
+                            f"<td class='mono'>{r['uid'] or ''}</td>"
+                            f"<td>{r['toc_id'] or ''}</td>"
+                            f"<td class='mono'>{r['last_event_time'] or ''}</td>"
+                            f"<td>{r['last_location'] or ''}</td>"
+                            f"<td>{delay_display}</td>"
+                            f"<td><a href='/trust?view=messages&train_id={r['train_id']}'>View Messages</a></td>"
+                            f"</tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No TRUST state data found</i></p>")
+            except Exception as e:
+                logger.error(f"Web dashboard: Error querying trust_state: {e}")
+                body.append(f"<p><i>Error querying trust_state: {e}</i></p>")
+        
+        return render_page("TRUST - NR RailHub", body, active="trust")
+
+    @app.get("/vstp")
+    def vstp():
+        """Display VSTP schedules with expandable locations."""
+        # Get filter parameters
+        uid = request.args.get("uid", "").strip()
+        headcode = request.args.get("headcode", "").strip()
+        view = request.args.get("view", "schedules").strip()  # 'schedules' or 'state'
+        
+        body = []
+        
+        if view == "state":
+            # Show vstp_state (simplified view)
+            body.append("<h2>VSTP State Summary</h2>")
+            body.append("<p><a href='/vstp?view=schedules'>Switch to Detailed Schedules View</a></p>")
+            
+            sql = "SELECT uid, headcode, start_date, end_date FROM vstp_state WHERE 1=1"
+            params = []
+            
+            if uid:
+                sql += " AND uid=?"
+                params.append(uid)
+            if headcode:
+                sql += " AND headcode=?"
+                params.append(headcode)
+            
+            sql += " ORDER BY start_date DESC LIMIT 500"
+            
+            try:
+                rows = q(sql, params)
+                if rows:
+                    body.append(f"<p class='dim'>Showing {len(rows)} schedule(s)</p>")
+                    body.append("<table>")
+                    body.append("<tr><th>UID</th><th>Headcode</th><th>Start Date</th><th>End Date</th><th>Actions</th></tr>")
+                    for r in rows:
+                        body.append(
+                            f"<tr>"
+                            f"<td class='mono'>{r['uid']}</td>"
+                            f"<td><b>{r['headcode'] or ''}</b></td>"
+                            f"<td class='mono'>{r['start_date']}</td>"
+                            f"<td class='mono'>{r['end_date'] or ''}</td>"
+                            f"<td><a href='/vstp?view=schedules&uid={r['uid']}'>View Details</a></td>"
+                            f"</tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No VSTP state data found</i></p>")
+            except Exception as e:
+                logger.error(f"Web dashboard: Error querying vstp_state: {e}")
+                body.append(f"<p><i>Error querying vstp_state: {e}</i></p>")
+        else:
+            # Show vstp_schedules with locations
+            body.append("<h2>VSTP Schedules</h2>")
+            body.append("<p><a href='/vstp?view=state'>Switch to State Summary View</a></p>")
+            
+            sql = """SELECT uid, schedule_start_date, schedule_end_date, transaction_type, 
+                     train_status, signalling_id, CIF_train_service_code, CIF_train_category, 
+                     CIF_power_type, sender_organisation, created_at_utc 
+                     FROM vstp_schedules WHERE 1=1"""
+            params = []
+            
+            if uid:
+                sql += " AND uid=?"
+                params.append(uid)
+            
+            sql += " ORDER BY created_at_utc DESC LIMIT 100"
+            
+            try:
+                rows = q(sql, params)
+                if rows:
+                    body.append(f"<p class='dim'>Showing {len(rows)} schedule(s). Click UID to see locations.</p>")
+                    body.append("<table>")
+                    body.append("<tr><th>UID</th><th>Start Date</th><th>End Date</th><th>Type</th><th>Status</th><th>Signalling ID</th><th>Service Code</th><th>Category</th><th>Power</th><th>Created</th></tr>")
+                    for r in rows:
+                        # Create a detail link
+                        detail_url = f"/vstp?view=schedules&uid={r['uid']}&detail=1"
+                        body.append(
+                            f"<tr>"
+                            f"<td><a href='{detail_url}'><b>{r['uid']}</b></a></td>"
+                            f"<td class='mono'>{r['schedule_start_date']}</td>"
+                            f"<td class='mono'>{r['schedule_end_date'] or ''}</td>"
+                            f"<td>{r['transaction_type'] or ''}</td>"
+                            f"<td>{r['train_status'] or ''}</td>"
+                            f"<td class='mono'>{r['signalling_id'] or ''}</td>"
+                            f"<td>{r['CIF_train_service_code'] or ''}</td>"
+                            f"<td>{r['CIF_train_category'] or ''}</td>"
+                            f"<td>{r['CIF_power_type'] or ''}</td>"
+                            f"<td class='mono dim'>{r['created_at_utc'][:19] if r['created_at_utc'] else ''}</td>"
+                            f"</tr>"
+                        )
+                    body.append("</table>")
+                    
+                    # If detail is requested, show locations for the selected schedule
+                    if uid and request.args.get("detail"):
+                        body.append(f"<h3>Locations for Schedule {uid}</h3>")
+                        # Get schedule_start_date from the schedule row first
+                        schedule_row = q("SELECT schedule_start_date FROM vstp_schedules WHERE uid=? ORDER BY created_at_utc DESC LIMIT 1", (uid,))
+                        if schedule_row:
+                            schedule_start_date = schedule_row[0]['schedule_start_date']
+                            loc_sql = """SELECT tiploc, scheduled_pass_time, scheduled_departure_time, 
+                                         scheduled_arrival_time, public_departure_time, public_arrival_time,
+                                         CIF_pathing_allowance, CIF_activity, CIF_line
+                                         FROM vstp_schedule_locations 
+                                         WHERE uid=? AND schedule_start_date=?
+                                         ORDER BY segment_index, location_index"""
+                            loc_rows = q(loc_sql, (uid, schedule_start_date))
+                            
+                            if loc_rows:
+                                body.append("<table>")
+                                body.append("<tr><th>TIPLOC</th><th>Pass Time</th><th>Departure</th><th>Arrival</th><th>Public Dep</th><th>Public Arr</th><th>Pathing</th><th>Activity</th><th>Line</th></tr>")
+                                for loc in loc_rows:
+                                    body.append(
+                                        f"<tr>"
+                                        f"<td class='mono'>{loc['tiploc'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_pass_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_departure_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_arrival_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['public_departure_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['public_arrival_time'] or ''}</td>"
+                                        f"<td>{loc['CIF_pathing_allowance'] or ''}</td>"
+                                        f"<td>{loc['CIF_activity'] or ''}</td>"
+                                        f"<td>{loc['CIF_line'] or ''}</td>"
+                                        f"</tr>"
+                                    )
+                                body.append("</table>")
+                            else:
+                                body.append("<p><i>No locations found for this schedule</i></p>")
+                        else:
+                            body.append("<p><i>Schedule not found</i></p>")
+                else:
+                    body.append("<p><i>No VSTP schedules found</i></p>")
+            except Exception as e:
+                logger.error(f"Web dashboard: Error querying vstp_schedules: {e}")
+                body.append(f"<p><i>Error querying vstp_schedules: {e}</i></p>")
+        
+        return render_page("VSTP - NR RailHub", body, active="vstp")
 
     @app.get("/raw-events")
     def raw_events():
