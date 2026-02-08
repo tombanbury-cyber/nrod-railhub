@@ -11,24 +11,53 @@ from __future__ import annotations
 
 import time
 import json
+import yaml
 from datetime import datetime
 
 import pathlib
 import sqlite3
-from typing import List
+from typing import List, Dict, Any, Optional
 
-from flask import Flask, request
+from flask import Flask, request, redirect
 
 from .logging_config import get_logger
 
 logger = get_logger("web")
 
-def start_web_dashboard(db_path: str, port: int) -> None:
+def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = None) -> None:
     app = Flask(__name__)
     db_path = str(pathlib.Path(db_path).expanduser())
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000;")
+    
+    # Store config path for reading/writing
+    _config_path = str(pathlib.Path(config_path).expanduser()) if config_path else None
+    
+    def load_yaml_config() -> Dict[str, Any]:
+        """Load configuration from YAML file."""
+        if not _config_path or not pathlib.Path(_config_path).exists():
+            return {}
+        try:
+            with open(_config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                return config if isinstance(config, dict) else {}
+        except Exception as e:
+            logger.error(f"Error loading config from {_config_path}: {e}")
+            return {}
+    
+    def save_yaml_config(config: Dict[str, Any]) -> bool:
+        """Save configuration to YAML file."""
+        if not _config_path:
+            return False
+        try:
+            with open(_config_path, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            logger.info(f"Saved configuration to {_config_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving config to {_config_path}: {e}")
+            return False
 
     def q(sql: str, params=()):
         cur = conn.cursor()
@@ -52,7 +81,6 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
             f"<a href='/trust' class='navlink {'active' if active=='trust' else ''}'>TRUST</a>"
             f"<a href='/vstp' class='navlink {'active' if active=='vstp' else ''}'>VSTP</a>"
-            f"<a href='/mapper' class='navlink {'active' if active=='mapper' else ''}'>Mapper</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
             "</div>"
@@ -60,6 +88,9 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             f"<form method='get' action='/'><input name='area' placeholder='Area' value='{area}' size='4'/> "
             f"<input name='hc' placeholder='Headcode' value='{hc}' size='6'/> "
             "<button type='submit'>Filter</button></form>"
+            "</div>"
+            "<div class='config-icon'>"
+            f"<a href='/config' class='navlink icon-link {'active' if active=='config' else ''}' title='Configuration'>⚙️</a>"
             "</div>"
             "</div>"
         )
@@ -81,9 +112,11 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             ".navlink{color:rgba(255,255,255,0.9);text-decoration:none;padding:8px 10px;border-radius:6px;font-size:14px}"
             ".navlink:hover{background:rgba(255,255,255,0.06)}"
             ".navlink.active{background:rgba(0,0,0,0.12)}"
-            ".quickfilter{margin-left:auto}"
+            ".quickfilter{margin-left:auto;margin-right:12px}"
             ".quickfilter input{padding:6px 8px;border-radius:6px;border:0;margin-right:6px}"
             ".quickfilter button{padding:6px 8px;border-radius:6px;border:0;background:#ffd24d;color:#222}"
+            ".config-icon{display:flex;align-items:center}"
+            ".icon-link{font-size:24px;padding:8px 12px}"
             "table{border-collapse:collapse;width:100%;background:white;margin-top:8px}"
             "th,td{border-bottom:1px solid #eee;padding:8px 10px;font-size:14px;text-align:left}"
             "th{background:#f7f9fc;font-weight:600}"
@@ -174,6 +207,386 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                 body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['msg_type']}</td><td>{r['from_berth']}</td><td>{r['to_berth']}</td></tr>")
             body.append("</table>")
         return render_page(f"Train {hc}", body, active="home")
+
+    @app.route("/config", methods=["GET", "POST"])
+    def config():
+        """Configuration interface for adjusting and saving YAML config, including mapper settings."""
+        body = ["<h2>Configuration</h2>"]
+        
+        # Handle POST - save configuration
+        if request.method == "POST":
+            action = request.form.get("action", "")
+            
+            if action == "save_config":
+                # Build config dict from form data
+                config_data = load_yaml_config()
+                
+                # Authentication
+                if request.form.get("user"):
+                    config_data["user"] = request.form.get("user")
+                if request.form.get("password"):
+                    config_data["password"] = request.form.get("password")
+                
+                # STOMP Connection
+                if request.form.get("host"):
+                    config_data["host"] = request.form.get("host")
+                if request.form.get("port"):
+                    config_data["port"] = int(request.form.get("port", 61618))
+                if request.form.get("vhost"):
+                    config_data["vhost"] = request.form.get("vhost")
+                
+                # Filtering
+                headcode = request.form.get("headcode", "").strip()
+                config_data["headcode"] = headcode if headcode else None
+                uid = request.form.get("uid", "").strip()
+                config_data["uid"] = uid if uid else None
+                td_area_str = request.form.get("td_area", "").strip()
+                config_data["td_area"] = [a.strip() for a in td_area_str.split(",") if a.strip()] if td_area_str else []
+                
+                # Display Options
+                config_data["width"] = int(request.form.get("width", 96))
+                config_data["pretty"] = request.form.get("pretty") == "on"
+                config_data["interactive"] = request.form.get("interactive") == "on"
+                config_data["only_changes"] = request.form.get("only_changes") == "on"
+                config_data["repeat_after"] = int(request.form.get("repeat_after", 300))
+                
+                # Logging
+                config_data["log_level"] = request.form.get("log_level", "error")
+                config_data["verbose"] = request.form.get("verbose") == "on"
+                config_data["trace_headcode"] = request.form.get("trace_headcode") == "on"
+                config_data["status_every"] = int(request.form.get("status_every", 15))
+                
+                # Reference Data Caching
+                if request.form.get("corpus_cache"):
+                    config_data["corpus_cache"] = request.form.get("corpus_cache")
+                config_data["corpus_refresh"] = request.form.get("corpus_refresh") == "on"
+                if request.form.get("smart_cache"):
+                    config_data["smart_cache"] = request.form.get("smart_cache")
+                config_data["smart_refresh"] = request.form.get("smart_refresh") == "on"
+                if request.form.get("schedule_cache"):
+                    config_data["schedule_cache"] = request.form.get("schedule_cache")
+                config_data["schedule_refresh"] = request.form.get("schedule_refresh") == "on"
+                config_data["use_schedule"] = request.form.get("use_schedule") == "on"
+                if request.form.get("schedule_type"):
+                    config_data["schedule_type"] = request.form.get("schedule_type")
+                if request.form.get("schedule_day"):
+                    config_data["schedule_day"] = request.form.get("schedule_day")
+                
+                # Database & Web
+                if request.form.get("db_path"):
+                    config_data["db_path"] = request.form.get("db_path")
+                web_port_str = request.form.get("web_port", "").strip()
+                config_data["web_port"] = int(web_port_str) if web_port_str else None
+                config_data["enable_mapper"] = request.form.get("enable_mapper") == "on"
+                
+                # Save to file
+                if save_yaml_config(config_data):
+                    body.append("<p style='color:green;padding:10px;background:#f0f9ff;border-radius:6px'><b>✓ Configuration saved successfully!</b></p>")
+                else:
+                    body.append("<p style='color:red;padding:10px;background:#fff0f0;border-radius:6px'><b>✗ Error saving configuration. Check logs for details.</b></p>")
+            
+            elif action == "rebuild_mapper":
+                # Handle mapper rebuild (moved from /mapper route)
+                pre_ms = int(request.form.get("pre_ms", 1000))
+                post_ms = int(request.form.get("post_ms", 5000))
+                tau_ms = int(request.form.get("tau_ms", 2500))
+                td_area_filter = request.form.get("td_area_filter", "").strip()
+                save_mapper_config = request.form.get("save_mapper_config") == "on"
+                
+                try:
+                    # Save config if requested
+                    if save_mapper_config:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'", (pre_ms,))
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'", (post_ms,))
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'", (tau_ms,))
+                        conn.commit()
+                        body.append("<p style='color:green'><b>Mapper configuration saved to database</b></p>")
+                    
+                    # Import mapper function
+                    from .mapper import process_batch_for_mapper
+                    from datetime import timezone
+                    
+                    # Delete existing scores
+                    cursor = conn.cursor()
+                    if td_area_filter:
+                        cursor.execute("DELETE FROM berth_signal_scores WHERE td_area=?", (td_area_filter,))
+                        deleted = cursor.rowcount
+                    else:
+                        cursor.execute("DELETE FROM berth_signal_scores")
+                        deleted = cursor.rowcount
+                    
+                    # Fetch observations and rebuild
+                    if td_area_filter:
+                        obs_sql = "SELECT * FROM berth_signal_observations WHERE td_area=? ORDER BY step_timestamp"
+                        obs = q(obs_sql, (td_area_filter,))
+                    else:
+                        obs_sql = "SELECT * FROM berth_signal_observations ORDER BY step_timestamp"
+                        obs = q(obs_sql)
+                    
+                    total_observations = len(obs)
+                    total_inserted = 0
+                    progress_messages = [f"Processing {total_observations} observations with pre_ms={pre_ms}, post_ms={post_ms}, tau_ms={tau_ms}"]
+                    
+                    if obs:
+                        # Group observations by TD area for batched processing
+                        from collections import defaultdict
+                        area_groups = defaultdict(list)
+                        for row in obs:
+                            td_area_val = row["td_area"]
+                            area_groups[td_area_val].append(row)
+                        
+                        # Process each area
+                        for td_area_val, area_obs in area_groups.items():
+                            progress_messages.append(f"Processing area {td_area_val}: {len(area_obs)} observations")
+                            
+                            # Build event list from observations
+                            events = []
+                            for row in area_obs:
+                                step_ts = row["step_timestamp"]
+                                from_b = row["from_berth"]
+                                to_b = row["to_berth"]
+                                descr = row["descr"]
+                                sig_ts = row["signal_timestamp"]
+                                addr = row["address"]
+                                data = row["data"]
+                                
+                                # Add step event
+                                if step_ts and from_b and to_b:
+                                    try:
+                                        step_dt = datetime.fromtimestamp(step_ts / 1000.0, tz=timezone.utc)
+                                        step_utc = step_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                                    except Exception:
+                                        step_utc = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                                    
+                                    events.append({
+                                        'msg_ts': step_ts,
+                                        'msg_type': 'CA',
+                                        'td_area': td_area_val,
+                                        'from_berth': from_b,
+                                        'to_berth': to_b,
+                                        'descr': descr,
+                                        'address': None,
+                                        'data': None,
+                                        'received_at_utc': step_utc
+                                    })
+                                
+                                # Add signal event
+                                if sig_ts and addr:
+                                    try:
+                                        sig_dt = datetime.fromtimestamp(sig_ts / 1000.0, tz=timezone.utc)
+                                        sig_utc = sig_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                                    except Exception:
+                                        sig_utc = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                                    
+                                    events.append({
+                                        'msg_ts': sig_ts,
+                                        'msg_type': 'SF',
+                                        'td_area': td_area_val,
+                                        'from_berth': None,
+                                        'to_berth': None,
+                                        'descr': None,
+                                        'address': addr,
+                                        'data': data,
+                                        'received_at_utc': sig_utc
+                                    })
+                            
+                            # Deduplicate events
+                            seen = set()
+                            unique_events = []
+                            for e in events:
+                                key = (e['msg_type'], e['msg_ts'], e.get('address'), e.get('from_berth'), e.get('to_berth'))
+                                if key not in seen:
+                                    seen.add(key)
+                                    unique_events.append(e)
+                            
+                            if unique_events:
+                                # Reprocess with new parameters
+                                obs_rows, score_rows = process_batch_for_mapper(
+                                    unique_events,
+                                    pre_ms=pre_ms,
+                                    post_ms=post_ms,
+                                    tau_ms=tau_ms
+                                )
+                                
+                                if score_rows:
+                                    # Insert new scores
+                                    cursor.executemany("""
+                                        INSERT INTO berth_signal_scores (
+                                            td_area, from_berth, to_berth, address, score, last_seen_ts, last_seen_utc, last_data
+                                        )
+                                        VALUES (?,?,?,?,?,?,?,?)
+                                        ON CONFLICT(td_area, from_berth, to_berth, address)
+                                        DO UPDATE SET
+                                            score = score + excluded.score,
+                                            obs_count = obs_count + 1,
+                                            last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
+                                            last_seen_utc = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_utc ELSE last_seen_utc END,
+                                            last_data = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_data ELSE last_data END
+                                    """, score_rows)
+                                    
+                                    total_inserted += len(score_rows)
+                                    progress_messages.append(f"  Generated {len(score_rows)} score entries")
+                        
+                        conn.commit()
+                        progress_messages.append(f"Rebuild complete: processed {total_observations} observations, generated {total_inserted} score entries")
+                        
+                        body.append("<div style='background:#f7f9fc;padding:10px;border-radius:6px;margin:10px 0'>")
+                        for msg in progress_messages:
+                            body.append(f"<p class='dim' style='margin:4px 0'>{msg}</p>")
+                        body.append("</div>")
+                        
+                        body.append(f"<p style='color:green'><b>Rebuild complete!</b></p>")
+                        body.append(f"<p>Deleted: {deleted} | Inserted: {total_inserted} | Observations: {total_observations}</p>")
+                
+                except Exception as e:
+                    logger.error(f"Web dashboard: Error during mapper rebuild: {e}")
+                    body.append(f"<p style='color:red'>Error during rebuild: {e}</p>")
+                    import traceback
+                    body.append(f"<pre style='font-size:11px;background:#f7f9fc;padding:8px'>{traceback.format_exc()}</pre>")
+        
+        # Load current configuration
+        config_data = load_yaml_config()
+        
+        # Check if config file exists
+        if not _config_path or not pathlib.Path(_config_path).exists():
+            body.append(f"<p style='color:orange;padding:10px;background:#fff8e6;border-radius:6px'><b>⚠ No configuration file specified or file not found.</b></p>")
+            if _config_path:
+                body.append(f"<p class='dim'>Expected: {_config_path}</p>")
+            body.append("<p>Configuration changes will not be saved to file. You can still adjust mapper settings below.</p>")
+        
+        # Get mapper config from database
+        mapper_config = {"pre_ms": 1000, "post_ms": 5000, "tau_ms": 2500}
+        mapper_stats = {"obs_count": 0, "score_count": 0, "areas": 0}
+        try:
+            mapper_cfg_rows = q("SELECT key, value FROM mapper_config")
+            mapper_config = {row[0]: int(row[1]) for row in mapper_cfg_rows}
+            
+            obs_count = q("SELECT COUNT(*) as cnt FROM berth_signal_observations")[0]["cnt"]
+            score_count = q("SELECT COUNT(*) as cnt FROM berth_signal_scores")[0]["cnt"]
+            areas = q("SELECT COUNT(DISTINCT td_area) as cnt FROM berth_signal_observations")[0]["cnt"]
+            mapper_stats = {"obs_count": obs_count, "score_count": score_count, "areas": areas}
+        except Exception:
+            pass
+        
+        # Render configuration form
+        body.append("<h3>Application Configuration</h3>")
+        body.append("<p class='dim'>Adjust settings below and click 'Save Configuration' to persist changes to the YAML file.</p>")
+        
+        body.append("<form method='post' style='max-width:800px'>")
+        body.append("<input type='hidden' name='action' value='save_config'>")
+        
+        # Authentication Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Network Rail Authentication</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Email/Username:</label><input type='text' name='user' value=\"{config_data.get('user', '')}\" style='width:300px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Password:</label><input type='password' name='password' value=\"{config_data.get('password', '')}\" style='width:300px;padding:6px'></div>")
+        body.append("</fieldset>")
+        
+        # STOMP Connection Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>STOMP Connection</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Host:</label><input type='text' name='host' value=\"{config_data.get('host', 'publicdatafeeds.networkrail.co.uk')}\" style='width:300px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Port:</label><input type='number' name='port' value=\"{config_data.get('port', 61618)}\" style='width:100px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Virtual Host:</label><input type='text' name='vhost' value=\"{config_data.get('vhost', 'publicdatafeeds.networkrail.co.uk')}\" style='width:300px;padding:6px'></div>")
+        body.append("</fieldset>")
+        
+        # Filtering Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Filtering Options</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Headcode Filter:</label><input type='text' name='headcode' value=\"{config_data.get('headcode', '')}\" placeholder='e.g., 2C90' style='width:150px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>UID Filter:</label><input type='text' name='uid' value=\"{config_data.get('uid', '')}\" placeholder='e.g., C43876' style='width:150px;padding:6px'></div>")
+        td_area_val = ','.join(config_data.get('td_area', [])) if isinstance(config_data.get('td_area'), list) else ''
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>TD Area Filter:</label><input type='text' name='td_area' value=\"{td_area_val}\" placeholder='e.g., EK,WR' style='width:200px;padding:6px'><span class='dim' style='margin-left:8px'>Comma-separated</span></div>")
+        body.append("</fieldset>")
+        
+        # Display Options Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Display Options</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Console Width:</label><input type='number' name='width' value=\"{config_data.get('width', 96)}\" style='width:100px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Pretty Output:</label><input type='checkbox' name='pretty' {'checked' if config_data.get('pretty', True) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Interactive Mode:</label><input type='checkbox' name='interactive' {'checked' if config_data.get('interactive', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Only Show Changes:</label><input type='checkbox' name='only_changes' {'checked' if config_data.get('only_changes', True) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Repeat After (sec):</label><input type='number' name='repeat_after' value=\"{config_data.get('repeat_after', 300)}\" style='width:100px;padding:6px'></div>")
+        body.append("</fieldset>")
+        
+        # Logging Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Logging & Debugging</legend>")
+        log_level = config_data.get('log_level', 'error')
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Log Level:</label><select name='log_level' style='padding:6px'>")
+        for level in ['error', 'warning', 'info', 'verbose']:
+            selected = 'selected' if level == log_level else ''
+            body.append(f"<option value='{level}' {selected}>{level.title()}</option>")
+        body.append("</select></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Verbose Mode:</label><input type='checkbox' name='verbose' {'checked' if config_data.get('verbose', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Trace Headcode:</label><input type='checkbox' name='trace_headcode' {'checked' if config_data.get('trace_headcode', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Status Every (sec):</label><input type='number' name='status_every' value=\"{config_data.get('status_every', 15)}\" style='width:100px;padding:6px'></div>")
+        body.append("</fieldset>")
+        
+        # Reference Data Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Reference Data Caching</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>CORPUS Cache:</label><input type='text' name='corpus_cache' value=\"{config_data.get('corpus_cache', '~/.cache/openraildata/CORPUSExtract.json')}\" style='width:400px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>CORPUS Refresh:</label><input type='checkbox' name='corpus_refresh' {'checked' if config_data.get('corpus_refresh', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>SMART Cache:</label><input type='text' name='smart_cache' value=\"{config_data.get('smart_cache', '~/.cache/openraildata/SMART.json')}\" style='width:400px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>SMART Refresh:</label><input type='checkbox' name='smart_refresh' {'checked' if config_data.get('smart_refresh', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Schedule Cache:</label><input type='text' name='schedule_cache' value=\"{config_data.get('schedule_cache', '~/.cache/openraildata/SCHEDULE_toc-full.json.gz')}\" style='width:400px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Schedule Refresh:</label><input type='checkbox' name='schedule_refresh' {'checked' if config_data.get('schedule_refresh', False) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Use Schedule:</label><input type='checkbox' name='use_schedule' {'checked' if config_data.get('use_schedule', True) else ''}></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Schedule Type:</label><input type='text' name='schedule_type' value=\"{config_data.get('schedule_type', 'CIF_ALL_FULL_DAILY')}\" style='width:250px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Schedule Day:</label><input type='text' name='schedule_day' value=\"{config_data.get('schedule_day', 'toc-full')}\" style='width:250px;padding:6px'></div>")
+        body.append("</fieldset>")
+        
+        # Database & Web Section
+        body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
+        body.append("<legend style='font-weight:600;padding:0 8px'>Database & Web Dashboard</legend>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Database Path:</label><input type='text' name='db_path' value=\"{config_data.get('db_path', '~/.cache/openraildata/railhub.db')}\" style='width:400px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Web Port:</label><input type='number' name='web_port' value=\"{config_data.get('web_port', 8088) or ''}\" style='width:100px;padding:6px'><span class='dim' style='margin-left:8px'>Leave empty to disable</span></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Enable Mapper:</label><input type='checkbox' name='enable_mapper' {'checked' if config_data.get('enable_mapper', True) else ''}></div>")
+        body.append("</fieldset>")
+        
+        # Save button
+        body.append("<div style='margin-top:20px'><button type='submit' style='padding:10px 20px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;font-size:16px;cursor:pointer'>Save Configuration</button></div>")
+        body.append("</form>")
+        
+        # Mapper Configuration & Rebuild Section
+        body.append("<hr style='margin:40px 0;border:0;border-top:2px solid #eee'>")
+        body.append("<h3>Mapper Configuration & Rebuild</h3>")
+        body.append(f"<p><b>Observations:</b> {mapper_stats['obs_count']} | <b>Score Entries:</b> {mapper_stats['score_count']} | <b>TD Areas:</b> {mapper_stats['areas']}</p>")
+        
+        body.append("""
+            <p class='dim' style='margin-bottom:15px'>
+            Adjust the mapper parameters below and rebuild the berth-signal correlation scores.
+            The rebuild will reprocess all existing observations with the new parameters.
+            </p>
+        """)
+        
+        body.append("<form method='post' style='background:#f7f9fc;padding:15px;border-radius:6px;max-width:800px'>")
+        body.append("<input type='hidden' name='action' value='rebuild_mapper'>")
+        body.append(f"<div style='margin-bottom:12px'><label style='display:inline-block;width:150px;font-weight:600'>pre_ms:</label><input type='number' name='pre_ms' value='{mapper_config.get('pre_ms', 1000)}' min='0' max='60000' required style='padding:6px;width:100px'><span class='dim' style='margin-left:8px'>Time window before step (ms)</span></div>")
+        body.append(f"<div style='margin-bottom:12px'><label style='display:inline-block;width:150px;font-weight:600'>post_ms:</label><input type='number' name='post_ms' value='{mapper_config.get('post_ms', 5000)}' min='0' max='60000' required style='padding:6px;width:100px'><span class='dim' style='margin-left:8px'>Time window after step (ms)</span></div>")
+        body.append(f"<div style='margin-bottom:12px'><label style='display:inline-block;width:150px;font-weight:600'>tau_ms:</label><input type='number' name='tau_ms' value='{mapper_config.get('tau_ms', 2500)}' min='1' max='60000' required style='padding:6px;width:100px'><span class='dim' style='margin-left:8px'>Exponential weight decay (ms)</span></div>")
+        body.append("<div style='margin-bottom:12px'><label style='display:inline-block;width:150px;font-weight:600'>TD Area Filter:</label><input type='text' name='td_area_filter' value='' placeholder='(all areas)' style='padding:6px;width:100px'><span class='dim' style='margin-left:8px'>Optional: rebuild only this area</span></div>")
+        body.append("<div style='margin-bottom:12px'><label style='display:inline-block;width:150px;font-weight:600'>Save Config:</label><input type='checkbox' name='save_mapper_config' value='yes' checked><span class='dim' style='margin-left:8px'>Save these parameters as defaults</span></div>")
+        body.append("<div style='margin-top:16px'><button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer'>Rebuild Mapper Scores</button></div>")
+        body.append("</form>")
+        
+        body.append("""
+            <h4 style='margin-top:25px'>Parameter Explanations</h4>
+            <ul>
+                <li><b>pre_ms</b>: Milliseconds to look back before a berth step event when correlating with signal events</li>
+                <li><b>post_ms</b>: Milliseconds to look forward after a berth step event when correlating with signal events</li>
+                <li><b>tau_ms</b>: Time constant for exponential weighting - smaller values favor closer time matches</li>
+            </ul>
+            <p class='dim'>
+            The mapper uses these parameters to correlate berth step movements (CA/CB/CC) with signal events (SF).
+            Adjusting these values affects the confidence scores for berth-to-signal mappings.
+            </p>
+        """)
+        
+        return render_page("Configuration - NR RailHub", body, active="config")
+
 
     @app.get("/events")
     def events():
