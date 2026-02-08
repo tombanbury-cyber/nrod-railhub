@@ -863,65 +863,73 @@ class TOCResolver:
     """
     
     # TOC reference data (updated as of 2024)
-    # Source: Network Rail Open Data Wiki and Rail Data Marketplace
+    # Source: Network Rail Open Data Wiki (https://wiki.openraildata.com/index.php/TOC_Codes)
+    # and Rail Data Marketplace
+    # 
+    # Fields:
+    # - name: Full operator name
+    # - sector: Type of operator (Passenger, Freight, etc.)
+    # - atoc_code: ATOC (Association of Train Operating Companies) 3-letter code
+    # - business_code: Numeric business code (if known from TRUST messages)
+    # - legacy_codes: List of historical codes that may appear in feeds
     TOC_DATA = {
-        'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger'},
-        'CC': {'name': 'c2c', 'sector': 'Passenger'},
-        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger'},
-        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger'},
-        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger'},
-        'ES': {'name': 'Eurostar', 'sector': 'Passenger'},
+        'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'ATW'},
+        'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CCR', 'business_code': '23'},
+        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CHR', 'business_code': '74'},
+        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CSL', 'business_code': '85'},
+        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': '61'},
+        'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'EST', 'business_code': '28'},
         'EX': {'name': 'Express Passenger', 'sector': 'Passenger'},
-        'FC': {'name': 'First Capital Connect', 'sector': 'Passenger'},
-        'GC': {'name': 'Grand Central', 'sector': 'Passenger'},
-        'GN': {'name': 'Great Northern', 'sector': 'Passenger'},
-        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger'},
-        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger'},
-        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger'},
-        'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger'},
-        'HT': {'name': 'Hull Trains', 'sector': 'Passenger'},
-        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger'},
-        'IL': {'name': 'Island Line', 'sector': 'Passenger'},
-        'LE': {'name': 'Greater Anglia', 'sector': 'Passenger'},
-        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger'},
-        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger'},
-        'LO': {'name': 'London Overground', 'sector': 'Passenger'},
-        'LT': {'name': 'London Underground', 'sector': 'Passenger'},
-        'ME': {'name': 'Merseyrail', 'sector': 'Passenger'},
-        'NC': {'name': 'Northern Trains', 'sector': 'Passenger'},
-        'NT': {'name': 'Northern Rail', 'sector': 'Passenger'},
+        'FC': {'name': 'First Capital Connect', 'sector': 'Passenger', 'atoc_code': 'FCC'},
+        'GC': {'name': 'Grand Central', 'sector': 'Passenger', 'atoc_code': 'GCR', 'business_code': '22'},
+        'GN': {'name': 'Great Northern', 'sector': 'Passenger', 'atoc_code': 'GNR'},
+        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger', 'atoc_code': 'LNR', 'business_code': '24'},
+        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger', 'atoc_code': 'GWR', 'business_code': '79'},
+        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger', 'atoc_code': 'GX', 'business_code': '26'},
+        'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger', 'atoc_code': 'HEX'},
+        'HT': {'name': 'Hull Trains', 'sector': 'Passenger', 'atoc_code': 'HT', 'business_code': '80'},
+        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger', 'atoc_code': 'HEX', 'business_code': '29'},
+        'IL': {'name': 'Island Line', 'sector': 'Passenger', 'atoc_code': 'IL'},
+        'LE': {'name': 'Greater Anglia', 'sector': 'Passenger', 'atoc_code': 'LEA'},
+        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'LMR', 'business_code': '72'},
+        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger', 'atoc_code': 'LNW', 'business_code': '86'},
+        'LO': {'name': 'London Overground', 'sector': 'Passenger', 'atoc_code': 'LOO', 'business_code': '87'},
+        'LT': {'name': 'London Underground', 'sector': 'Passenger', 'atoc_code': 'LUL', 'business_code': '91'},
+        'ME': {'name': 'Merseyrail', 'sector': 'Passenger', 'atoc_code': 'MER', 'business_code': '65'},
+        'NC': {'name': 'Northern Trains', 'sector': 'Passenger', 'atoc_code': 'NT', 'business_code': '60'},
+        'NT': {'name': 'Northern Rail', 'sector': 'Passenger', 'atoc_code': 'NT'},
         'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage'},
         'PE': {'name': 'Penmere', 'sector': 'Freight'},
         'PO': {'name': 'Provincial', 'sector': 'Passenger'},
-        'SE': {'name': 'Southeastern', 'sector': 'Passenger'},
-        'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger'},
-        'SN': {'name': 'Southern', 'sector': 'Passenger'},
-        'SR': {'name': 'ScotRail', 'sector': 'Passenger'},
-        'SW': {'name': 'South Western Railway', 'sector': 'Passenger'},
-        'SX': {'name': 'Stansted Express', 'sector': 'Passenger'},
-        'TL': {'name': 'Thameslink', 'sector': 'Passenger'},
-        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger'},
-        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger'},
-        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger'},
-        'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter'},
-        'XC': {'name': 'CrossCountry', 'sector': 'Passenger'},
-        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger'},
+        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': '84'},
+        'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger', 'atoc_code': 'SWT'},
+        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': '88'},
+        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': '55'},
+        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': '71'},
+        'SX': {'name': 'Stansted Express', 'sector': 'Passenger', 'atoc_code': 'SX'},
+        'TL': {'name': 'Thameslink', 'sector': 'Passenger', 'atoc_code': 'TLK'},
+        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TPE', 'business_code': '20'},
+        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TFW', 'business_code': '83'},
+        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': '25'},
+        'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter', 'atoc_code': 'WCR'},
+        'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XCT', 'business_code': '27'},
+        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'ELZ', 'business_code': '92'},
         'ZZ': {'name': 'Unidentified', 'sector': 'Unknown'},
         # Freight operators
-        'DB': {'name': 'DB Cargo UK', 'sector': 'Freight'},
-        'DG': {'name': 'Direct Rail Services', 'sector': 'Freight'},
+        'DB': {'name': 'DB Cargo UK', 'sector': 'Freight', 'atoc_code': 'DBC'},
+        'DG': {'name': 'Direct Rail Services', 'sector': 'Freight', 'atoc_code': 'DRS'},
         'DQ': {'name': 'Devon & Cornwall Railways', 'sector': 'Freight'},
-        'DR': {'name': 'Direct Rail Services', 'sector': 'Freight'},
+        'DR': {'name': 'Direct Rail Services', 'sector': 'Freight', 'atoc_code': 'DRS'},
         'EA': {'name': 'Europorte', 'sector': 'Freight'},
         'ED': {'name': 'Edison Rail', 'sector': 'Freight'},
         'FL': {'name': 'First Greater Western Link', 'sector': 'Freight'},
-        'FR': {'name': 'Freightliner', 'sector': 'Freight'},
-        'FS': {'name': 'Freightliner Heavy Haul', 'sector': 'Freight'},
-        'GB': {'name': 'GBRf (GB Railfreight)', 'sector': 'Freight'},
+        'FR': {'name': 'Freightliner', 'sector': 'Freight', 'atoc_code': 'FRE'},
+        'FS': {'name': 'Freightliner Heavy Haul', 'sector': 'Freight', 'atoc_code': 'FHH'},
+        'GB': {'name': 'GBRf (GB Railfreight)', 'sector': 'Freight', 'atoc_code': 'GBR'},
         'GV': {'name': 'Govia', 'sector': 'Freight'},
         'RF': {'name': 'Railfreight', 'sector': 'Freight'},
-        'RM': {'name': 'Rail Operations Group', 'sector': 'Freight'},
-        'RT': {'name': 'Rail Operations Group', 'sector': 'Freight'},
+        'RM': {'name': 'Rail Operations Group', 'sector': 'Freight', 'atoc_code': 'ROG'},
+        'RT': {'name': 'Rail Operations Group', 'sector': 'Freight', 'atoc_code': 'ROG'},
         'WH': {'name': 'West Highland Railway', 'sector': 'Freight'},
         # Network Rail and test
         'NR': {'name': 'Network Rail', 'sector': 'Infrastructure'},
@@ -933,12 +941,62 @@ class TOCResolver:
     
     def __init__(self) -> None:
         self.toc_map: Dict[str, str] = {}
+        self.atoc_to_canonical: Dict[str, str] = {}  # Maps ATOC codes to canonical 2-char codes
+        self.business_to_canonical: Dict[str, str] = {}  # Maps business codes to canonical 2-char codes
         self._load_static_data()
     
     def _load_static_data(self) -> None:
-        """Load static TOC data into the resolver."""
+        """Load static TOC data into the resolver and build mapping indices."""
         for code, data in self.TOC_DATA.items():
             self.toc_map[code] = data['name']
+            
+            # Build ATOC code mapping
+            if 'atoc_code' in data:
+                atoc = data['atoc_code'].upper()
+                self.atoc_to_canonical[atoc] = code
+            
+            # Build business code mapping
+            if 'business_code' in data:
+                business = data['business_code']
+                self.business_to_canonical[business] = code
+    
+    def resolve_toc_code(self, incoming: Optional[str]) -> Optional[str]:
+        """
+        Resolve an incoming TOC identifier to the canonical 2-character TOC code.
+        
+        Handles various identifier formats:
+        - Canonical 2-character codes (e.g., 'SW', 'GW') - returned as-is
+        - ATOC 3-letter codes (e.g., 'SWR', 'GWR') - mapped to canonical code
+        - Numeric business codes (e.g., '71', '79') - mapped to canonical code
+        
+        Args:
+            incoming: TOC identifier from TRUST message (may be None, canonical, ATOC, or numeric)
+            
+        Returns:
+            Canonical 2-character TOC code if mapping found, None otherwise
+        """
+        if not incoming:
+            return None
+        
+        # Normalize input
+        code = incoming.strip().upper()
+        if not code:
+            return None
+        
+        # Check if it's already a canonical 2-character code
+        if code in self.toc_map:
+            return code
+        
+        # Check if it's an ATOC code
+        if code in self.atoc_to_canonical:
+            return self.atoc_to_canonical[code]
+        
+        # Check if it's a business code (numeric)
+        if code in self.business_to_canonical:
+            return self.business_to_canonical[code]
+        
+        # No mapping found
+        return None
     
     def get_toc_name(self, toc_code: str) -> Optional[str]:
         """
@@ -988,6 +1046,8 @@ class TOCResolver:
                 db.upsert_toc(
                     toc_code=code,
                     toc_name=data['name'],
+                    business_code=data.get('business_code'),
+                    atoc_code=data.get('atoc_code'),
                     sector=data.get('sector')
                 )
                 count += 1

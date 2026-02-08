@@ -869,6 +869,35 @@ class RailDB:
             cursor.execute("SELECT toc_name FROM toc_reference WHERE toc_code=?", (toc_code,))
             row = cursor.fetchone()
             return row[0] if row else None
+    
+    def get_canonical_toc_code(self, external_code: str) -> Optional[str]:
+        """
+        Get canonical TOC code from an external identifier.
+        
+        Queries toc_reference for a match on toc_code, atoc_code, or business_code,
+        returning the canonical toc_code if found. This is a defensive lookup useful
+        when the TOCResolver is not available.
+        
+        Args:
+            external_code: TOC identifier (may be canonical, ATOC, or business code)
+            
+        Returns:
+            Canonical 2-character TOC code if found, None otherwise
+        """
+        if not external_code:
+            return None
+        
+        code = external_code.strip().upper()
+        
+        with self._lock:
+            cursor = self._conn.cursor()
+            # Check all possible code columns
+            cursor.execute("""
+                SELECT toc_code FROM toc_reference 
+                WHERE toc_code=? OR atoc_code=? OR business_code=?
+            """, (code, code, code))
+            row = cursor.fetchone()
+            return row[0] if row else None
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""
