@@ -218,10 +218,6 @@ def start_web_dashboard(db_path: str, port: int) -> None:
             if train_id:
                 sql += " AND train_id=?"
                 params.append(train_id)
-            if headcode:
-                # Need to parse raw_json to filter by headcode, so we'll do a LIKE search
-                sql += " AND raw_json LIKE ?"
-                params.append(f'%"train_id":"{headcode}%')
             
             sql += " ORDER BY actual_timestamp_ms DESC LIMIT 500"
             
@@ -394,34 +390,40 @@ def start_web_dashboard(db_path: str, port: int) -> None:
                     # If detail is requested, show locations for the selected schedule
                     if uid and request.args.get("detail"):
                         body.append(f"<h3>Locations for Schedule {uid}</h3>")
-                        loc_sql = """SELECT tiploc, scheduled_pass_time, scheduled_departure_time, 
-                                     scheduled_arrival_time, public_departure_time, public_arrival_time,
-                                     CIF_pathing_allowance, CIF_activity, CIF_line
-                                     FROM vstp_schedule_locations 
-                                     WHERE uid=? AND schedule_start_date=(SELECT schedule_start_date FROM vstp_schedules WHERE uid=? LIMIT 1)
-                                     ORDER BY segment_index, location_index"""
-                        loc_rows = q(loc_sql, (uid, uid))
-                        
-                        if loc_rows:
-                            body.append("<table>")
-                            body.append("<tr><th>TIPLOC</th><th>Pass Time</th><th>Departure</th><th>Arrival</th><th>Public Dep</th><th>Public Arr</th><th>Pathing</th><th>Activity</th><th>Line</th></tr>")
-                            for loc in loc_rows:
-                                body.append(
-                                    f"<tr>"
-                                    f"<td class='mono'>{loc['tiploc'] or ''}</td>"
-                                    f"<td class='mono'>{loc['scheduled_pass_time'] or ''}</td>"
-                                    f"<td class='mono'>{loc['scheduled_departure_time'] or ''}</td>"
-                                    f"<td class='mono'>{loc['scheduled_arrival_time'] or ''}</td>"
-                                    f"<td class='mono'>{loc['public_departure_time'] or ''}</td>"
-                                    f"<td class='mono'>{loc['public_arrival_time'] or ''}</td>"
-                                    f"<td>{loc['CIF_pathing_allowance'] or ''}</td>"
-                                    f"<td>{loc['CIF_activity'] or ''}</td>"
-                                    f"<td>{loc['CIF_line'] or ''}</td>"
-                                    f"</tr>"
-                                )
-                            body.append("</table>")
+                        # Get schedule_start_date from the schedule row first
+                        schedule_row = q("SELECT schedule_start_date FROM vstp_schedules WHERE uid=? ORDER BY created_at_utc DESC LIMIT 1", (uid,))
+                        if schedule_row:
+                            schedule_start_date = schedule_row[0]['schedule_start_date']
+                            loc_sql = """SELECT tiploc, scheduled_pass_time, scheduled_departure_time, 
+                                         scheduled_arrival_time, public_departure_time, public_arrival_time,
+                                         CIF_pathing_allowance, CIF_activity, CIF_line
+                                         FROM vstp_schedule_locations 
+                                         WHERE uid=? AND schedule_start_date=?
+                                         ORDER BY segment_index, location_index"""
+                            loc_rows = q(loc_sql, (uid, schedule_start_date))
+                            
+                            if loc_rows:
+                                body.append("<table>")
+                                body.append("<tr><th>TIPLOC</th><th>Pass Time</th><th>Departure</th><th>Arrival</th><th>Public Dep</th><th>Public Arr</th><th>Pathing</th><th>Activity</th><th>Line</th></tr>")
+                                for loc in loc_rows:
+                                    body.append(
+                                        f"<tr>"
+                                        f"<td class='mono'>{loc['tiploc'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_pass_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_departure_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['scheduled_arrival_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['public_departure_time'] or ''}</td>"
+                                        f"<td class='mono'>{loc['public_arrival_time'] or ''}</td>"
+                                        f"<td>{loc['CIF_pathing_allowance'] or ''}</td>"
+                                        f"<td>{loc['CIF_activity'] or ''}</td>"
+                                        f"<td>{loc['CIF_line'] or ''}</td>"
+                                        f"</tr>"
+                                    )
+                                body.append("</table>")
+                            else:
+                                body.append("<p><i>No locations found for this schedule</i></p>")
                         else:
-                            body.append("<p><i>No locations found for this schedule</i></p>")
+                            body.append("<p><i>Schedule not found</i></p>")
                 else:
                     body.append("<p><i>No VSTP schedules found</i></p>")
             except Exception as e:
