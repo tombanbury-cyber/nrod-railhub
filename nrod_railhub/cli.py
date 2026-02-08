@@ -196,7 +196,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
     
     listener = Listener(hv, args, db=db, output_callback=output_callback)
     if args.web_port and db_path:
-        t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port), daemon=True)
+        # Pass config path to web dashboard for configuration editing
+        config_file_path = args.config if args.config else None
+        t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port, config_file_path), daemon=True)
         t.start()
         logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
     conn.set_listener("", listener)
