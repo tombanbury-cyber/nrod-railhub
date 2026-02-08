@@ -139,7 +139,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
     toc_resolver = TOCResolver()
     logger.info(f"TOC: loaded {len(toc_resolver.TOC_DATA)} TOC codes")
     
-    hv = HumanView(resolver=resolver, smart=smart)
+    hv = HumanView(resolver=resolver, smart=smart, toc_resolver=toc_resolver)
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
     #
