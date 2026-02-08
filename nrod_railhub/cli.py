@@ -9,8 +9,10 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 import stomp
+import yaml
 
 from .models import NR_HOST, NR_PORT, TOPIC_VSTP, TOPIC_TRUST, TOPIC_TD, utc_now_iso
 from .resolvers import LocationResolver, SmartResolver, ScheduleResolver
@@ -21,6 +23,78 @@ from .web import start_web_dashboard
 from .logging_config import setup_logger, get_logger
 
 logger = get_logger("cli")
+
+
+def load_config_file(config_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        config_path: Path to the YAML configuration file
+        
+    Returns:
+        Dictionary containing configuration values
+        
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+        yaml.YAMLError: If config file is invalid YAML
+    """
+    path = pathlib.Path(config_path).expanduser()
+    
+    if not path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    with open(path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    if config is None:
+        return {}
+    
+    if not isinstance(config, dict):
+        raise ValueError(f"Configuration file must contain a YAML dictionary, got {type(config).__name__}")
+    
+    return config
+
+
+def merge_config_with_args(args: argparse.Namespace, config: Dict[str, Any], parser_defaults: Dict[str, Any]) -> argparse.Namespace:
+    """
+    Merge YAML configuration with command-line arguments.
+    
+    Command-line arguments take precedence over config file values.
+    Config values are used when arguments are still at their default values.
+    
+    Args:
+        args: Parsed command-line arguments
+        config: Configuration dictionary from YAML file
+        parser_defaults: Dictionary of default values from parser
+        
+    Returns:
+        Updated argparse.Namespace with merged values
+    """
+    for key, value in config.items():
+        # Skip None values in config
+        if value is None:
+            continue
+            
+        # Convert yaml key format (can be hyphenated) to args attribute format (underscored)
+        attr_name = key.replace('-', '_')
+        
+        # Only set the value if the attribute exists in args
+        if not hasattr(args, attr_name):
+            continue
+            
+        current_value = getattr(args, attr_name)
+        default_value = parser_defaults.get(attr_name)
+        
+        # Special handling for lists (like td_area) - only override if empty
+        if isinstance(current_value, list):
+            if len(current_value) == 0 and value:
+                setattr(args, attr_name, value if isinstance(value, list) else [value])
+        # For other values, only override if still at default
+        elif current_value == default_value:
+            setattr(args, attr_name, value)
+    
+    return args
 
 def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thread:
     def loop():
@@ -191,12 +265,16 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Combine VSTP + TRUST + TD into a human-readable stream.")
+    
+    # Configuration file option (processed first)
+    p.add_argument("--config", help="Path to YAML configuration file (command-line args override config file values)")
+    
     p.add_argument("--host", default=NR_HOST, help="STOMP host (default: publicdatafeeds.networkrail.co.uk)")
     p.add_argument("--port", type=int, default=NR_PORT, help="STOMP port (default: 61618)")
     p.add_argument("--vhost", default=NR_HOST, help="STOMP vhost/host header (default: publicdatafeeds.networkrail.co.uk)")
 
-    p.add_argument("--user", required=True, help="Network Rail Data Feeds username/email")
-    p.add_argument("--password", required=True, help="Network Rail Data Feeds password")
+    p.add_argument("--user", required=False, help="Network Rail Data Feeds username/email")
+    p.add_argument("--password", required=False, help="Network Rail Data Feeds password")
 
     p.add_argument("--headcode", help="Filter output to a single headcode (e.g. 2C90)")
     p.add_argument("--uid", help="Filter output to a single CIF_train_uid (e.g. 43876)")
@@ -291,6 +369,37 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-mapper", dest="enable_mapper", action="store_false", default=True,
                    help="Disable berth-to-signal correlation mapper (enabled by default)")
     
-    return p.parse_args()
+    # Get default values before parsing
+    parser_defaults = {}
+    for action in p._actions:
+        if action.dest != 'help' and action.dest != 'config':
+            parser_defaults[action.dest] = action.default
+    
+    # Parse arguments
+    args = p.parse_args()
+    
+    # Load and merge config file if specified
+    if args.config:
+        try:
+            config = load_config_file(args.config)
+            logger.info(f"Loaded configuration from {args.config}")
+            args = merge_config_with_args(args, config, parser_defaults)
+        except FileNotFoundError as e:
+            logger.error(f"Configuration file error: {e}")
+            sys.exit(1)
+        except yaml.YAMLError as e:
+            logger.error(f"Invalid YAML in configuration file: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Error loading configuration file: {e}")
+            sys.exit(1)
+    
+    # Validate required fields after config merge
+    if not args.user:
+        p.error("--user is required (either via command-line or config file)")
+    if not args.password:
+        p.error("--password is required (either via command-line or config file)")
+    
+    return args
 
 

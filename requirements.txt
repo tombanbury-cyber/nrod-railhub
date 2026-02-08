@@ -3,3 +3,4 @@ flask>=2.0.0
 requests>=2.20
 pyshp>=2.1.3
 pytest>=7.0
+pyyaml>=6.0

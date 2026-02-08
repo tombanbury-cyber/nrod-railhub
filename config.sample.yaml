@@ -1,0 +1,108 @@
+# Sample YAML configuration file for nrod-railhub
+# Copy this file to config.yaml and customize it for your needs
+#
+# Command-line arguments take precedence over values in this config file,
+# allowing you to override specific settings when needed.
+
+# ============================================================================
+# Network Rail Data Feeds Authentication
+# ============================================================================
+# Register for free at: https://publicdatafeeds.networkrail.co.uk/
+user: your_email@example.com
+password: your_password_here
+
+# ============================================================================
+# STOMP Connection Settings
+# ============================================================================
+# These defaults connect to Network Rail's production feed
+host: publicdatafeeds.networkrail.co.uk
+port: 61618
+vhost: publicdatafeeds.networkrail.co.uk
+
+# ============================================================================
+# Filtering Options
+# ============================================================================
+# Filter to specific trains or TD areas to reduce output
+
+# Filter to a single train by headcode (e.g., "2C90")
+# headcode: null
+
+# Filter to a single train by CIF UID (e.g., "C43876")
+# uid: null
+
+# Filter console output to specific TD area IDs (list)
+# Example: ["EK", "WR"] for East Kent and Western Region
+# td_area: []
+
+# ============================================================================
+# Display Options
+# ============================================================================
+# Control how information is displayed
+
+# Console output width (characters)
+width: 96
+
+# Use pretty departure-board style output (true) or raw debug output (false)
+pretty: true
+
+# Run in interactive curses mode with real-time dashboard
+interactive: false
+
+# Only print output when it changes (reduces noise)
+only_changes: true
+
+# Allow repeating identical output after N seconds (default: 300)
+repeat_after: 300
+
+# ============================================================================
+# Logging and Debugging
+# ============================================================================
+# Control verbosity and debugging output
+
+# Log level: verbose (debug), info, warning, or error
+log_level: error
+
+# Enable raw STOMP message preview (also sets log-level to verbose)
+verbose: false
+
+# Extra debug: show when VSTP/TRUST/TD mention the filtered headcode/uid
+trace_headcode: false
+
+# Print status line every N seconds (default: 15)
+status_every: 15
+
+# ============================================================================
+# Reference Data Caching
+# ============================================================================
+# Paths for cached CORPUS, SMART, and SCHEDULE data
+
+# CORPUS: Station name and location reference data
+corpus_cache: ~/.cache/openraildata/CORPUSExtract.json
+corpus_refresh: false  # Force re-download even if cache exists
+
+# SMART: Signalling berth to location mapping
+smart_cache: ~/.cache/openraildata/SMART.json
+smart_refresh: false  # Force re-download even if cache exists
+
+# SCHEDULE: Daily timetable data (large file, ~300MB gzipped)
+schedule_cache: ~/.cache/openraildata/SCHEDULE_toc-full.json.gz
+schedule_refresh: false  # Force re-download even if cache exists
+schedule_type: CIF_ALL_FULL_DAILY  # SCHEDULE extract type
+schedule_day: toc-full  # SCHEDULE extract day selector
+use_schedule: true  # Enable/disable timetable enrichment
+
+# ============================================================================
+# Database and Web Dashboard
+# ============================================================================
+# Persistent storage and web interface options
+
+# SQLite database path for state/event storage
+# Set to null to disable database persistence
+db_path: ~/.cache/openraildata/railhub.db
+
+# Web dashboard port (requires db_path to be set)
+# Set to null to disable web dashboard
+web_port: 8088
+
+# Enable berth-to-signal correlation mapper
+enable_mapper: true
