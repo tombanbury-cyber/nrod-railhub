@@ -1398,6 +1398,174 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         
         return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
 
+    # Helper functions for manual purge
+    def _purge_trust_messages(conn_obj, cutoff_ms: int, batch_size: int) -> int:
+        """Purge trust_messages older than cutoff_ms in batches."""
+        total_deleted = 0
+        while True:
+            cursor = conn_obj.cursor()
+            cursor.execute(
+                "SELECT id FROM trust_messages WHERE created_at_ts < ? LIMIT ?",
+                (cutoff_ms, batch_size)
+            )
+            ids = [row[0] for row in cursor.fetchall()]
+            
+            if not ids:
+                break
+            
+            placeholders = ','.join('?' * len(ids))
+            cursor.execute(f"DELETE FROM trust_messages WHERE id IN ({placeholders})", ids)
+            conn_obj.commit()
+            deleted = cursor.rowcount
+            total_deleted += deleted
+            
+            if deleted < batch_size:
+                break
+        
+        return total_deleted
+    
+    def _purge_vstp_schedules(conn_obj, cutoff_ms: int, batch_size: int) -> int:
+        """Purge vstp_schedules (and locations) older than cutoff_ms in batches."""
+        total_deleted = 0
+        while True:
+            cursor = conn_obj.cursor()
+            cursor.execute(
+                "SELECT uid, schedule_start_date FROM vstp_schedules WHERE created_at_ts < ? LIMIT ?",
+                (cutoff_ms, batch_size)
+            )
+            keys = cursor.fetchall()
+            
+            if not keys:
+                break
+            
+            # Delete locations first
+            for uid, start_date in keys:
+                cursor.execute(
+                    "DELETE FROM vstp_schedule_locations WHERE uid=? AND schedule_start_date=?",
+                    (uid, start_date)
+                )
+            
+            # Delete schedule headers
+            for uid, start_date in keys:
+                cursor.execute(
+                    "DELETE FROM vstp_schedules WHERE uid=? AND schedule_start_date=?",
+                    (uid, start_date)
+                )
+            
+            conn_obj.commit()
+            deleted = len(keys)
+            total_deleted += deleted
+            
+            if deleted < batch_size:
+                break
+        
+        return total_deleted
+
+    @app.route("/settings", methods=["GET", "POST"])
+    def settings():
+        """Settings page for configuring retention and manual purge."""
+        body = ["<h2>Settings</h2>"]
+        
+        if request.method == "POST":
+            action = request.form.get("action", "")
+            
+            if action == "save":
+                # Save retention settings to YAML config
+                config = load_yaml_config()
+                
+                # Get form values
+                retain_trust_days = request.form.get("retain_trust_days", "").strip()
+                retain_vstp_days = request.form.get("retain_vstp_days", "").strip()
+                retention_interval = request.form.get("retention_interval", "").strip()
+                retention_batch_size = request.form.get("retention_batch_size", "").strip()
+                
+                # Update config (convert to int if not empty)
+                if retain_trust_days:
+                    config["retain-trust-days"] = int(retain_trust_days)
+                elif "retain-trust-days" in config:
+                    del config["retain-trust-days"]
+                
+                if retain_vstp_days:
+                    config["retain-vstp-days"] = int(retain_vstp_days)
+                elif "retain-vstp-days" in config:
+                    del config["retain-vstp-days"]
+                
+                if retention_interval:
+                    config["retention-interval"] = int(retention_interval)
+                
+                if retention_batch_size:
+                    config["retention-batch-size"] = int(retention_batch_size)
+                
+                # Save config
+                if save_yaml_config(config):
+                    body.append("<p style='color:green;font-weight:600'>✓ Settings saved to config file. Restart application to apply.</p>")
+                else:
+                    body.append("<p style='color:red;font-weight:600'>✗ Error saving config file.</p>")
+            
+            elif action == "purge":
+                # Manual purge now
+                now_ms = int(time.time() * 1000)
+                
+                retain_trust_days = request.form.get("retain_trust_days", "").strip()
+                retain_vstp_days = request.form.get("retain_vstp_days", "").strip()
+                batch_size = int(request.form.get("retention_batch_size", "1000") or 1000)
+                
+                deleted_trust = 0
+                deleted_vstp = 0
+                
+                try:
+                    if retain_trust_days:
+                        cutoff_ms = now_ms - (int(retain_trust_days) * 24 * 60 * 60 * 1000)
+                        deleted_trust = _purge_trust_messages(conn, cutoff_ms, batch_size)
+                    
+                    if retain_vstp_days:
+                        cutoff_ms = now_ms - (int(retain_vstp_days) * 24 * 60 * 60 * 1000)
+                        deleted_vstp = _purge_vstp_schedules(conn, cutoff_ms, batch_size)
+                    
+                    body.append(
+                        f"<p style='color:green;font-weight:600'>✓ Purge completed: "
+                        f"deleted {deleted_trust} trust_messages, {deleted_vstp} vstp_schedules</p>"
+                    )
+                except Exception as e:
+                    body.append(f"<p style='color:red;font-weight:600'>✗ Purge error: {e}</p>")
+        
+        # Load current config
+        config = load_yaml_config()
+        retain_trust_days = config.get("retain-trust-days", "")
+        retain_vstp_days = config.get("retain-vstp-days", "")
+        retention_interval = config.get("retention-interval", 3600)
+        retention_batch_size = config.get("retention-batch-size", 1000)
+        
+        # Render form
+        body.append("<h3>Retention Settings</h3>")
+        body.append("<p>Configure automatic data retention. Changes require application restart.</p>")
+        body.append("<form method='post'>")
+        body.append("<input type='hidden' name='action' value='save'>")
+        body.append("<table style='width:auto'>")
+        body.append("<tr><td><label for='retain_trust_days'>Retain TRUST messages (days):</label></td>")
+        body.append(f"<td><input type='number' name='retain_trust_days' id='retain_trust_days' value='{retain_trust_days}' placeholder='Leave empty to disable' style='width:150px'></td></tr>")
+        body.append("<tr><td><label for='retain_vstp_days'>Retain VSTP schedules (days):</label></td>")
+        body.append(f"<td><input type='number' name='retain_vstp_days' id='retain_vstp_days' value='{retain_vstp_days}' placeholder='Leave empty to disable' style='width:150px'></td></tr>")
+        body.append("<tr><td><label for='retention_interval'>Retention check interval (seconds):</label></td>")
+        body.append(f"<td><input type='number' name='retention_interval' id='retention_interval' value='{retention_interval}' style='width:150px'></td></tr>")
+        body.append("<tr><td><label for='retention_batch_size'>Retention batch size:</label></td>")
+        body.append(f"<td><input type='number' name='retention_batch_size' id='retention_batch_size' value='{retention_batch_size}' style='width:150px'></td></tr>")
+        body.append("<tr><td colspan='2' style='padding-top:12px'><button type='submit' style='padding:10px 20px;background:#0b5cff;color:white;border:0;border-radius:6px;cursor:pointer'>Save Settings</button></td></tr>")
+        body.append("</table>")
+        body.append("</form>")
+        
+        body.append("<h3>Manual Purge</h3>")
+        body.append("<p>Run purge immediately with current settings (does not require restart).</p>")
+        body.append("<form method='post'>")
+        body.append("<input type='hidden' name='action' value='purge'>")
+        body.append(f"<input type='hidden' name='retain_trust_days' value='{retain_trust_days}'>")
+        body.append(f"<input type='hidden' name='retain_vstp_days' value='{retain_vstp_days}'>")
+        body.append(f"<input type='hidden' name='retention_batch_size' value='{retention_batch_size}'>")
+        body.append("<button type='submit' style='padding:10px 20px;background:#f59e0b;color:white;border:0;border-radius:6px;cursor:pointer'>Run Purge Now</button>")
+        body.append("</form>")
+        
+        return render_page("Settings - NR RailHub", body, active="config")
+
     logger.info(f"Starting web dashboard on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 

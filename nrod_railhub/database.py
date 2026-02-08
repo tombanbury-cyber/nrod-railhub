@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from typing import Optional, Any
 
 from .models import safe_int
@@ -21,12 +22,24 @@ class RailDB:
     - Mapper integration: Automatic berth-to-signal correlation (when enabled)
     """
 
-    def __init__(self, path: str, enable_mapper: bool = True) -> None:
+    def __init__(
+        self,
+        path: str,
+        enable_mapper: bool = True,
+        retain_trust_days: Optional[int] = None,
+        retain_vstp_days: Optional[int] = None,
+        retention_check_interval_s: int = 3600,
+        retention_batch_size: int = 1000,
+    ) -> None:
         """Initialize RailDB.
         
         Args:
             path: Path to SQLite database file
             enable_mapper: If True, enables automatic berth-to-signal correlation
+            retain_trust_days: Days to retain TRUST messages (None = no cleanup)
+            retain_vstp_days: Days to retain VSTP schedules (None = no cleanup)
+            retention_check_interval_s: Seconds between retention checks (default 3600)
+            retention_batch_size: Batch size for deletion (default 1000)
         """
         self.path = path
         self._lock = threading.Lock()
@@ -37,6 +50,15 @@ class RailDB:
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._init_schema()
+        
+        # Retention settings
+        self.retain_trust_days = retain_trust_days
+        self.retain_vstp_days = retain_vstp_days
+        self.retention_check_interval_s = retention_check_interval_s
+        self.retention_batch_size = retention_batch_size
+        self._retention_thread: Optional[threading.Thread] = None
+        self._retention_stop_event = threading.Event()
+        
         self.enable_mapper = enable_mapper
         if enable_mapper:
             self.ensure_mapper_schema()
@@ -45,6 +67,10 @@ class RailDB:
             self._batch_lock = threading.Lock()
             self._batch_size = 100  # Process when we hit this many events
             self._start_batch_processor()
+        
+        # Start retention thread if enabled
+        if retain_trust_days or retain_vstp_days:
+            self._start_retention_thread()
 
     def _init_schema(self) -> None:
         with self._conn:
@@ -198,7 +224,155 @@ class RailDB:
                 """
             )
 
+    def _start_retention_thread(self) -> None:
+        """Start background thread for periodic data retention."""
+        from .logging_config import get_logger
+        
+        def retention_worker():
+            logger = get_logger("database.retention")
+            logger.info(
+                f"Retention thread started: trust={self.retain_trust_days}d, "
+                f"vstp={self.retain_vstp_days}d, interval={self.retention_check_interval_s}s"
+            )
+            
+            while not self._retention_stop_event.wait(self.retention_check_interval_s):
+                try:
+                    deleted = self.purge_old_data()
+                    if deleted['trust_messages'] > 0 or deleted['vstp_schedules'] > 0:
+                        logger.info(
+                            f"Retention purge: deleted {deleted['trust_messages']} trust_messages, "
+                            f"{deleted['vstp_schedules']} vstp_schedules"
+                        )
+                except Exception as e:
+                    logger.error(f"Retention worker error: {e}", exc_info=True)
+        
+        self._retention_thread = threading.Thread(
+            target=retention_worker,
+            daemon=True,
+            name="retention-worker"
+        )
+        self._retention_thread.start()
+    
+    def stop_retention(self) -> None:
+        """Stop the retention background thread."""
+        if self._retention_thread and self._retention_thread.is_alive():
+            self._retention_stop_event.set()
+            self._retention_thread.join(timeout=5.0)
+    
+    def purge_old_data(self) -> dict:
+        """
+        Purge old trust_messages and vstp_schedules based on retention settings.
+        
+        Performs batched deletes to avoid long write locks.
+        
+        Returns:
+            Dict with counts: {'trust_messages': int, 'vstp_schedules': int}
+        """
+        result = {'trust_messages': 0, 'vstp_schedules': 0}
+        now_ms = int(time.time() * 1000)
+        
+        # Purge trust_messages
+        if self.retain_trust_days and self.retain_trust_days > 0:
+            cutoff_ms = now_ms - (self.retain_trust_days * 24 * 60 * 60 * 1000)
+            result['trust_messages'] = self._purge_trust_messages(cutoff_ms, self.retention_batch_size)
+        
+        # Purge vstp_schedules
+        if self.retain_vstp_days and self.retain_vstp_days > 0:
+            cutoff_ms = now_ms - (self.retain_vstp_days * 24 * 60 * 60 * 1000)
+            result['vstp_schedules'] = self._purge_vstp_schedules(cutoff_ms, self.retention_batch_size)
+        
+        return result
+    
+    def _purge_trust_messages(self, cutoff_ms: int, batch_size: int) -> int:
+        """
+        Purge trust_messages older than cutoff_ms in batches.
+        
+        Args:
+            cutoff_ms: Delete messages older than this timestamp (epoch ms)
+            batch_size: Number of rows to delete per transaction
+            
+        Returns:
+            Total number of rows deleted
+        """
+        total_deleted = 0
+        
+        while True:
+            with self._lock, self._conn:
+                cursor = self._conn.cursor()
+                # Select IDs to delete
+                cursor.execute(
+                    "SELECT id FROM trust_messages WHERE created_at_ts < ? LIMIT ?",
+                    (cutoff_ms, batch_size)
+                )
+                ids = [row[0] for row in cursor.fetchall()]
+                
+                if not ids:
+                    break
+                
+                # Delete batch
+                placeholders = ','.join('?' * len(ids))
+                cursor.execute(f"DELETE FROM trust_messages WHERE id IN ({placeholders})", ids)
+                deleted = cursor.rowcount
+                total_deleted += deleted
+                
+                # Small sleep to avoid starving other operations
+                if deleted >= batch_size:
+                    time.sleep(0.1)
+        
+        return total_deleted
+    
+    def _purge_vstp_schedules(self, cutoff_ms: int, batch_size: int) -> int:
+        """
+        Purge vstp_schedules (and locations) older than cutoff_ms in batches.
+        
+        Args:
+            cutoff_ms: Delete schedules older than this timestamp (epoch ms)
+            batch_size: Number of schedule headers to delete per transaction
+            
+        Returns:
+            Total number of schedule headers deleted
+        """
+        total_deleted = 0
+        
+        while True:
+            with self._lock, self._conn:
+                cursor = self._conn.cursor()
+                # Select schedule keys to delete
+                cursor.execute(
+                    "SELECT uid, schedule_start_date FROM vstp_schedules WHERE created_at_ts < ? LIMIT ?",
+                    (cutoff_ms, batch_size)
+                )
+                keys = cursor.fetchall()
+                
+                if not keys:
+                    break
+                
+                # Delete locations first (foreign key semantics)
+                for uid, start_date in keys:
+                    cursor.execute(
+                        "DELETE FROM vstp_schedule_locations WHERE uid=? AND schedule_start_date=?",
+                        (uid, start_date)
+                    )
+                
+                # Delete schedule headers
+                for uid, start_date in keys:
+                    cursor.execute(
+                        "DELETE FROM vstp_schedules WHERE uid=? AND schedule_start_date=?",
+                        (uid, start_date)
+                    )
+                
+                deleted = len(keys)
+                total_deleted += deleted
+                
+                # Small sleep to avoid starving other operations
+                if deleted >= batch_size:
+                    time.sleep(0.1)
+        
+        return total_deleted
+
     def close(self) -> None:
+        """Close database connection and stop background threads."""
+        self.stop_retention()
         try:
             self._conn.close()
         except Exception:

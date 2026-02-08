@@ -184,7 +184,14 @@ def connect_and_run(args: argparse.Namespace) -> None:
         vhost=args.vhost,
     )
 
-    db = RailDB(db_path, enable_mapper=args.enable_mapper) if db_path else None
+    db = RailDB(
+        db_path,
+        enable_mapper=args.enable_mapper,
+        retain_trust_days=getattr(args, 'retain_trust_days', None),
+        retain_vstp_days=getattr(args, 'retain_vstp_days', None),
+        retention_check_interval_s=getattr(args, 'retention_interval', 3600),
+        retention_batch_size=getattr(args, 'retention_batch_size', 1000),
+    ) if db_path else None
     
     # Create listener with optional output callback for interactive mode
     output_callback = None
@@ -370,6 +377,16 @@ def parse_args() -> argparse.Namespace:
                    help="If set and --db-path is provided, start tiny web dashboard on this port")
     p.add_argument("--disable-mapper", dest="enable_mapper", action="store_false", default=True,
                    help="Disable berth-to-signal correlation mapper (enabled by default)")
+    
+    # Retention settings
+    p.add_argument("--retain-trust-days", type=int, default=None,
+                   help="Days to retain TRUST messages (None = no cleanup)")
+    p.add_argument("--retain-vstp-days", type=int, default=None,
+                   help="Days to retain VSTP schedules (None = no cleanup)")
+    p.add_argument("--retention-interval", type=int, default=3600,
+                   help="Seconds between retention checks (default: 3600)")
+    p.add_argument("--retention-batch-size", type=int, default=1000,
+                   help="Batch size for deletion (default: 1000)")
     
     # Get default values before parsing
     parser_defaults = {}
