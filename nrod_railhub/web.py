@@ -1575,6 +1575,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 retain_vstp_days = request.form.get("retain_vstp_days", "").strip()
                 retention_interval = request.form.get("retention_interval", "").strip()
                 retention_batch_size = request.form.get("retention_batch_size", "").strip()
+                save_raw_json = request.form.get("save_raw_json") == "on"
                 
                 # Update config (convert to int if not empty)
                 if retain_trust_days:
@@ -1592,6 +1593,9 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 
                 if retention_batch_size:
                     config["retention-batch-size"] = int(retention_batch_size)
+                
+                # Update save-raw-json setting
+                config["save-raw-json"] = save_raw_json
                 
                 # Save config
                 if save_yaml_config(config):
@@ -1632,6 +1636,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         retain_vstp_days = config.get("retain-vstp-days", "")
         retention_interval = config.get("retention-interval", 3600)
         retention_batch_size = config.get("retention-batch-size", 1000)
+        save_raw_json = config.get("save-raw-json", True)
         
         # Render form
         body.append("<h3>Retention Settings</h3>")
@@ -1647,6 +1652,8 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         body.append(f"<td><input type='number' name='retention_interval' id='retention_interval' value='{retention_interval}' style='width:150px'></td></tr>")
         body.append("<tr><td><label for='retention_batch_size'>Retention batch size:</label></td>")
         body.append(f"<td><input type='number' name='retention_batch_size' id='retention_batch_size' value='{retention_batch_size}' style='width:150px'></td></tr>")
+        body.append("<tr><td><label for='save_raw_json'>Save raw JSON messages:</label></td>")
+        body.append(f"<td><input type='checkbox' name='save_raw_json' id='save_raw_json' {'checked' if save_raw_json else ''}> <span style='color:#666;font-size:0.9em'>(Disabling reduces database size but loses original message data)</span></td></tr>")
         body.append("<tr><td colspan='2' style='padding-top:12px'><button type='submit' style='padding:10px 20px;background:#0b5cff;color:white;border:0;border-radius:6px;cursor:pointer'>Save Settings</button></td></tr>")
         body.append("</table>")
         body.append("</form>")

@@ -196,6 +196,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         retain_vstp_days=getattr(args, 'retain_vstp_days', None),
         retention_check_interval_s=getattr(args, 'retention_interval', 3600),
         retention_batch_size=getattr(args, 'retention_batch_size', 1000),
+        save_raw_json=getattr(args, 'save_raw_json', True),
     ) if db_path else None
     
     # Populate TOC reference data in database if available
@@ -438,6 +439,10 @@ def parse_args() -> argparse.Namespace:
                    help="Seconds between retention checks (default: 3600)")
     p.add_argument("--retention-batch-size", type=int, default=1000,
                    help="Batch size for deletion (default: 1000)")
+    
+    # Raw JSON storage setting
+    p.add_argument("--no-save-raw-json", dest="save_raw_json", action="store_false", default=True,
+                   help="Disable saving raw JSON messages to database (enabled by default)")
     
     # Get default values before parsing
     parser_defaults = {}

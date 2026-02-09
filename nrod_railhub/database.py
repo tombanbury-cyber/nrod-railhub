@@ -30,6 +30,7 @@ class RailDB:
         retain_vstp_days: Optional[int] = None,
         retention_check_interval_s: int = 3600,
         retention_batch_size: int = 1000,
+        save_raw_json: bool = True,
     ) -> None:
         """Initialize RailDB.
         
@@ -40,6 +41,7 @@ class RailDB:
             retain_vstp_days: Days to retain VSTP schedules (None = no cleanup)
             retention_check_interval_s: Seconds between retention checks (default 3600)
             retention_batch_size: Batch size for deletion (default 1000)
+            save_raw_json: If True, saves raw JSON messages to database (default True)
         """
         self.path = path
         self._lock = threading.Lock()
@@ -58,6 +60,9 @@ class RailDB:
         self.retention_batch_size = retention_batch_size
         self._retention_thread: Optional[threading.Thread] = None
         self._retention_stop_event = threading.Event()
+        
+        # Raw JSON storage setting
+        self.save_raw_json = save_raw_json
         
         self.enable_mapper = enable_mapper
         if enable_mapper:
@@ -169,7 +174,7 @@ class RailDB:
                     delay_monitoring_point INTEGER,
                     reporting_stanox TEXT,
                     auto_expected INTEGER,
-                    raw_json TEXT NOT NULL,
+                    raw_json TEXT,
                     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                     created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
                     UNIQUE(train_id, actual_timestamp_ms)
@@ -193,7 +198,7 @@ class RailDB:
                     CIF_train_category TEXT,
                     CIF_power_type TEXT,
                     sender_organisation TEXT,
-                    raw_json TEXT NOT NULL,
+                    raw_json TEXT,
                     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                     created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
                     PRIMARY KEY (uid, schedule_start_date)
@@ -504,6 +509,7 @@ class RailDB:
             )
 
     def upsert_trust(self, train_id: str, headcode: str, uid: str, toc_id: str, last_event_time: str, last_location: str, last_delay_min: int | None, raw: dict) -> None:
+        raw_json_value = json.dumps(raw, separators=(',',':')) if self.save_raw_json else None
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -518,12 +524,13 @@ class RailDB:
                     last_delay_min=excluded.last_delay_min,
                     raw_json=excluded.raw_json
                 """,
-                (train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, json.dumps(raw, separators=(',',':'))),
+                (train_id, headcode, uid, toc_id, last_event_time, last_location, last_delay_min, raw_json_value),
             )
 
     def upsert_vstp(self, uid: str, headcode: str, start_date: str, end_date: str, raw: dict) -> None:
         if not uid or not start_date:
             return
+        raw_json_value = json.dumps(raw, separators=(',',':')) if self.save_raw_json else None
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -534,7 +541,7 @@ class RailDB:
                     end_date=excluded.end_date,
                     raw_json=excluded.raw_json
                 """,
-                (uid, headcode, start_date, end_date, json.dumps(raw, separators=(',',':'))),
+                (uid, headcode, start_date, end_date, raw_json_value),
             )
 
     def insert_trust_message(self, body: dict) -> None:
@@ -591,7 +598,7 @@ class RailDB:
         reporting_stanox = (body.get("reporting_stanox") or body.get("reportingStanox") or "").strip() or None
         auto_expected = _to_bool_int(body.get("auto_expected") or body.get("autoExpected"))
 
-        raw_compact = json.dumps(body, separators=(',',':'))
+        raw_compact = json.dumps(body, separators=(',',':')) if self.save_raw_json else None
 
         with self._lock, self._conn:
             try:
@@ -690,7 +697,7 @@ class RailDB:
             CIF_train_category = (first_seg.get("CIF_train_category") or "").strip() or None
             CIF_power_type = (first_seg.get("CIF_power_type") or "").strip() or None
 
-        raw_compact = json.dumps(vstp_msg, separators=(',',':'))
+        raw_compact = json.dumps(vstp_msg, separators=(',',':')) if self.save_raw_json else None
 
         # Insert header + locations inside a lock/transaction
         with self._lock, self._conn:
