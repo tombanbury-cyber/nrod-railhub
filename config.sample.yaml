@@ -106,3 +106,7 @@ web_port: 8088
 
 # Enable berth-to-signal correlation mapper
 enable_mapper: true
+
+# Save raw JSON messages to database (enabled by default)
+# Disabling this reduces database size but loses original message data
+save_raw_json: true
