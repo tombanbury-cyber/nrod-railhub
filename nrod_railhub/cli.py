@@ -235,13 +235,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
         # Attach to werkzeug (request logs) and flask loggers
         werkzeug_logger = logging.getLogger("werkzeug")
-        werkzeug_logger.addHandler(http_queue_handler)
+        werkzeug_logger.addHandler(queue_handler)
         werkzeug_logger.setLevel(logging.INFO)
         # Prevent double logging if root handlers are present
         werkzeug_logger.propagate = False
 
         flask_logger = logging.getLogger("flask.app")
-        flask_logger.addHandler(http_queue_handler)
+        flask_logger.addHandler(queue_handler)
         flask_logger.setLevel(logging.INFO)
         flask_logger.propagate = False
 
