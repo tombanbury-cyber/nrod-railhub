@@ -12,6 +12,8 @@ from __future__ import annotations
 import time
 import json
 import yaml
+import logging
+import queue
 from datetime import datetime
 
 import pathlib
@@ -24,7 +26,7 @@ from .logging_config import get_logger
 
 logger = get_logger("web")
 
-def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = None) -> None:
+def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = None, log_queue: Optional["queue.Queue[str]"] = None) -> None:
     app = Flask(__name__)
     db_path = str(pathlib.Path(db_path).expanduser())
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
@@ -1661,6 +1663,31 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         
         return render_page("Settings - NR RailHub", body, active="config")
 
-    logger.info(f"Starting web dashboard on http://0.0.0.0:{port}")
+    # Configure werkzeug logging to suppress console output in interactive mode
+    if log_queue is not None:
+        # Suppress Flask's default logging to console
+        import logging
+        from .curses_view import QueueHandler
+        
+        # Disable werkzeug's default console logging
+        werkzeug_logger = logging.getLogger('werkzeug')
+        werkzeug_logger.handlers.clear()  # Remove default handlers
+        werkzeug_logger.propagate = False
+        
+        # Add queue handler for HTTP request logging
+        queue_handler = QueueHandler(log_queue)
+        queue_handler.setLevel(logging.INFO)
+        queue_handler.setFormatter(logging.Formatter('[HTTP] %(message)s'))
+        werkzeug_logger.addHandler(queue_handler)
+        werkzeug_logger.setLevel(logging.INFO)
+        
+        # Also suppress Flask's app logger
+        flask_app_logger = logging.getLogger('flask.app')
+        flask_app_logger.handlers.clear()
+        flask_app_logger.propagate = False
+        
+        logger.info(f"Starting web dashboard on http://0.0.0.0:{port} (log_queue mode)")
+    else:
+        logger.info(f"Starting web dashboard on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
