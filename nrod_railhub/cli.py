@@ -231,6 +231,21 @@ def connect_and_run(args: argparse.Namespace) -> None:
         queue_handler.setLevel(logging.WARNING)  # Capture warnings and errors
         queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
         logging.getLogger("nrod_railhub").addHandler(queue_handler)
+
+
+        # Attach to werkzeug (request logs) and flask loggers
+        werkzeug_logger = logging.getLogger("werkzeug")
+        werkzeug_logger.addHandler(http_queue_handler)
+        werkzeug_logger.setLevel(logging.INFO)
+        # Prevent double logging if root handlers are present
+        werkzeug_logger.propagate = False
+
+        flask_logger = logging.getLogger("flask.app")
+        flask_logger.addHandler(http_queue_handler)
+        flask_logger.setLevel(logging.INFO)
+        flask_logger.propagate = False
+
+    
     
     listener = Listener(hv, args, db=db, output_callback=output_callback, 
                        trust_callback=trust_callback, db_callback=db_callback)
