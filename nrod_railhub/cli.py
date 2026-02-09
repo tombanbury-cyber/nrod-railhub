@@ -226,24 +226,11 @@ def connect_and_run(args: argparse.Namespace) -> None:
         trust_callback = lambda text: trust_queue.put(text) if not trust_queue.full() else None
         db_callback = lambda text: db_queue.put(text) if not db_queue.full() else None
         
-        # Add queue handler for error logs
+        # Add queue handler for error logs (warnings and errors from nrod_railhub only)
         queue_handler = QueueHandler(error_queue)
         queue_handler.setLevel(logging.WARNING)  # Capture warnings and errors
         queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
         logging.getLogger("nrod_railhub").addHandler(queue_handler)
-
-
-        # Attach to werkzeug (request logs) and flask loggers
-        werkzeug_logger = logging.getLogger("werkzeug")
-        werkzeug_logger.addHandler(queue_handler)
-        werkzeug_logger.setLevel(logging.INFO)
-        # Prevent double logging if root handlers are present
-        werkzeug_logger.propagate = False
-
-        flask_logger = logging.getLogger("flask.app")
-        flask_logger.addHandler(queue_handler)
-        flask_logger.setLevel(logging.INFO)
-        flask_logger.propagate = False
 
     
     
@@ -253,26 +240,19 @@ def connect_and_run(args: argparse.Namespace) -> None:
         # Pass config path to web dashboard for configuration editing
         config_file_path = args.config if args.config else None
         
-        # In interactive mode, capture web requests
+        # In interactive mode, pass http_queue to capture web requests
         if args.interactive:
-            # We need to monkey-patch Flask's logger to capture HTTP requests
-            def start_web_with_logging():
-                from .web import start_web_dashboard
-                # Add a simple request logger
-                import flask
-                original_before_request = None
-                
-                def log_request():
-                    if not http_queue.full():
-                        http_queue.put(f"HTTP {flask.request.method} {flask.request.path}")
-                
-                start_web_dashboard(db_path, args.web_port, config_file_path)
-                # Note: This is a simplified approach. A full implementation would require
-                # modifying the web module to accept a request callback
-            
-            t = threading.Thread(target=start_web_with_logging, daemon=True)
+            t = threading.Thread(
+                target=start_web_dashboard, 
+                args=(db_path, args.web_port, config_file_path, http_queue),  # type: ignore[name-defined]
+                daemon=True
+            )
         else:
-            t = threading.Thread(target=start_web_dashboard, args=(db_path, args.web_port, config_file_path), daemon=True)
+            t = threading.Thread(
+                target=start_web_dashboard, 
+                args=(db_path, args.web_port, config_file_path), 
+                daemon=True
+            )
         t.start()
         logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
     conn.set_listener("", listener)
