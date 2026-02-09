@@ -259,7 +259,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
     _init_colors()
     
     # Periodic redraw interval (seconds) to prevent screen corruption
-    REDRAW_INTERVAL = 5.0
+    REDRAW_INTERVAL = 60.0
     
     while not stop_event.is_set():
         try:
