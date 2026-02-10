@@ -160,7 +160,9 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         # area pills
         body.append("<div>Filter: " + " ".join([f"<a class='pill' href='/?area={a}'>{a}</a>" for a in areas]) + " <a class='pill' href='/'>ALL</a></div>")
         body.append("<h3>Latest TD state" + (f" (area {area})" if area else "") + "</h3>")
-        body.append("<table><tr><th>Area</th><th>Headcode</th><th>Time</th><th>From</th><th>To</th><th>Location</th><th>Plat</th><th>Sched</th></tr>")
+        # Add search filter box
+        body.append("<div style='margin:10px 0'><input type='text' id='tableFilter' placeholder='Filter by headcode, location, berth...' style='padding:8px;width:300px;border:1px solid #ccc;border-radius:4px'/> <span id='filterCount' style='margin-left:10px;color:#6c757d'></span></div>")
+        body.append("<table id='tdStateTable'><thead><tr><th onclick='sortTable(0)' style='cursor:pointer'>Area <span id='sort0'></span></th><th onclick='sortTable(1)' style='cursor:pointer'>Headcode <span id='sort1'></span></th><th onclick='sortTable(2)' style='cursor:pointer'>Time <span id='sort2'></span></th><th onclick='sortTable(3)' style='cursor:pointer'>From <span id='sort3'></span></th><th onclick='sortTable(4)' style='cursor:pointer'>To <span id='sort4'></span></th><th onclick='sortTable(5)' style='cursor:pointer'>Location <span id='sort5'></span></th><th onclick='sortTable(6)' style='cursor:pointer'>Plat <span id='sort6'></span></th><th onclick='sortTable(7)' style='cursor:pointer'>Sched <span id='sort7'></span></th></tr></thead><tbody>")
         for r in rows:
             # Build schedule string similar to original
             sched = ""
@@ -185,7 +187,86 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 f"<td>{r['platform'] if 'platform' in r.keys() and r['platform'] else ''}</td>",
                 f"<td>{sched}</td>",
             ]) + "</tr>")
-        body.append("</table>")
+        body.append("</tbody></table>")
+        
+        # Add JavaScript for sorting and filtering
+        body.append("""
+<script>
+// Sorting functionality
+let sortDirection = {};
+function sortTable(columnIndex) {
+    const table = document.getElementById('tdStateTable');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    sortDirection[columnIndex] = !sortDirection[columnIndex];
+    const ascending = sortDirection[columnIndex];
+    
+    // Clear all sort indicators
+    for (let i = 0; i < 8; i++) {
+        const sortSpan = document.getElementById('sort' + i);
+        if (sortSpan) sortSpan.textContent = '';
+    }
+    
+    // Set current sort indicator
+    const currentSortSpan = document.getElementById('sort' + columnIndex);
+    if (currentSortSpan) currentSortSpan.textContent = ascending ? ' ▲' : ' ▼';
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        let aVal = a.cells[columnIndex].textContent.trim();
+        let bVal = b.cells[columnIndex].textContent.trim();
+        
+        // Handle timestamps (ISO format YYYY-MM-DD...)
+        if (columnIndex === 2 && aVal && bVal) {
+            return ascending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        }
+        
+        // Handle empty values
+        if (!aVal) return ascending ? 1 : -1;
+        if (!bVal) return ascending ? -1 : 1;
+        
+        // Default: case-insensitive string comparison
+        const comparison = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+        return ascending ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+}
+
+// Filtering functionality
+const filterInput = document.getElementById('tableFilter');
+const filterCount = document.getElementById('filterCount');
+const table = document.getElementById('tdStateTable');
+const tbody = table.querySelector('tbody');
+const allRows = Array.from(tbody.querySelectorAll('tr'));
+
+function updateFilter() {
+    const filterText = filterInput.value.toLowerCase();
+    let visibleCount = 0;
+    
+    allRows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        if (text.includes(filterText)) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    if (filterText) {
+        filterCount.textContent = `Showing ${visibleCount} of ${allRows.length} rows`;
+    } else {
+        filterCount.textContent = '';
+    }
+}
+
+filterInput.addEventListener('input', updateFilter);
+</script>
+""")
         # auto-refresh if ?refresh=N provided
         refresh_sec = 0
         try:
@@ -205,7 +286,42 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         body.append(f"<p><a href='/'>Back</a></p>")
         if st:
             r = st[0]
-            body.append("<pre>" + str(dict(r)) + "</pre>")
+            body.append("<h3>Train State</h3>")
+            body.append("<table>")
+            body.append("<tr><th>Field</th><th>Value</th></tr>")
+            body.append(f"<tr><td><b>TD Area</b></td><td>{r['td_area']}</td></tr>")
+            body.append(f"<tr><td><b>Headcode</b></td><td>{r['headcode']}</td></tr>")
+            
+            # Format timestamp
+            last_time = r['last_time_iso'] if r['last_time_iso'] else 'N/A'
+            body.append(f"<tr><td><b>Last Time</b></td><td class='mono'>{last_time}</td></tr>")
+            
+            body.append(f"<tr><td><b>From Berth</b></td><td>{r['from_berth'] if r['from_berth'] else 'N/A'}</td></tr>")
+            body.append(f"<tr><td><b>To Berth</b></td><td>{r['to_berth'] if r['to_berth'] else 'N/A'}</td></tr>")
+            
+            # Location with STANOX
+            loc = r['location_name'] if 'location_name' in r.keys() and r['location_name'] else ''
+            stanox = r['stanox'] if 'stanox' in r.keys() and r['stanox'] else ''
+            location_display = f"{loc} ({stanox})" if stanox and loc else (loc if loc else stanox if stanox else 'N/A')
+            body.append(f"<tr><td><b>Location</b></td><td>{location_display}</td></tr>")
+            
+            body.append(f"<tr><td><b>Platform</b></td><td>{r['platform'] if 'platform' in r.keys() and r['platform'] else 'N/A'}</td></tr>")
+            
+            # Schedule information
+            sched_dep = r['sched_dep'] if 'sched_dep' in r.keys() and r['sched_dep'] else ''
+            sched_arr = r['sched_arr'] if 'sched_arr' in r.keys() and r['sched_arr'] else ''
+            origin = r['origin_name'] if 'origin_name' in r.keys() and r['origin_name'] else ''
+            dest = r['dest_name'] if 'dest_name' in r.keys() and r['dest_name'] else ''
+            
+            if sched_dep or sched_arr:
+                sched_times = f"{sched_dep if sched_dep else 'N/A'} → {sched_arr if sched_arr else 'N/A'}"
+                body.append(f"<tr><td><b>Schedule Times</b></td><td class='mono'>{sched_times}</td></tr>")
+            
+            if origin or dest:
+                sched_route = f"{origin if origin else 'N/A'} → {dest if dest else 'N/A'}"
+                body.append(f"<tr><td><b>Schedule Route</b></td><td>{sched_route}</td></tr>")
+            
+            body.append("</table>")
         if ev:
             body.append("<h3>Recent berth events</h3><table><tr><th>Time</th><th>Type</th><th>From</th><th>To</th></tr>")
             for r in ev:
