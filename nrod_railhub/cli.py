@@ -219,12 +219,14 @@ def connect_and_run(args: argparse.Namespace) -> None:
         
         output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
         trust_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        vstp_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
         error_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
         db_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
         http_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
         
         output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
         trust_callback = lambda text: trust_queue.put(text) if not trust_queue.full() else None
+        vstp_callback = lambda text: vstp_queue.put(text) if not vstp_queue.full() else None
         db_callback = lambda text: db_queue.put(text) if not db_queue.full() else None
         
         # Add queue handler for error logs (warnings and errors from nrod_railhub only)
@@ -236,7 +238,8 @@ def connect_and_run(args: argparse.Namespace) -> None:
     
     
     listener = Listener(hv, args, db=db, output_callback=output_callback, 
-                       trust_callback=trust_callback, db_callback=db_callback)
+                       trust_callback=trust_callback, vstp_callback=vstp_callback, 
+                       db_callback=db_callback)
     if args.web_port and db_path:
         # Pass config path to web dashboard for configuration editing
         config_file_path = args.config if args.config else None
@@ -295,6 +298,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                 listener=listener,
                 output_queue=output_queue,  # type: ignore[name-defined]
                 trust_queue=trust_queue,  # type: ignore[name-defined]
+                vstp_queue=vstp_queue,  # type: ignore[name-defined]
                 error_queue=error_queue,  # type: ignore[name-defined]
                 db_queue=db_queue,  # type: ignore[name-defined]
                 http_queue=http_queue,  # type: ignore[name-defined]

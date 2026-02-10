@@ -65,6 +65,9 @@ class InteractiveDashboardState:
     # Ring buffer for TRUST messages
     trust_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
     
+    # Ring buffer for VSTP messages
+    vstp_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    
     # Ring buffer for error log messages
     error_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
     
@@ -78,7 +81,7 @@ class InteractiveDashboardState:
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     
     # Page navigation
-    current_page: int = 0  # 0=TD, 1=TRUST, 2=Error, 3=DB, 4=HTTP
+    current_page: int = 0  # 0=TD, 1=TRUST, 2=VSTP, 3=Error, 4=DB, 5=HTTP
     
     paused: bool = False
     
@@ -98,6 +101,10 @@ class InteractiveDashboardState:
     def add_trust_line(self, line: str) -> None:
         """Add a line to the TRUST messages output."""
         self.trust_lines.append(line)
+    
+    def add_vstp_line(self, line: str) -> None:
+        """Add a line to the VSTP messages output."""
+        self.vstp_lines.append(line)
     
     def add_error_line(self, line: str) -> None:
         """Add a line to the error log."""
@@ -210,7 +217,8 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
     # Page titles and content
     page_names = [
         "TD Messages",
-        "TRUST Messages", 
+        "TRUST Messages",
+        "VSTP Messages",
         "Error Log",
         "Database Inserts",
         "HTTP Requests"
@@ -218,6 +226,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
     page_lines = [
         state.console_lines,
         state.trust_lines,
+        state.vstp_lines,
         state.error_lines,
         state.db_lines,
         state.http_lines
@@ -226,7 +235,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
     current_page_name = page_names[state.current_page]
     current_lines = page_lines[state.current_page]
     
-    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/5) ", _cattr(CP_TITLE, curses.A_BOLD))
+    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/6) ", _cattr(CP_TITLE, curses.A_BOLD))
     
     # Show recent lines
     max_lines = max(0, body_h - 2)
@@ -244,7 +253,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
 def _render_footer(stdscr, h: int, w: int) -> None:
     """Render the footer with key bindings."""
     footer_y = h - 1
-    help_text = "q=quit  p=pause  c=clear  Tab/1-5=pages"
+    help_text = "q=quit  p=pause  c=clear  Tab/1-6=pages"
     try:
         stdscr.addnstr(footer_y, 2, help_text, w - 4, _cattr(CP_DIM))
     except curses.error:
@@ -279,6 +288,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                 page_buffers = [
                     state.console_lines,
                     state.trust_lines,
+                    state.vstp_lines,
                     state.error_lines,
                     state.db_lines,
                     state.http_lines
@@ -286,9 +296,9 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                 if 0 <= state.current_page < len(page_buffers):
                     page_buffers[state.current_page].clear()
             elif ch == ord("\t") or ch == 9:  # Tab key
-                state.current_page = (state.current_page + 1) % 5
-            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
-                # Number keys 1-5 for direct page access
+                state.current_page = (state.current_page + 1) % 6
+            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
+                # Number keys 1-6 for direct page access
                 state.current_page = ch - ord("1")
         
         # Update state from listener
@@ -303,6 +313,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
             queue_handlers = [
                 (queues.get('td'), state.add_console_line),
                 (queues.get('trust'), state.add_trust_line),
+                (queues.get('vstp'), state.add_vstp_line),
                 (queues.get('error'), state.add_error_line),
                 (queues.get('db'), state.add_db_line),
                 (queues.get('http'), state.add_http_line),
@@ -347,6 +358,7 @@ def run_interactive_dashboard(
     listener: Listener,
     output_queue: "queue.Queue[str]",
     trust_queue: Optional["queue.Queue[str]"] = None,
+    vstp_queue: Optional["queue.Queue[str]"] = None,
     error_queue: Optional["queue.Queue[str]"] = None,
     db_queue: Optional["queue.Queue[str]"] = None,
     http_queue: Optional["queue.Queue[str]"] = None,
@@ -361,6 +373,7 @@ def run_interactive_dashboard(
         listener: The STOMP listener instance
         output_queue: Queue containing console output lines from the listener (TD messages)
         trust_queue: Optional queue for TRUST messages
+        vstp_queue: Optional queue for VSTP messages
         error_queue: Optional queue for error log messages
         db_queue: Optional queue for database insert messages
         http_queue: Optional queue for HTTP request messages
@@ -380,6 +393,7 @@ def run_interactive_dashboard(
     queues = {
         'td': output_queue,
         'trust': trust_queue,
+        'vstp': vstp_queue,
         'error': error_queue,
         'db': db_queue,
         'http': http_queue,

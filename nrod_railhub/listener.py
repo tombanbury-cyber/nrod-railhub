@@ -24,12 +24,14 @@ class Listener(stomp.ConnectionListener):
     def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None, 
                  output_callback: Optional[callable] = None,
                  trust_callback: Optional[callable] = None,
+                 vstp_callback: Optional[callable] = None,
                  db_callback: Optional[callable] = None) -> None:
         self.hv = hv
         self.args = args
         self.db = db
         self.output_callback = output_callback  # Optional callback for custom output handling (TD messages)
         self.trust_callback = trust_callback  # Optional callback for TRUST messages
+        self.vstp_callback = vstp_callback  # Optional callback for VSTP messages
         self.db_callback = db_callback  # Optional callback for database operations
 
         self.connected_at: Optional[str] = None
@@ -197,6 +199,19 @@ class Listener(stomp.ConnectionListener):
                         logger.debug(f"TRACE VSTP headcode={vs.signalling_id} uid={vs.uid} start={vs.start_date}")
                     if self.args.uid and vs.uid == self.args.uid:
                         logger.debug(f"TRACE VSTP uid={vs.uid} headcode={vs.signalling_id}")
+
+                # Send formatted VSTP message to callback if available
+                if self.vstp_callback:
+                    # Format origin and destination from locations
+                    origin = ""
+                    dest = ""
+                    if vs.locations:
+                        origin_tiploc = vs.locations[0][0] if vs.locations else ""
+                        dest_tiploc = vs.locations[-1][0] if vs.locations else ""
+                        origin = self.hv.resolver.name_for_tiploc(origin_tiploc) or origin_tiploc
+                        dest = self.hv.resolver.name_for_tiploc(dest_tiploc) or dest_tiploc
+                    vstp_msg = f"VSTP uid={vs.uid} hc={vs.signalling_id or '?'} {origin}→{dest} ({vs.start_date})"
+                    self.vstp_callback(vstp_msg)
 
                 if self._matches(vs.signalling_id, vs.uid):
                     if self._print_train_update(vs.signalling_id):
