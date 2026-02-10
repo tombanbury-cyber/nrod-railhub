@@ -582,11 +582,13 @@ class HumanView:
         sched = root.get("schedule")
         if not isinstance(sched, dict):
             return None
+            
+        #logger.error(f"sched: {sched}")
 
         # Extract fields from root level of VSTPCIFMsgV1, not from schedule
-        uid = (root.get("CIF_train_uid") or "").strip()
-        start_date = (root.get("schedule_start_date") or "").strip()
-        end_date = (root.get("schedule_end_date") or "").strip()
+        uid = (sched.get("CIF_train_uid") or "").strip()
+        start_date = (sched.get("schedule_start_date") or "").strip()
+        end_date = (sched.get("schedule_end_date") or "").strip()
         segments = sched.get("schedule_segment") or []
         if not isinstance(segments, list) or not segments:
             return None
