@@ -122,7 +122,9 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             ".icon-link{font-size:24px;padding:8px 12px}"
             "table{border-collapse:collapse;width:100%;background:white;margin-top:8px}"
             "th,td{border-bottom:1px solid #eee;padding:8px 10px;font-size:14px;text-align:left}"
-            "th{background:#f7f9fc;font-weight:600}"
+            "th{background:#f7f9fc;font-weight:600;cursor:pointer;user-select:none}"
+            "th a{display:block;width:100%;height:100%}"
+            "th:hover{background:#e8f0fe}"
             ".pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#eef3ff;margin-right:6px;font-size:13px}"
             ".dim{color:#6c757d;font-size:12px}"
             ".mono{font-family:monospace}"
@@ -1252,6 +1254,12 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         min_score = request.args.get("min_score", "").strip()
         min_obs = request.args.get("min_obs", "").strip()
         
+        # Get sort parameters
+        sort_by = request.args.get("sort", "score").strip()
+        sort_order = request.args.get("order", "desc").strip().lower()
+        if sort_order not in ["asc", "desc"]:
+            sort_order = "desc"
+        
         # Build SQL query with filters
         # Check if corpus_tiploc table exists for location enrichment
         corpus_exists = False
@@ -1308,11 +1316,21 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             sql += f" AND {table_alias}address = ?"
             params.append(address_filter)
         if from_berth_filter:
-            sql += f" AND {table_alias}from_berth = ?"
-            params.append(from_berth_filter)
+            # Support wildcard filtering with % or *
+            if '%' in from_berth_filter or '*' in from_berth_filter:
+                sql += f" AND {table_alias}from_berth LIKE ?"
+                params.append(from_berth_filter.replace('*', '%'))
+            else:
+                sql += f" AND {table_alias}from_berth = ?"
+                params.append(from_berth_filter)
         if to_berth_filter:
-            sql += f" AND {table_alias}to_berth = ?"
-            params.append(to_berth_filter)
+            # Support wildcard filtering with % or *
+            if '%' in to_berth_filter or '*' in to_berth_filter:
+                sql += f" AND {table_alias}to_berth LIKE ?"
+                params.append(to_berth_filter.replace('*', '%'))
+            else:
+                sql += f" AND {table_alias}to_berth = ?"
+                params.append(to_berth_filter)
         if min_score:
             try:
                 sql += f" AND {table_alias}score >= ?"
@@ -1326,7 +1344,25 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             except ValueError:
                 pass
         
-        sql += f" ORDER BY {table_alias}score DESC LIMIT 500"
+        # Map sort column names to database columns
+        sort_columns = {
+            "area": f"{table_alias}td_area",
+            "address": f"{table_alias}address",
+            "from_berth": f"{table_alias}from_berth",
+            "to_berth": f"{table_alias}to_berth",
+            "score": f"{table_alias}score",
+            "obs_count": f"{table_alias}obs_count",
+            "last_seen": f"{table_alias}last_seen_ts",
+            "location": "location_name" if corpus_exists else f"{table_alias}address",
+        }
+        
+        # Validate and apply sorting
+        if sort_by in sort_columns:
+            order_clause = f" ORDER BY {sort_columns[sort_by]} {sort_order.upper()}"
+        else:
+            order_clause = f" ORDER BY {table_alias}score DESC"
+        
+        sql += order_clause + " LIMIT 500"
         
         try:
             rows = q(sql, params)
@@ -1351,11 +1387,21 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 summary_sql += " AND address = ?"
                 summary_params.append(address_filter)
             if from_berth_filter:
-                summary_sql += " AND from_berth = ?"
-                summary_params.append(from_berth_filter)
+                # Support wildcard filtering with % or *
+                if '%' in from_berth_filter or '*' in from_berth_filter:
+                    summary_sql += " AND from_berth LIKE ?"
+                    summary_params.append(from_berth_filter.replace('*', '%'))
+                else:
+                    summary_sql += " AND from_berth = ?"
+                    summary_params.append(from_berth_filter)
             if to_berth_filter:
-                summary_sql += " AND to_berth = ?"
-                summary_params.append(to_berth_filter)
+                # Support wildcard filtering with % or *
+                if '%' in to_berth_filter or '*' in to_berth_filter:
+                    summary_sql += " AND to_berth LIKE ?"
+                    summary_params.append(to_berth_filter.replace('*', '%'))
+                else:
+                    summary_sql += " AND to_berth = ?"
+                    summary_params.append(to_berth_filter)
             if min_score:
                 try:
                     summary_sql += " AND score >= ?"
@@ -1398,6 +1444,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             
             # Filter form
             body.append("<h3>Filters</h3>")
+            body.append("<p class='dim' style='margin-bottom:8px'>Use * or % as wildcards in berth fields (e.g., '01*' or '%52')</p>")
             body.append("""
                 <form method='get' style='background:#f7f9fc;padding:15px;border-radius:6px;margin-bottom:16px'>
                     <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px'>
@@ -1410,12 +1457,12 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                             <input type='text' name='address' value='""" + address_filter + """' placeholder='e.g. 87701' style='padding:6px;width:100%'>
                         </div>
                         <div>
-                            <label style='font-weight:600;display:block;margin-bottom:4px'>From Berth:</label>
-                            <input type='text' name='from_berth' value='""" + from_berth_filter + """' placeholder='e.g. 0152' style='padding:6px;width:100%'>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>From Berth <span style='color:#6c757d;font-weight:400'>(supports wildcards)</span>:</label>
+                            <input type='text' name='from_berth' value='""" + from_berth_filter + """' placeholder='e.g. 0152 or 01*' style='padding:6px;width:100%'>
                         </div>
                         <div>
-                            <label style='font-weight:600;display:block;margin-bottom:4px'>To Berth:</label>
-                            <input type='text' name='to_berth' value='""" + to_berth_filter + """' placeholder='e.g. 0154' style='padding:6px;width:100%'>
+                            <label style='font-weight:600;display:block;margin-bottom:4px'>To Berth <span style='color:#6c757d;font-weight:400'>(supports wildcards)</span>:</label>
+                            <input type='text' name='to_berth' value='""" + to_berth_filter + """' placeholder='e.g. 0154 or %54' style='padding:6px;width:100%'>
                         </div>
                         <div>
                             <label style='font-weight:600;display:block;margin-bottom:4px'>Min Score:</label>
@@ -1436,17 +1483,49 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             # Results table
             body.append(f"<h3>Signal Mappings ({len(rows)} results, max 500 shown)</h3>")
             
+            # Helper function to build sort URL with current filters
+            from urllib.parse import urlencode
+            def sort_url(column: str) -> str:
+                """Build URL for column sorting while preserving filters."""
+                params = {}
+                if td_area_filter:
+                    params['area'] = td_area_filter
+                if address_filter:
+                    params['address'] = address_filter
+                if from_berth_filter:
+                    params['from_berth'] = from_berth_filter
+                if to_berth_filter:
+                    params['to_berth'] = to_berth_filter
+                if min_score:
+                    params['min_score'] = min_score
+                if min_obs:
+                    params['min_obs'] = min_obs
+                params['sort'] = column
+                # Toggle order if already sorting by this column
+                if sort_by == column:
+                    params['order'] = 'asc' if sort_order == 'desc' else 'desc'
+                else:
+                    # Default to desc for score/obs_count, asc for others
+                    params['order'] = 'desc' if column in ['score', 'obs_count'] else 'asc'
+                return f"/signal-mappings?{urlencode(params)}"
+            
+            def sort_indicator(column: str) -> str:
+                """Return sort indicator (arrow) if this column is currently sorted."""
+                if sort_by == column:
+                    return " ▼" if sort_order == 'desc' else " ▲"
+                return ""
+            
             if rows:
                 body.append("<table style='font-size:13px'>")
                 body.append("<tr>")
-                body.append("<th>TD Area</th>")
-                body.append("<th>Signal Address</th>")
-                body.append("<th>From Berth</th>")
-                body.append("<th>To Berth</th>")
-                body.append("<th>Score</th>")
-                body.append("<th>Obs Count</th>")
-                body.append("<th>Last Seen</th>")
-                body.append("<th>Location</th>")
+                body.append(f"<th><a href='{sort_url('area')}' style='color:inherit;text-decoration:none'>TD Area{sort_indicator('area')}</a></th>")
+                body.append(f"<th><a href='{sort_url('address')}' style='color:inherit;text-decoration:none'>Signal Address{sort_indicator('address')}</a></th>")
+                body.append(f"<th><a href='{sort_url('from_berth')}' style='color:inherit;text-decoration:none'>From Berth{sort_indicator('from_berth')}</a></th>")
+                body.append(f"<th><a href='{sort_url('to_berth')}' style='color:inherit;text-decoration:none'>To Berth{sort_indicator('to_berth')}</a></th>")
+                body.append(f"<th><a href='{sort_url('score')}' style='color:inherit;text-decoration:none'>Score{sort_indicator('score')}</a></th>")
+                body.append(f"<th><a href='{sort_url('obs_count')}' style='color:inherit;text-decoration:none'>Obs Count{sort_indicator('obs_count')}</a></th>")
+                body.append(f"<th><a href='{sort_url('last_seen')}' style='color:inherit;text-decoration:none'>Last Seen{sort_indicator('last_seen')}</a></th>")
+                body.append(f"<th><a href='{sort_url('location')}' style='color:inherit;text-decoration:none'>Location{sort_indicator('location')}</a></th>")
                 body.append("<th>Last Data</th>")
                 body.append("</tr>")
                 
