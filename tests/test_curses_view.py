@@ -28,6 +28,7 @@ def test_interactive_dashboard_state_creation():
     assert state.total_messages == 0
     assert len(state.console_lines) == 0
     assert len(state.trust_lines) == 0
+    assert len(state.vstp_lines) == 0
     assert len(state.error_lines) == 0
     assert len(state.db_lines) == 0
     assert len(state.http_lines) == 0
@@ -68,6 +69,17 @@ def test_dashboard_state_add_trust_line():
     
     assert len(state.trust_lines) == 2
     assert list(state.trust_lines) == ["TRUST message 1", "TRUST message 2"]
+
+
+def test_dashboard_state_add_vstp_line():
+    """Test adding VSTP lines to dashboard state."""
+    state = InteractiveDashboardState()
+    
+    state.add_vstp_line("VSTP message 1")
+    state.add_vstp_line("VSTP message 2")
+    
+    assert len(state.vstp_lines) == 2
+    assert list(state.vstp_lines) == ["VSTP message 1", "VSTP message 2"]
 
 
 def test_dashboard_state_add_error_line():
@@ -151,11 +163,11 @@ def test_dashboard_state_page_navigation():
     state.current_page = 1
     assert state.current_page == 1
     
-    state.current_page = 4
-    assert state.current_page == 4
+    state.current_page = 5
+    assert state.current_page == 5
     
-    # Test wraparound
-    state.current_page = (state.current_page + 1) % 5
+    # Test wraparound (now 6 pages instead of 5)
+    state.current_page = (state.current_page + 1) % 6
     assert state.current_page == 0
 
 
