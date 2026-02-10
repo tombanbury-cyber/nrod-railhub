@@ -395,7 +395,12 @@ class RailDB:
 
     def insert_td_berth_event(self, ts_ms: int, ts_iso: str, area: str, headcode: str, msg_type: str, from_berth: str, to_berth: str, descr: str = "") -> None:
         """Insert a TD berth stepping event (C-Class: CA, CB, CC)."""
+        
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
         with self._lock, self._conn:
+            #logger.error(f"insert_td_berth_event: {ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr}")
             self._conn.execute(
                 "INSERT INTO td_berth_events(ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr) VALUES (?,?,?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr),
@@ -417,7 +422,11 @@ class RailDB:
 
     def insert_td_signal_event(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str = "") -> None:
         """Insert a TD signal event (S-Class: SF, SG, SH)."""
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
         with self._lock, self._conn:
+            #logger.error(f"insert_td_signal_event: {ts_ms, ts_iso, area, msg_type, address, data}")
             self._conn.execute(
                 "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, msg_type, address, data or ""),
@@ -425,6 +434,7 @@ class RailDB:
         
         # Add to mapper batch if enabled
         if self.enable_mapper:
+            #logger.error(f"Add to mapper batch if enabled: {address}")
             self._add_event_to_batch({
                 'msg_type': msg_type,
                 'msg_ts': ts_ms,
@@ -650,12 +660,22 @@ class RailDB:
 
         Expects the original STOMP-parsed message containing "VSTPCIFMsgV1" at top-level.
         """
+        
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
+        #logger.error(f"insert_vstp_schedule {vstp_msg}")
+        
         if not isinstance(vstp_msg, dict):
+            logger.error(f"not dict 1")
             return
 
         v = vstp_msg.get("VSTPCIFMsgV1") or vstp_msg.get("VSTPCIFMsgV1".upper()) or vstp_msg
         if not isinstance(v, dict):
+            logger.error(f"not dict 2")
             return
+            
+        #logger.error(f"vstp_msg {v}")
 
         # Top-level schedule metadata
         schedule_start_date = (v.get("schedule_start_date") or "").strip()
@@ -666,6 +686,10 @@ class RailDB:
         applicable_timetable = (v.get("applicable_timetable") or "").strip() or None
         CIF_train_uid = (v.get("CIF_train_uid") or "").strip() or None
         CIF_stp_indicator = (v.get("CIF_stp_indicator") or "").strip() or None
+        
+        
+        #logger.error(f"CIF_train_uid {CIF_train_uid}")
+        
 
         # Sender organisation if present
         sender_org = None
@@ -682,8 +706,32 @@ class RailDB:
                 segments = segs
             elif isinstance(segs, dict):
                 segments = [segs]
+                
+        # the following are found in the schedule entry
 
-        uid = CIF_train_uid or (v.get("CIF_train_uid") or v.get("CIF_train_uid") or "").strip() or None
+        uid = CIF_train_uid or (schedule.get("CIF_train_uid") or v.get("CIF_train_uid") or "").strip() or None
+        
+        if CIF_stp_indicator == "":
+          CIF_stp_indicator = schedule.get("CIF_stp_indicator")
+        
+        if schedule_start_date == "":
+          schedule_start_date = schedule.get("schedule_start_date")
+          
+        if schedule_end_date == "":
+          schedule_end_date = schedule.get("schedule_end_date")
+          
+        if transaction_type == "":
+          transaction_type = schedule.get("transaction_type")
+
+        if train_status == "":
+          train_status = schedule.get("train_status")
+          
+        if schedule_days_runs == "":
+          schedule_days_runs = schedule.get("schedule_days_runs")
+          
+        if applicable_timetable == "":
+          applicable_timetable = schedule.get("applicable_timetable")
+          
 
         # Pull common fields that may appear at segment-level (we'll store the first segment's signalling_id / codes)
         signalling_id = None
@@ -696,6 +744,8 @@ class RailDB:
             CIF_train_service_code = (first_seg.get("CIF_train_service_code") or "").strip() or None
             CIF_train_category = (first_seg.get("CIF_train_category") or "").strip() or None
             CIF_power_type = (first_seg.get("CIF_power_type") or "").strip() or None
+            
+        #logger.error(f"CIF_power_type {CIF_power_type}")
 
         raw_compact = json.dumps(vstp_msg, separators=(',',':')) if self.save_raw_json else None
 
@@ -704,7 +754,13 @@ class RailDB:
             cur = self._conn.cursor()
             try:
                 # Upsert schedule header (use INSERT OR REPLACE to update)
+                
+                #logger.error(f"uid {uid}")
+                #logger.error(f"schedule_start_date {schedule_start_date}")
+                
                 if uid and schedule_start_date:
+                    #logger.error(f"execute INSERT OR REPLACE INTO vstp_schedules {uid}")
+                    
                     cur.execute(
                         """
                         INSERT OR REPLACE INTO vstp_schedules (
