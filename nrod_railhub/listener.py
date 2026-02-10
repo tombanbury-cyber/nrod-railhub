@@ -20,6 +20,40 @@ from .logging_config import get_logger
 
 logger = get_logger("listener")
 
+
+
+def _normalize_arg_value(val):
+    """Coerce string-like 'None'/'null'/'', and whitespace-only, to real None."""
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ("none", "null"):
+            return None
+        return s
+    return val
+
+def _normalize_area_list(val):
+    """
+    Accepts None, list, or comma-separated string.
+    Returns None or list[str] with any 'None'/'null'/empty entries removed.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ("none", "null"):
+            return None
+        items = [p.strip() for p in s.split(",") if p.strip() and p.strip().lower() not in ("none", "null")]
+        return items or None
+    if isinstance(val, (list, tuple)):
+        items = [str(p).strip() for p in val if p is not None]
+        items = [p for p in items if p and p.lower() not in ("none", "null")]
+        return items or None
+    # unknown type — leave as-is
+    return val
+
+
 class Listener(stomp.ConnectionListener):
     def __init__(self, hv: HumanView, args: argparse.Namespace, db: Optional[RailDB] = None, 
                  output_callback: Optional[callable] = None,
@@ -28,6 +62,14 @@ class Listener(stomp.ConnectionListener):
                  db_callback: Optional[callable] = None) -> None:
         self.hv = hv
         self.args = args
+        
+        
+        # Then, in Listener.__init__ (or immediately after args are attached), call:
+        self.args.headcode = _normalize_arg_value( getattr(self.args, "headcode", None) )
+        # td_area may be list or CSV string
+        self.args.td_area = _normalize_area_list( getattr(self.args, "td_area", None) )
+        
+        
         self.db = db
         self.output_callback = output_callback  # Optional callback for custom output handling (TD messages)
         self.trust_callback = trust_callback  # Optional callback for TRUST messages
@@ -42,7 +84,6 @@ class Listener(stomp.ConnectionListener):
         self._last_output: Dict[tuple[str,str], str] = {}
         self._last_output_ts: Dict[tuple[str,str], float] = {}
         self._print_lock = threading.Lock()
-
 
 
 
@@ -162,12 +203,20 @@ class Listener(stomp.ConnectionListener):
             # VSTP
             # ------------------------------------------------------------
             if "VSTPCIFMsgV1" in item:
+              
                 vs = self.hv.upsert_vstp(item)
                 if not vs:
                     continue
+                    
+                uid = vs.uid
+                start_date = vs.start_date
+                end_date = vs.end_date
 
                 # Persist VSTP to DB if available
                 if self.db:
+                  
+                    #logger.error(f"DB is available, Persist VSTP {vs}")
+                    
                     try:
                         self.db.upsert_vstp(
                             uid=vs.uid,
@@ -187,6 +236,7 @@ class Listener(stomp.ConnectionListener):
                     try:
                         # insert_vstp_schedule expects the raw VSTP message dict
                         self.db.insert_vstp_schedule(item)
+                        
                         logger.debug(f"DB: persisted VSTP schedule locations uid={getattr(vs,'uid','?')} start={getattr(vs,'start_date','?')}")
                         # Send DB operation to db callback if available
                         if self.db_callback:
@@ -210,7 +260,8 @@ class Listener(stomp.ConnectionListener):
                         dest_tiploc = vs.locations[-1][0] if vs.locations else ""
                         origin = self.hv.resolver.name_for_tiploc(origin_tiploc) or origin_tiploc
                         dest = self.hv.resolver.name_for_tiploc(dest_tiploc) or dest_tiploc
-                    vstp_msg = f"VSTP uid={vs.uid} hc={vs.signalling_id or '?'} {origin}→{dest} ({vs.start_date})"
+                        
+                    vstp_msg = f"VSTP uid={uid} hc={vs.signalling_id or '?'} {origin} → {dest} ({getattr(vs,'start_date','?')})"
                     self.vstp_callback(vstp_msg)
 
                 if self._matches(vs.signalling_id, vs.uid):
@@ -319,9 +370,20 @@ class Listener(stomp.ConnectionListener):
                 # These don't have a descr field and don't update TD state
                 if msg_type in ("SF", "SG", "SH"):
                     if self.db:
+                      
+                      
+                        #logger.error(f"TD message: {msg_type}")
+                      
                         try:
+                          
+                            #logger.error(f"TD message try: {msg_type}")
+                          
                             area_id = (td_msg.get("area_id") or "").strip()
                             address = td_msg.get("address", "")
+                            
+                            #logger.error(f"TD area_id: {area_id}")
+                            #logger.error(f"TD address: {address}")
+                            #logger.error(f"TD td_area filter: {self.args.td_area}")
                             
                             # Apply area filter if configured
                             if self.args.td_area and area_id and area_id not in self.args.td_area:
@@ -330,6 +392,7 @@ class Listener(stomp.ConnectionListener):
                             if area_id and address:
                                 ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
                                 ts_iso = ms_to_iso_utc(ts_ms)
+                                #logger.error(f"attempt td event insert: {td_msg}")
                                 self.db.insert_td_signal_event(
                                     ts_ms=ts_ms,
                                     ts_iso=ts_iso,
@@ -341,28 +404,44 @@ class Listener(stomp.ConnectionListener):
                         except Exception as e:
                             # Don't kill the receiver thread; log a few DB errors for diagnosis
                             try:
+                                #logger.error(f"attempt td event insert failed: {area_id}")
                                 self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                                if self._db_err_count <= 5:
-                                    logger.error(f"DB: TD signal event persist failed: {type(e).__name__}: {e}")
+                                #if self._db_err_count <= 5:
+                                logger.error(f"DB: TD signal event persist failed: {type(e).__name__}: {e}")
                             except Exception:
                                 pass
                     continue
                 
                 # Handle berth events (C-Class: CA, CB, CC)
                 # These have a descr field and update TD state
+                #logger.error(f"Handle berth events: {td_msg}")
                 td = self.hv.upsert_td(td_msg)
                 if not td:
                     continue
+                    
+                #logger.error(f"Handle berth events: {td}")
 
                 if self.args.trace_headcode and self.args.headcode and td.descr == self.args.headcode:
                     td_time_iso = ms_to_iso_utc(td.last_time_ms) if td.last_time_ms else "?"
                     logger.debug(f"TRACE TD headcode={td.descr} area={td.area_id} {td.from_berth}->{td.to_berth} time={td_time_iso}")
 
-                if self.args.headcode and td.descr != self.args.headcode:
-                    continue
+                #logger.error(f"foobar: {td.descr}") 
+                #logger.error(f"headcode arg: {self.args.headcode}") 
 
-                if self.args.td_area and td.area_id and td.area_id not in self.args.td_area:
+                if self.args.headcode != None and td.descr != self.args.headcode:
+                    #logger.error(f"continue 1 {self.args.headcode, td.descr}") 
                     continue
+                    
+                #logger.error(f"fred: {td.descr}")    
+
+                #logger.error(f"td_area arg: {self.args.td_area, td.area_id}") 
+                if self.args.td_area and td.area_id and td.area_id not in self.args.td_area:
+                    #logger.error(f"continue 2 {self.args.td_area, td.area_id}") 
+                    continue
+                    
+                #logger.error(f"td_area arg: {self.args.td_area, td.area_id}")     
+                    
+                #logger.error(f"test: {td.area_id}")        
 
                 # Persist berth events and update TD state
                 if self.db:
@@ -373,6 +452,7 @@ class Listener(stomp.ConnectionListener):
                         # Insert berth event record
                         if msg_type in ("CA", "CB", "CC"):
                             if td.area_id and td.descr:
+                                #logger.error(f"Attempt Insert berth event record: {td.area_id, td.descr}")
                                 self.db.insert_td_berth_event(
                                     ts_ms=ts_ms,
                                     ts_iso=ts_iso,
