@@ -261,7 +261,7 @@ class Listener(stomp.ConnectionListener):
                         origin = self.hv.resolver.name_for_tiploc(origin_tiploc) or origin_tiploc
                         dest = self.hv.resolver.name_for_tiploc(dest_tiploc) or dest_tiploc
                         
-                    vstp_msg = f"VSTP uid={uid} hc={vs.signalling_id or '?'} {origin} → {dest} ({getattr(vs,'start_date','?')})"
+                    vstp_msg = f"VSTP uid={vs.uid} hc={vs.signalling_id or '?'} {origin} → {dest} ({vs.start_date})"
                     self.vstp_callback(vstp_msg)
 
                 if self._matches(vs.signalling_id, vs.uid):
