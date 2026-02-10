@@ -48,27 +48,26 @@ def test_vstp_message_persists_to_db():
     )
     hv.upsert_vstp.return_value = vstp_schedule
     
-    # Create a VSTP message
+    # Create a VSTP message with correct structure
     vstp_message = {
         "VSTPCIFMsgV1": {
+            "CIF_train_uid": "C12345",
+            "schedule_start_date": "2026-01-17",
+            "schedule_end_date": "2026-01-17",
             "schedule": {
-                "CIF_train_uid": "C12345",
-                "schedule_start_date": "2026-01-17",
-                "schedule_end_date": "2026-01-17",
-                "train_uid": "C12345",
-                "signalling_id": "2C90",
-                "schedule_location": [
-                    {
-                        "location_type": "LO",
-                        "tiploc_code": "CLPHMJC",
-                        "scheduled_departure_time": "1230"
-                    },
-                    {
-                        "location_type": "LT",
-                        "tiploc_code": "VICTRIC",
-                        "scheduled_arrival_time": "1245"
-                    }
-                ]
+                "schedule_segment": [{
+                    "signalling_id": "2C90",
+                    "schedule_location": [
+                        {
+                            "location": {"tiploc": {"tiploc_id": "CLPHMJC"}},
+                            "scheduled_departure_time": "1230"
+                        },
+                        {
+                            "location": {"tiploc": {"tiploc_id": "VICTRIC"}},
+                            "scheduled_arrival_time": "1245"
+                        }
+                    ]
+                }]
             }
         }
     }
@@ -226,13 +225,14 @@ def test_listener_works_without_db():
     )
     hv.upsert_vstp.return_value = vstp_schedule
     
-    # Create a VSTP message
+    # Create a VSTP message with correct structure
     vstp_message = {
         "VSTPCIFMsgV1": {
+            "CIF_train_uid": "C12345",
             "schedule": {
-                "CIF_train_uid": "C12345",
-                "train_uid": "C12345",
-                "signalling_id": "2C90"
+                "schedule_segment": [{
+                    "signalling_id": "2C90"
+                }]
             }
         }
     }
@@ -286,13 +286,14 @@ def test_db_error_does_not_crash_listener():
     # Close the database to trigger an error
     db.close()
     
-    # Create a VSTP message
+    # Create a VSTP message with correct structure
     vstp_message = {
         "VSTPCIFMsgV1": {
+            "CIF_train_uid": "C12345",
             "schedule": {
-                "CIF_train_uid": "C12345",
-                "train_uid": "C12345",
-                "signalling_id": "2C90"
+                "schedule_segment": [{
+                    "signalling_id": "2C90"
+                }]
             }
         }
     }
