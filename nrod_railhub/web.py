@@ -854,7 +854,7 @@ filterInput.addEventListener('input', updateFilter);
                         ts = datetime.fromtimestamp(r['actual_timestamp_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S') if r['actual_timestamp_ms'] else ''
                         variation = r['timetable_variation'] if r['timetable_variation'] is not None else ''
                         # Display TOC name (from canonical join), fallback to canonical code, then raw message code
-                        toc_display = r['toc_name'] if r['toc_name'] else (r['canonical_toc_code'] or r['msg_toc_id'] or '')
+                        toc_display_text = r['toc_name'] if r['toc_name'] else (r['canonical_toc_code'] or r['msg_toc_id'] or '')
                         toc_tooltip = r['msg_toc_id'] or ''
                         body.append(
                             f"<tr>"
@@ -863,7 +863,7 @@ filterInput.addEventListener('input', updateFilter);
                             f"<td class='mono'>{ts}</td>"
                             f"<td>{r['event_type'] or ''}</td>"
                             f"<td>{r['reporting_stanox'] or ''}</td>"
-                            f"<td title='Raw: {toc_tooltip}'>{toc_display}</td>"
+                            f"<td title='Raw: {toc_tooltip}'>{toc_display_text}</td>"
                             f"<td>{variation}</td>"
                             f"<td>{r['variation_status'] or ''}</td>"
                             f"<td>{r['platform'] or ''}</td>"

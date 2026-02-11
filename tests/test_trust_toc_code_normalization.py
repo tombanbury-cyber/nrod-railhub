@@ -238,19 +238,25 @@ def test_trust_messages_backfill_migration():
         with open(migration_path, 'r') as f:
             migration_sql = f.read()
         
-        # Remove comment lines and execute migration
+        # Manually execute migration statements
+        # Split by semicolon but keep it simple (the SQL is well-formed)
         statements = []
+        current_stmt = []
         for line in migration_sql.split('\n'):
-            line = line.strip()
-            if line and not line.startswith('--'):
-                statements.append(line)
+            # Skip comment-only lines
+            if line.strip().startswith('--') or not line.strip():
+                continue
+            current_stmt.append(line)
+            if ';' in line:
+                stmt = '\n'.join(current_stmt)
+                if stmt.strip():
+                    statements.append(stmt)
+                current_stmt = []
         
-        clean_sql = '\n'.join(statements)
-        
-        # Execute migration (split by semicolon to handle multiple statements)
-        for statement in clean_sql.split(';'):
-            if statement.strip():
-                conn.execute(statement)
+        cursor = conn.cursor()
+        for stmt in statements:
+            if stmt.strip():
+                cursor.execute(stmt)
         
         conn.commit()
         
