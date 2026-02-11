@@ -115,7 +115,10 @@ def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thr
 
 def connect_and_run(args: argparse.Namespace) -> None:
 
-    resolver = LocationResolver()
+    # Get db_path early so we can pass it to resolvers for persistence
+    db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
+
+    resolver = LocationResolver(db_path=db_path)
     resolver.load_or_download(
         username=args.user,
         password=args.password,
@@ -123,9 +126,6 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.corpus_refresh,
         quiet=False,
     )
-
-    # Get db_path early so we can pass it to SmartResolver for inferred berth fallback
-    db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
 
     smart = SmartResolver(db_path=db_path)
     smart.load_or_download(
