@@ -214,11 +214,12 @@ CREATE TABLE vstp_state (
 
 2. **Per-TOC Download (Recommended for filtered monitoring):**
    - URL: `CifFileAuthenticate?type=CIF_{business_code}_TOC_FULL_DAILY&day=toc-full`
-   - Example: `CIF_84_TOC_FULL_DAILY` for Southeastern (business code 84)
+   - Example: `CIF_HU_TOC_FULL_DAILY` for Southeastern (business code HU)
    - Size: ~15-20MB per TOC (significantly smaller)
    - Format: **JSON** (despite "CIF" in the type name)
    - Enabled when `toc_filter` is configured in settings
    - Downloads only schedules for specified TOCs
+   - **Business codes are 2-letter codes** (HU, HY, HW), NOT numeric sector codes (80, 84, 88)
    - **TIPLOC Data Extraction:** First few thousand lines contain TIPLOC reference data
      - Extracted during loading and added to LocationResolver
      - Enriches location resolution with TOC-specific stations
@@ -226,15 +227,15 @@ CREATE TABLE vstp_state (
 
 3. **Per-TOC Update (Daily Updates):**
    - URL: `CifFileAuthenticate?type=CIF_{business_code}_TOC_UPDATE_DAILY&day=toc-update-mon`
-   - Example: `CIF_84_TOC_UPDATE_DAILY` with day codes (mon/tues/wed/etc.)
+   - Example: `CIF_HU_TOC_UPDATE_DAILY` with day codes (mon/tues/wed/etc.)
    - Format: **JSON** incremental updates
    - Can be used for daily refresh of schedules
 
 **Important Note on Terminology:**
-The numeric codes (e.g., 84, 79, 71) are referred to as "business codes" in Network Rail's 
-data feed URLs. This differs from traditional 2-letter rail industry business codes (e.g., 
-HU, EF, HY). These numeric codes may also appear as "sector codes" in TRUST messages, but 
-for schedule downloads they are the correct identifier to use in the URL format.
+The 2-letter codes (HU, HY, HW) used in download URLs are **business codes**. These differ from:
+- **Sector codes**: Numeric codes (80, 84, 88) that appear in TRUST messages
+- **TOC codes**: Our canonical 2-letter identifiers (SE, SW, SN)
+- **ATOC codes**: 3-letter standard codes (SET, SWR, SOU)
 
 **Format:** One JSON object per line: 
 ```json

@@ -88,7 +88,7 @@ toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
 
 **Behavior:**
 - **When `toc_filter` is configured:** Downloads schedules only for the specified TOCs
-  - Uses per-TOC endpoints (e.g., `CIF_84_TOC_FULL_DAILY` for Southeastern)
+  - Uses per-TOC endpoints (e.g., `CIF_HU_TOC_FULL_DAILY` for Southeastern)
   - Format: JSON (despite "CIF" in the type name)
   - Smaller download size (15-20MB per TOC vs 300MB for full dataset)
   - Extracts TIPLOC location data from schedule files
@@ -99,19 +99,21 @@ toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
   - Application continues without timetable enrichment
   - VSTP (late-notice changes) still provides schedule data
 
-**Business Code vs Sector Code:**
-The numeric codes used in download URLs (e.g., 84 for Southeastern) are called "business codes"
-in Network Rail's data feed context. This differs from traditional 2-letter rail industry business 
-codes. These same numeric codes may appear as "sector codes" in TRUST messages, but for schedule 
-downloads, "business code" is the correct Network Rail terminology.
+**Business Codes vs Sector Codes:**
+Schedule downloads use 2-letter **business codes** (e.g., HU, HY, HW). These are different from:
+- **Sector codes**: Numeric codes (80, 84, 88) that appear in TRUST messages
+- **TOC codes**: Our canonical identifiers (SE, SW, SN)
 
 **Available TOC Codes and Business Codes:**
-- `SE` - Southeastern (business code 84)
-- `GW` - Great Western Railway (business code 79)
-- `SW` - South Western Railway (business code 71)
-- `VT` - Avanti West Coast (business code 25)
-- `XC` - CrossCountry (business code 27)
+- `SE` - Southeastern (business code: HU)
+- `SW` - South Western Railway (business code: HY)
+- `SN` - Southern (business code: HW)
+- `SR` - ScotRail (business code: HA)
+- `EM` - East Midlands Railway (business code: EM)
+- `VT` - Avanti West Coast (business code: HF)
 - See [TOCResolver](nrod_railhub/resolvers.py) for complete list
+
+**Note:** Only TOCs with known business codes support schedule downloads.
 
 ### Using the Configuration File
 
