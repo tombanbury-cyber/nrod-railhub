@@ -202,14 +202,30 @@ CREATE TABLE vstp_state (
 
 #### Daily SCHEDULE Extract (ITPS Timetable)
 
-**Source:** Full CIF schedule (JSON lines, gzipped)
+**Source:** Full CIF schedule or per-TOC schedules (JSON lines, gzipped)
 
-**Download:** `CifFileAuthenticate? type=CIF_ALL_FULL_DAILY&day=toc-full`
+**Download Options:**
 
-**Size:** ~300MB compressed, ~2GB uncompressed
+1. **Full CIF Download (Default):**
+   - URL: `CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full`
+   - Size: ~300MB compressed, ~2GB uncompressed
+   - Contains schedules for all Train Operating Companies
+   - **Note:** Disabled by default; requires explicit TOC filter configuration
+
+2. **Per-TOC Download (Recommended):**
+   - URL: `CifFileAuthenticate?type=CIF_{business_code}_TOC_FULL_DAILY&day=toc-full`
+   - Example: `CIF_84_TOC_FULL_DAILY` for Southeastern (business code 84)
+   - Size: ~15-20MB per TOC (significantly smaller)
+   - Enabled when `toc_filter` is configured in settings
+   - Downloads only schedules for specified TOCs
+   - **TIPLOC Data Extraction:** First few thousand lines contain TIPLOC reference data
+     - Extracted during loading and added to LocationResolver
+     - Enriches location resolution with TOC-specific stations
+     - May include locations not in CORPUS dataset
 
 **Format:** One JSON object per line: 
 ```json
+{"TiplocV1": {"tiploc_code": "CLPHMJC", "nlc_description": "Clapham Junction", ...}}
 {"JsonScheduleV1": {"CIF_train_uid": "C12345", "schedule_segment": {... }}}
 {"JsonScheduleV1": {"CIF_train_uid": "C12346", ... }}
 ```
@@ -217,10 +233,26 @@ CREATE TABLE vstp_state (
 **Loading Strategy:**
 - Background thread (non-blocking for TD/TRUST streaming)
 - Filter by service date and days_run (only load relevant schedules)
-- Prefer by STP indicator:  C (Cancel) < O (Overlay) < P (Permanent)
+- Prefer by STP indicator: C (Cancel) < O (Overlay) < P (Permanent)
 - Falls back to VSTP if SCHEDULE not loaded
+- When using per-TOC downloads:
+  - Downloads schedules for each TOC in `toc_filter`
+  - Extracts TIPLOC data from each file
+  - Merges schedules from multiple TOC files
+  - Logs informative message if no TOC filter configured
 
-**Performance:** ~30s to parse and filter on typical hardware
+**Configuration:**
+```yaml
+# Enable per-TOC schedule downloads
+toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
+
+# Without toc_filter, schedule downloads are disabled
+# toc_filter: []  # Displays: "Per-TOC schedule downloads are disabled"
+```
+
+**Performance:** 
+- Full CIF: ~30s to parse and filter
+- Per-TOC: ~5-10s per TOC (faster, smaller files)
 
 ### 6. Console Output Rendering
 

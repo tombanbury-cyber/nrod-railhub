@@ -73,7 +73,38 @@ log_level: info
 
 # Filtering
 headcode: 2C90  # Optional: monitor specific train
+toc_filter: ["SE", "GW"]  # Optional: filter to specific TOCs for schedule downloads
 ```
+
+### Schedule Downloads
+
+The application can download and use daily timetable data to enrich train information. **Schedule downloads are now TOC-specific** to reduce storage and bandwidth usage.
+
+**Configuration:**
+```yaml
+# Enable schedule downloads for specific Train Operating Companies
+toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
+```
+
+**Behavior:**
+- **When `toc_filter` is configured:** Downloads schedules only for the specified TOCs
+  - Uses per-TOC endpoints (`CIF_{business_code}_TOC_FULL_DAILY`)
+  - Smaller download size (15-20MB per TOC vs 300MB for full dataset)
+  - Extracts TIPLOC location data from schedule files
+  - Enriches location resolver with TOC-specific stations
+  
+- **When `toc_filter` is NOT configured:** Schedule downloads are disabled
+  - Displays: "Per-TOC schedule downloads are disabled"
+  - Application continues without timetable enrichment
+  - VSTP (late-notice changes) still provides schedule data
+
+**Available TOC Codes:**
+- `SE` - Southeastern (business code 84)
+- `GW` - Great Western Railway (business code 79)
+- `SW` - South Western Railway (business code 71)
+- `VT` - Avanti West Coast (business code 25)
+- `XC` - CrossCountry (business code 27)
+- See [TOCResolver](nrod_railhub/resolvers.py) for complete list
 
 ### Using the Configuration File
 
