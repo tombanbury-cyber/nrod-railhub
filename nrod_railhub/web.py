@@ -851,6 +851,8 @@ filterInput.addEventListener('input', updateFilter);
                 sql += " AND tm.train_id=?"
                 params.append(train_id)
             if headcode:
+                # Note: trust_messages doesn't have a separate headcode column,
+                # but train_id often contains the headcode, so we search within it
                 sql += " AND tm.train_id LIKE ?"
                 params.append(f"%{headcode}%")
             if event_type:
