@@ -811,6 +811,19 @@ filterInput.addEventListener('input', updateFilter);
         headcode = request.args.get("headcode", "").strip()
         view = request.args.get("view", "state").strip()  # 'state' or 'messages'
         
+        # Additional filter parameters
+        event_type = request.args.get("event_type", "").strip()
+        stanox = request.args.get("stanox", "").strip()
+        platform = request.args.get("platform", "").strip()
+        variation_status = request.args.get("variation_status", "").strip()
+        location = request.args.get("location", "").strip()
+        
+        # Get sort parameters
+        sort_by = request.args.get("sort", "time").strip()
+        sort_order = request.args.get("order", "desc").strip().lower()
+        if sort_order not in ["asc", "desc"]:
+            sort_order = "desc"
+        
         # Load TOC filter from config
         config_data = load_yaml_config()
         toc_filter = config_data.get('toc_filter', [])
@@ -835,6 +848,21 @@ filterInput.addEventListener('input', updateFilter);
             if train_id:
                 sql += " AND tm.train_id=?"
                 params.append(train_id)
+            if headcode:
+                sql += " AND tm.train_id LIKE ?"
+                params.append(f"%{headcode}%")
+            if event_type:
+                sql += " AND tm.event_type=?"
+                params.append(event_type)
+            if stanox:
+                sql += " AND tm.reporting_stanox=?"
+                params.append(stanox)
+            if platform:
+                sql += " AND tm.platform=?"
+                params.append(platform)
+            if variation_status:
+                sql += " AND tm.variation_status=?"
+                params.append(variation_status)
             
             # Apply TOC filter if configured (filter on canonical toc_code)
             if toc_filter:
@@ -842,14 +870,115 @@ filterInput.addEventListener('input', updateFilter);
                 sql += f" AND tm.toc_code IN ({placeholders})"
                 params.extend(toc_filter)
             
-            sql += " ORDER BY actual_timestamp_ms DESC LIMIT 500"
+            # Map sort column names to database columns
+            sort_columns = {
+                "id": "tm.id",
+                "train_id": "tm.train_id",
+                "time": "tm.actual_timestamp_ms",
+                "event_type": "tm.event_type",
+                "stanox": "tm.reporting_stanox",
+                "toc": "tr.toc_name",
+                "variation": "tm.timetable_variation",
+                "status": "tm.variation_status",
+                "platform": "tm.platform",
+            }
+            
+            # Validate and apply sorting
+            if sort_by in sort_columns:
+                order_clause = f" ORDER BY {sort_columns[sort_by]} {sort_order.upper()}"
+            else:
+                order_clause = " ORDER BY tm.actual_timestamp_ms DESC"
+            
+            sql += order_clause + " LIMIT 500"
             
             try:
                 rows = q(sql, params)
+                
+                # Helper function to build sort URL with current filters
+                from urllib.parse import urlencode
+                def sort_url(column: str) -> str:
+                    """Build URL for column sorting while preserving filters."""
+                    params = {"view": "messages"}
+                    if train_id:
+                        params['train_id'] = train_id
+                    if headcode:
+                        params['headcode'] = headcode
+                    if event_type:
+                        params['event_type'] = event_type
+                    if stanox:
+                        params['stanox'] = stanox
+                    if platform:
+                        params['platform'] = platform
+                    if variation_status:
+                        params['variation_status'] = variation_status
+                    params['sort'] = column
+                    # Toggle order if already sorting by this column
+                    if sort_by == column:
+                        params['order'] = 'asc' if sort_order == 'desc' else 'desc'
+                    else:
+                        # Default to desc for time/id, asc for others
+                        params['order'] = 'desc' if column in ['time', 'id', 'variation'] else 'asc'
+                    return f"/trust?{urlencode(params)}"
+                
+                def sort_indicator(column: str) -> str:
+                    """Return sort indicator (arrow) if this column is currently sorted."""
+                    if sort_by == column:
+                        return " ▼" if sort_order == 'desc' else " ▲"
+                    return ""
+                
+                # Filter form
+                body.append("<h3>Filters</h3>")
+                body.append("""
+                    <form method='get' style='background:#f7f9fc;padding:15px;border-radius:6px;margin-bottom:16px'>
+                        <input type='hidden' name='view' value='messages'>
+                        <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px'>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Train ID:</label>
+                                <input type='text' name='train_id' value='""" + train_id + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Headcode:</label>
+                                <input type='text' name='headcode' value='""" + headcode + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Event Type:</label>
+                                <input type='text' name='event_type' value='""" + event_type + """' placeholder='e.g. ARRIVAL' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>STANOX:</label>
+                                <input type='text' name='stanox' value='""" + stanox + """' placeholder='e.g. 87701' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Platform:</label>
+                                <input type='text' name='platform' value='""" + platform + """' placeholder='e.g. 2' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Variation Status:</label>
+                                <input type='text' name='variation_status' value='""" + variation_status + """' placeholder='e.g. LATE' style='padding:6px;width:100%'>
+                            </div>
+                        </div>
+                        <div style='margin-top:12px'>
+                            <button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer;margin-right:8px'>Apply Filters</button>
+                            <a href='/trust?view=messages' style='padding:8px 16px;background:#eee;color:#222;text-decoration:none;border-radius:6px;font-weight:600'>Clear Filters</a>
+                        </div>
+                    </form>
+                """)
+                
                 if rows:
                     body.append(f"<p class='dim'>Showing {len(rows)} message(s)</p>")
                     body.append("<table>")
-                    body.append("<tr><th>ID</th><th>Train ID</th><th>Timestamp</th><th>Event Type</th><th>STANOX</th><th>TOC</th><th>Variation (min)</th><th>Status</th><th>Platform</th><th>Created</th></tr>")
+                    body.append("<tr>")
+                    body.append(f"<th><a href='{sort_url('id')}' style='color:inherit;text-decoration:none'>ID{sort_indicator('id')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('train_id')}' style='color:inherit;text-decoration:none'>Train ID{sort_indicator('train_id')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('time')}' style='color:inherit;text-decoration:none'>Timestamp{sort_indicator('time')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('event_type')}' style='color:inherit;text-decoration:none'>Event Type{sort_indicator('event_type')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('stanox')}' style='color:inherit;text-decoration:none'>STANOX{sort_indicator('stanox')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('toc')}' style='color:inherit;text-decoration:none'>TOC{sort_indicator('toc')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('variation')}' style='color:inherit;text-decoration:none'>Variation (min){sort_indicator('variation')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('status')}' style='color:inherit;text-decoration:none'>Status{sort_indicator('status')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('platform')}' style='color:inherit;text-decoration:none'>Platform{sort_indicator('platform')}</a></th>")
+                    body.append("<th>Created</th>")
+                    body.append("</tr>")
                     for r in rows:
                         ts = datetime.fromtimestamp(r['actual_timestamp_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S') if r['actual_timestamp_ms'] else ''
                         variation = r['timetable_variation'] if r['timetable_variation'] is not None else ''
@@ -894,6 +1023,9 @@ filterInput.addEventListener('input', updateFilter);
             if headcode:
                 sql += " AND ts.headcode=?"
                 params.append(headcode)
+            if location:
+                sql += " AND ts.last_location LIKE ?"
+                params.append(f"%{location}%")
             
             # Apply TOC filter if configured
             if toc_filter:
@@ -901,14 +1033,93 @@ filterInput.addEventListener('input', updateFilter);
                 sql += f" AND ts.toc_id IN ({placeholders})"
                 params.extend(toc_filter)
             
-            sql += " ORDER BY last_event_time DESC LIMIT 500"
+            # Map sort column names to database columns
+            sort_columns = {
+                "train_id": "ts.train_id",
+                "headcode": "ts.headcode",
+                "uid": "ts.uid",
+                "toc": "tr.toc_name",
+                "time": "ts.last_event_time",
+                "location": "ts.last_location",
+                "delay": "ts.last_delay_min",
+            }
+            
+            # Validate and apply sorting
+            if sort_by in sort_columns:
+                order_clause = f" ORDER BY {sort_columns[sort_by]} {sort_order.upper()}"
+            else:
+                order_clause = " ORDER BY ts.last_event_time DESC"
+            
+            sql += order_clause + " LIMIT 500"
             
             try:
                 rows = q(sql, params)
+                
+                # Helper function to build sort URL with current filters
+                from urllib.parse import urlencode
+                def sort_url(column: str) -> str:
+                    """Build URL for column sorting while preserving filters."""
+                    params = {"view": "state"}
+                    if train_id:
+                        params['train_id'] = train_id
+                    if headcode:
+                        params['headcode'] = headcode
+                    if location:
+                        params['location'] = location
+                    params['sort'] = column
+                    # Toggle order if already sorting by this column
+                    if sort_by == column:
+                        params['order'] = 'asc' if sort_order == 'desc' else 'desc'
+                    else:
+                        # Default to desc for time/delay, asc for others
+                        params['order'] = 'desc' if column in ['time', 'delay'] else 'asc'
+                    return f"/trust?{urlencode(params)}"
+                
+                def sort_indicator(column: str) -> str:
+                    """Return sort indicator (arrow) if this column is currently sorted."""
+                    if sort_by == column:
+                        return " ▼" if sort_order == 'desc' else " ▲"
+                    return ""
+                
+                # Filter form
+                body.append("<h3>Filters</h3>")
+                body.append("""
+                    <form method='get' style='background:#f7f9fc;padding:15px;border-radius:6px;margin-bottom:16px'>
+                        <input type='hidden' name='view' value='state'>
+                        <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px'>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Train ID:</label>
+                                <input type='text' name='train_id' value='""" + train_id + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Headcode:</label>
+                                <input type='text' name='headcode' value='""" + headcode + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
+                            </div>
+                            <div>
+                                <label style='font-weight:600;display:block;margin-bottom:4px'>Location:</label>
+                                <input type='text' name='location' value='""" + location + """' placeholder='e.g. Clapham' style='padding:6px;width:100%'>
+                            </div>
+                        </div>
+                        <div style='margin-top:12px'>
+                            <button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer;margin-right:8px'>Apply Filters</button>
+                            <a href='/trust?view=state' style='padding:8px 16px;background:#eee;color:#222;text-decoration:none;border-radius:6px;font-weight:600'>Clear Filters</a>
+                        </div>
+                    </form>
+                """)
+                
                 if rows:
                     body.append(f"<p class='dim'>Showing {len(rows)} train(s)</p>")
                     body.append("<table>")
-                    body.append("<tr><th>Train ID</th><th>Headcode</th><th>UID</th><th>TOC</th><th>Last Event Time</th><th>Last Location</th><th>Delay (min)</th><th>Actions</th></tr>")
+                    body.append("<tr>")
+                    body.append(f"<th><a href='{sort_url('train_id')}' style='color:inherit;text-decoration:none'>Train ID{sort_indicator('train_id')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('headcode')}' style='color:inherit;text-decoration:none'>Headcode{sort_indicator('headcode')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('uid')}' style='color:inherit;text-decoration:none'>UID{sort_indicator('uid')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('toc')}' style='color:inherit;text-decoration:none'>TOC{sort_indicator('toc')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('time')}' style='color:inherit;text-decoration:none'>Last Event Time{sort_indicator('time')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('location')}' style='color:inherit;text-decoration:none'>Last Location{sort_indicator('location')}</a></th>")
+                    body.append(f"<th><a href='{sort_url('delay')}' style='color:inherit;text-decoration:none'>Delay (min){sort_indicator('delay')}</a></th>")
+                    body.append("<th>Actions</th>")
+                    body.append("</tr>")
                     for r in rows:
                         delay_display = f"{r['last_delay_min']}" if r['last_delay_min'] is not None else 'N/A'
                         # Display TOC name with code in tooltip
