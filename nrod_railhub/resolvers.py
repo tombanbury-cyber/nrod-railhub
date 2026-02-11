@@ -912,17 +912,15 @@ class ScheduleResolver:
     ) -> None:
         """Download a TOC-specific schedule file.
         
-        The schedule type format CIF_XX_TOC_FULL_DAILY returns JSON format despite the "CIF" prefix.
+        The schedule type format CIF_XX_TOC_FULL_DAILY uses 2-letter business codes (e.g., HU, HY, HW).
+        Returns JSON format despite the "CIF" prefix.
         Only CIF_ALL_FULL_DAILY with .CIF.gz suffix returns actual CIF format.
         
         Args:
             username: Network Rail username
             password: Network Rail password
             toc_code: 2-character TOC code (e.g., 'SE', 'GW')
-            business_code: Numeric business code used in feed URLs (e.g., '84', '79')
-                          Note: In Network Rail's data feeds, this numeric code is called
-                          "business code" for schedule downloads, though it may be referred
-                          to as "sector code" in TRUST messages.
+            business_code: 2-letter business code for the TOC (e.g., 'HU' for Southeastern)
             out_gz: Path to save the downloaded gzip file
             update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
             day: Day selector for the schedule (e.g., 'toc-full' or 'toc-update-mon')
@@ -1128,17 +1126,17 @@ class TOCResolver:
     # - name: Full operator name
     # - sector: Type of operator (Passenger, Freight, etc.)
     # - atoc_code: ATOC (Association of Train Operating Companies) 3-letter code
-    # - business_code: Numeric code used in Network Rail data feed URLs (e.g., CIF_XX_TOC_FULL_DAILY)
-    #                  Note: This is called "business code" in Network Rail's feed context,
-    #                  which differs from traditional 2-letter rail industry "business codes".
-    #                  These numeric codes are also used in TRUST messages as sector codes.
+    # - business_code: 2-letter business code used in Network Rail feed URLs (e.g., CIF_HU_TOC_FULL_DAILY)
+    #                  This is the actual business code as defined in rail industry standards
+    # - sector_code: Numeric sector code that appears in TRUST messages for TOC identification
+    #                These were previously (incorrectly) stored in business_code field
     # - legacy_codes: List of historical codes that may appear in feeds
     TOC_DATA = {
         'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'ATW'},
         'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CCR', 'business_code': '23'},
         'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CHR', 'business_code': '74'},
         'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CSL', 'business_code': '85'},
-        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': '61'},
+        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': 'EM', 'sector_code': '28'},
         'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'EST', 'business_code': '28'},
         'EX': {'name': 'Express Passenger', 'sector': 'Passenger'},
         'FC': {'name': 'First Capital Connect', 'sector': 'Passenger', 'atoc_code': 'FCC'},
@@ -1162,16 +1160,16 @@ class TOCResolver:
         'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage'},
         'PE': {'name': 'Penmere', 'sector': 'Freight'},
         'PO': {'name': 'Provincial', 'sector': 'Passenger'},
-        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': '84'},
+        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': 'HU', 'sector_code': '80'},
         'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger', 'atoc_code': 'SWT'},
-        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': '88'},
-        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': '55'},
-        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': '71'},
+        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': 'HW', 'sector_code': '88'},
+        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': 'HA', 'sector_code': '60'},
+        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': 'HY', 'sector_code': '84'},
         'SX': {'name': 'Stansted Express', 'sector': 'Passenger', 'atoc_code': 'SX'},
         'TL': {'name': 'Thameslink', 'sector': 'Passenger', 'atoc_code': 'TLK'},
         'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TPE', 'business_code': '20'},
         'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TFW', 'business_code': '83'},
-        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': '25'},
+        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': 'HF', 'sector_code': '65'},
         'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter', 'atoc_code': 'WCR'},
         'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XCT', 'business_code': '27'},
         'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'ELZ', 'business_code': '92'},
@@ -1204,6 +1202,7 @@ class TOCResolver:
         self.toc_map: Dict[str, str] = {}
         self.atoc_to_canonical: Dict[str, str] = {}  # Maps ATOC codes to canonical 2-char codes
         self.business_to_canonical: Dict[str, str] = {}  # Maps business codes to canonical 2-char codes
+        self.sector_to_canonical: Dict[str, str] = {}  # Maps sector codes to canonical 2-char codes
         self._load_static_data()
     
     def _load_static_data(self) -> None:
@@ -1220,6 +1219,11 @@ class TOCResolver:
             if 'business_code' in data:
                 business = data['business_code']
                 self.business_to_canonical[business] = code
+            
+            # Build sector code mapping (for TRUST message normalization)
+            if 'sector_code' in data:
+                sector = data['sector_code']
+                self.sector_to_canonical[sector] = code
     
     def resolve_toc_code(self, incoming: Optional[str]) -> Optional[str]:
         """
@@ -1228,10 +1232,11 @@ class TOCResolver:
         Handles various identifier formats:
         - Canonical 2-character codes (e.g., 'SW', 'GW') - returned as-is
         - ATOC 3-letter codes (e.g., 'SWR', 'GWR') - mapped to canonical code
-        - Numeric business codes (e.g., '71', '79') - mapped to canonical code
+        - 2-letter business codes (e.g., 'HY', 'HU') - mapped to canonical code
+        - Numeric sector codes (e.g., '84', '80') - mapped to canonical code (for TRUST messages)
         
         Args:
-            incoming: TOC identifier from TRUST message (may be None, canonical, ATOC, or numeric)
+            incoming: TOC identifier from message (may be None, canonical, ATOC, business, or sector code)
             
         Returns:
             Canonical 2-character TOC code if mapping found, None otherwise
@@ -1252,9 +1257,13 @@ class TOCResolver:
         if code in self.atoc_to_canonical:
             return self.atoc_to_canonical[code]
         
-        # Check if it's a business code (numeric)
+        # Check if it's a business code
         if code in self.business_to_canonical:
             return self.business_to_canonical[code]
+        
+        # Check if it's a sector code (for TRUST message compatibility)
+        if code in self.sector_to_canonical:
+            return self.sector_to_canonical[code]
         
         # No mapping found
         return None
@@ -1326,6 +1335,7 @@ class TOCResolver:
                     toc_code=code,
                     toc_name=data['name'],
                     business_code=data.get('business_code'),
+                    sector_code=data.get('sector_code'),
                     atoc_code=data.get('atoc_code'),
                     sector=data.get('sector')
                 )
