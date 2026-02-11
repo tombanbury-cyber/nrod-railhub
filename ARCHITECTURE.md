@@ -206,22 +206,35 @@ CREATE TABLE vstp_state (
 
 **Download Options:**
 
-1. **Full CIF Download (Default):**
-   - URL: `CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full`
+1. **Full CIF Download (All Operators):**
+   - URL: `CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz`
    - Size: ~300MB compressed, ~2GB uncompressed
+   - Format: Actual CIF format (note the `.CIF.gz` suffix)
    - Contains schedules for all Train Operating Companies
-   - **Note:** Disabled by default; requires explicit TOC filter configuration
 
-2. **Per-TOC Download (Recommended):**
+2. **Per-TOC Download (Recommended for filtered monitoring):**
    - URL: `CifFileAuthenticate?type=CIF_{business_code}_TOC_FULL_DAILY&day=toc-full`
    - Example: `CIF_84_TOC_FULL_DAILY` for Southeastern (business code 84)
    - Size: ~15-20MB per TOC (significantly smaller)
+   - Format: **JSON** (despite "CIF" in the type name)
    - Enabled when `toc_filter` is configured in settings
    - Downloads only schedules for specified TOCs
    - **TIPLOC Data Extraction:** First few thousand lines contain TIPLOC reference data
      - Extracted during loading and added to LocationResolver
      - Enriches location resolution with TOC-specific stations
      - May include locations not in CORPUS dataset
+
+3. **Per-TOC Update (Daily Updates):**
+   - URL: `CifFileAuthenticate?type=CIF_{business_code}_TOC_UPDATE_DAILY&day=toc-update-mon`
+   - Example: `CIF_84_TOC_UPDATE_DAILY` with day codes (mon/tues/wed/etc.)
+   - Format: **JSON** incremental updates
+   - Can be used for daily refresh of schedules
+
+**Important Note on Terminology:**
+The numeric codes (e.g., 84, 79, 71) are referred to as "business codes" in Network Rail's 
+data feed URLs. This differs from traditional 2-letter rail industry business codes (e.g., 
+HU, EF, HY). These numeric codes may also appear as "sector codes" in TRUST messages, but 
+for schedule downloads they are the correct identifier to use in the URL format.
 
 **Format:** One JSON object per line: 
 ```json

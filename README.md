@@ -88,7 +88,8 @@ toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
 
 **Behavior:**
 - **When `toc_filter` is configured:** Downloads schedules only for the specified TOCs
-  - Uses per-TOC endpoints (`CIF_{business_code}_TOC_FULL_DAILY`)
+  - Uses per-TOC endpoints (e.g., `CIF_84_TOC_FULL_DAILY` for Southeastern)
+  - Format: JSON (despite "CIF" in the type name)
   - Smaller download size (15-20MB per TOC vs 300MB for full dataset)
   - Extracts TIPLOC location data from schedule files
   - Enriches location resolver with TOC-specific stations
@@ -98,7 +99,13 @@ toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
   - Application continues without timetable enrichment
   - VSTP (late-notice changes) still provides schedule data
 
-**Available TOC Codes:**
+**Business Code vs Sector Code:**
+The numeric codes used in download URLs (e.g., 84 for Southeastern) are called "business codes"
+in Network Rail's data feed context. This differs from traditional 2-letter rail industry business 
+codes. These same numeric codes may appear as "sector codes" in TRUST messages, but for schedule 
+downloads, "business code" is the correct Network Rail terminology.
+
+**Available TOC Codes and Business Codes:**
 - `SE` - Southeastern (business code 84)
 - `GW` - Great Western Railway (business code 79)
 - `SW` - South Western Railway (business code 71)

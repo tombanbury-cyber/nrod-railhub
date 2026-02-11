@@ -912,14 +912,20 @@ class ScheduleResolver:
     ) -> None:
         """Download a TOC-specific schedule file.
         
+        The schedule type format CIF_XX_TOC_FULL_DAILY returns JSON format despite the "CIF" prefix.
+        Only CIF_ALL_FULL_DAILY with .CIF.gz suffix returns actual CIF format.
+        
         Args:
             username: Network Rail username
             password: Network Rail password
             toc_code: 2-character TOC code (e.g., 'SE', 'GW')
-            business_code: Business code for the TOC (e.g., '84', '79')
+            business_code: Numeric business code used in feed URLs (e.g., '84', '79')
+                          Note: In Network Rail's data feeds, this numeric code is called
+                          "business code" for schedule downloads, though it may be referred
+                          to as "sector code" in TRUST messages.
             out_gz: Path to save the downloaded gzip file
             update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
-            day: Day selector for the schedule
+            day: Day selector for the schedule (e.g., 'toc-full' or 'toc-update-mon')
             quiet: If True, suppress log messages
         """
         schedule_type = f"CIF_{business_code}_TOC_UPDATE_DAILY" if update_mode else f"CIF_{business_code}_TOC_FULL_DAILY"
@@ -1122,7 +1128,10 @@ class TOCResolver:
     # - name: Full operator name
     # - sector: Type of operator (Passenger, Freight, etc.)
     # - atoc_code: ATOC (Association of Train Operating Companies) 3-letter code
-    # - business_code: Numeric business code (if known from TRUST messages)
+    # - business_code: Numeric code used in Network Rail data feed URLs (e.g., CIF_XX_TOC_FULL_DAILY)
+    #                  Note: This is called "business code" in Network Rail's feed context,
+    #                  which differs from traditional 2-letter rail industry "business codes".
+    #                  These numeric codes are also used in TRUST messages as sector codes.
     # - legacy_codes: List of historical codes that may appear in feeds
     TOC_DATA = {
         'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'ATW'},
