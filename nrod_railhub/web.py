@@ -825,9 +825,10 @@ filterInput.addEventListener('input', updateFilter);
             body.append("<p><a href='/trust?view=state'>Switch to Current State View</a></p>")
             
             sql = """SELECT tm.id, tm.train_id, tm.actual_timestamp_ms, tm.event_type, tm.reporting_stanox, 
-                     tm.toc_id, tr.toc_name, tm.timetable_variation, tm.variation_status, tm.platform, tm.created_at_utc 
+                     tm.toc_id AS msg_toc_id, tm.toc_code AS canonical_toc_code, tr.toc_name, 
+                     tm.timetable_variation, tm.variation_status, tm.platform, tm.created_at_utc 
                      FROM trust_messages tm 
-                     LEFT JOIN toc_reference tr ON tm.toc_id = tr.toc_code 
+                     LEFT JOIN toc_reference tr ON tm.toc_code = tr.toc_code 
                      WHERE 1=1"""
             params = []
             
@@ -835,10 +836,10 @@ filterInput.addEventListener('input', updateFilter);
                 sql += " AND tm.train_id=?"
                 params.append(train_id)
             
-            # Apply TOC filter if configured
+            # Apply TOC filter if configured (filter on canonical toc_code)
             if toc_filter:
                 placeholders = ','.join('?' * len(toc_filter))
-                sql += f" AND tm.toc_id IN ({placeholders})"
+                sql += f" AND tm.toc_code IN ({placeholders})"
                 params.extend(toc_filter)
             
             sql += " ORDER BY actual_timestamp_ms DESC LIMIT 500"
@@ -852,9 +853,9 @@ filterInput.addEventListener('input', updateFilter);
                     for r in rows:
                         ts = datetime.fromtimestamp(r['actual_timestamp_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S') if r['actual_timestamp_ms'] else ''
                         variation = r['timetable_variation'] if r['timetable_variation'] is not None else ''
-                        # Display TOC name with code in tooltip
-                        toc_display = r['toc_name'] if r['toc_name'] else (r['toc_id'] or '')
-                        toc_code = r['toc_id'] or ''
+                        # Display TOC name (from canonical join), fallback to canonical code, then raw message code
+                        toc_display = r['toc_name'] if r['toc_name'] else (r['canonical_toc_code'] or r['msg_toc_id'] or '')
+                        toc_tooltip = r['msg_toc_id'] or ''
                         body.append(
                             f"<tr>"
                             f"<td>{r['id']}</td>"
@@ -862,7 +863,7 @@ filterInput.addEventListener('input', updateFilter);
                             f"<td class='mono'>{ts}</td>"
                             f"<td>{r['event_type'] or ''}</td>"
                             f"<td>{r['reporting_stanox'] or ''}</td>"
-                            f"<td title='{toc_code}'>{toc_display}</td>"
+                            f"<td title='Raw: {toc_tooltip}'>{toc_display}</td>"
                             f"<td>{variation}</td>"
                             f"<td>{r['variation_status'] or ''}</td>"
                             f"<td>{r['platform'] or ''}</td>"
