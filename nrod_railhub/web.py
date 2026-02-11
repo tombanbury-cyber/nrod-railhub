@@ -156,7 +156,6 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             rows = q("SELECT * FROM td_state ORDER BY last_time_ms DESC LIMIT 200")
         areas = [r[0] for r in q("SELECT DISTINCT td_area FROM td_state ORDER BY td_area")]
         body = []
-        body.append(f"<p><b>DB:</b> td_state={counts['td_state']} td_event={counts['td_event']} trust_state={counts['trust_state']} vstp_state={counts['vstp_state']}</p>")
         # area pills
         body.append("<div>Filter: " + " ".join([f"<a class='pill' href='/?area={a}'>{a}</a>" for a in areas]) + " <a class='pill' href='/'>ALL</a></div>")
         body.append("<h3>Latest TD state" + (f" (area {area})" if area else "") + "</h3>")
