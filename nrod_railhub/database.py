@@ -295,6 +295,40 @@ class RailDB:
                     sector TEXT,
                     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
                 );
+                
+                -- CORPUS: Location reference data (TIPLOC, STANOX, CRS mappings)
+                CREATE TABLE IF NOT EXISTS corpus_locations (
+                    tiploc TEXT,
+                    stanox TEXT,
+                    crs TEXT,
+                    nlc TEXT,
+                    name TEXT NOT NULL,
+                    raw_json TEXT,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    PRIMARY KEY (tiploc, stanox, crs)
+                );
+                CREATE INDEX IF NOT EXISTS idx_corpus_tiploc ON corpus_locations(tiploc) WHERE tiploc IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_corpus_stanox ON corpus_locations(stanox) WHERE stanox IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_corpus_crs ON corpus_locations(crs) WHERE crs IS NOT NULL;
+                
+                -- SMART: Berth stepping reference data (TD area + berth -> location)
+                CREATE TABLE IF NOT EXISTS smart_berths (
+                    td_area TEXT NOT NULL,
+                    berth TEXT NOT NULL,
+                    stanox TEXT,
+                    platform TEXT,
+                    event TEXT,
+                    stanme TEXT,
+                    step_type TEXT,
+                    from_line TEXT,
+                    to_line TEXT,
+                    berthoffset INTEGER,
+                    comment TEXT,
+                    raw_json TEXT,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    PRIMARY KEY (td_area, berth)
+                );
+                CREATE INDEX IF NOT EXISTS idx_smart_stanox ON smart_berths(stanox) WHERE stanox IS NOT NULL;
                 """
             )
 
@@ -1398,6 +1432,202 @@ class RailDB:
             self._conn.execute("""
                 UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'
             """, (tau_ms,))
+    
+    def populate_corpus_data(self, corpus_data: list[dict]) -> int:
+        """Populate CORPUS location reference data into the database.
+        
+        Args:
+            corpus_data: List of CORPUS records with fields like TIPLOC, STANOX, 3ALPHA, NLCDESC, etc.
+            
+        Returns:
+            Number of records inserted/updated
+        """
+        count = 0
+        with self._lock, self._conn:
+            for row in corpus_data:
+                if not isinstance(row, dict):
+                    continue
+                
+                # Extract fields from CORPUS format
+                tiploc = (row.get("TIPLOC") or "").strip().upper() or None
+                stanox = (row.get("STANOX") or "").strip() or None
+                crs = (row.get("3ALPHA") or "").strip().upper() or None
+                nlc = (row.get("NLC") or "").strip() or None
+                name = (row.get("NLCDESC") or row.get("NLCDESC16") or "").strip()
+                
+                # Skip records without a name
+                if not name:
+                    continue
+                
+                # Skip records without any identifying code
+                if not any([tiploc, stanox, crs]):
+                    continue
+                
+                # Store raw JSON if available
+                raw_json = json.dumps(row) if self.save_raw_json else None
+                
+                # Use COALESCE to handle NULLs in PRIMARY KEY
+                self._conn.execute(
+                    """
+                    INSERT INTO corpus_locations (tiploc, stanox, crs, nlc, name, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(tiploc, stanox, crs) DO UPDATE SET
+                        nlc=excluded.nlc,
+                        name=excluded.name,
+                        raw_json=excluded.raw_json,
+                        updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    """,
+                    (tiploc, stanox, crs, nlc, name, raw_json)
+                )
+                count += 1
+        
+        return count
+    
+    def populate_smart_data(self, smart_data: list[dict]) -> int:
+        """Populate SMART berth stepping reference data into the database.
+        
+        Args:
+            smart_data: List of SMART records with fields like TD, FROMBERTH, TOBERTH, STANOX, etc.
+            
+        Returns:
+            Number of berth mappings inserted/updated
+        """
+        count = 0
+        with self._lock, self._conn:
+            for row in smart_data:
+                if not isinstance(row, dict):
+                    continue
+                
+                # Extract fields from SMART format
+                td_area = (row.get("TD") or "").strip().upper()
+                stanox = (row.get("STANOX") or "").strip() or None
+                platform = (row.get("PLATFORM") or "").strip() or None
+                event = (row.get("EVENT") or "").strip().upper() or None
+                stanme = (row.get("STANME") or "").strip() or None
+                step_type = (row.get("STEPTYPE") or "").strip() or None
+                from_line = (row.get("FROMLINE") or "").strip() or None
+                to_line = (row.get("TOLINE") or "").strip() or None
+                berthoffset = safe_int(row.get("BERTHOFFSET"))
+                comment = (row.get("COMMENT") or "").strip() or None
+                
+                if not td_area or not stanox:
+                    continue
+                
+                # Store raw JSON if available
+                raw_json = json.dumps(row) if self.save_raw_json else None
+                
+                # Process both FROMBERTH and TOBERTH
+                for berth_key in ("FROMBERTH", "TOBERTH"):
+                    berth = (row.get(berth_key) or "").strip().upper()
+                    if not berth:
+                        continue
+                    
+                    self._conn.execute(
+                        """
+                        INSERT INTO smart_berths (td_area, berth, stanox, platform, event, stanme, 
+                                                  step_type, from_line, to_line, berthoffset, comment, raw_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(td_area, berth) DO UPDATE SET
+                            stanox=excluded.stanox,
+                            platform=excluded.platform,
+                            event=excluded.event,
+                            stanme=excluded.stanme,
+                            step_type=excluded.step_type,
+                            from_line=excluded.from_line,
+                            to_line=excluded.to_line,
+                            berthoffset=excluded.berthoffset,
+                            comment=excluded.comment,
+                            raw_json=excluded.raw_json,
+                            updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                        """,
+                        (td_area, berth, stanox, platform, event, stanme, 
+                         step_type, from_line, to_line, berthoffset, comment, raw_json)
+                    )
+                    count += 1
+        
+        return count
+    
+    def get_corpus_location(self, tiploc: Optional[str] = None, stanox: Optional[str] = None, 
+                           crs: Optional[str] = None) -> Optional[dict]:
+        """Query CORPUS location data by TIPLOC, STANOX, or CRS code.
+        
+        Args:
+            tiploc: TIPLOC code to search for
+            stanox: STANOX code to search for
+            crs: CRS (3-alpha) code to search for
+            
+        Returns:
+            Dictionary with location data or None if not found
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            
+            # Build query based on provided parameters
+            if tiploc:
+                cursor.execute(
+                    "SELECT tiploc, stanox, crs, nlc, name FROM corpus_locations WHERE tiploc=? LIMIT 1",
+                    (tiploc.strip().upper(),)
+                )
+            elif stanox:
+                cursor.execute(
+                    "SELECT tiploc, stanox, crs, nlc, name FROM corpus_locations WHERE stanox=? LIMIT 1",
+                    (stanox.strip(),)
+                )
+            elif crs:
+                cursor.execute(
+                    "SELECT tiploc, stanox, crs, nlc, name FROM corpus_locations WHERE crs=? LIMIT 1",
+                    (crs.strip().upper(),)
+                )
+            else:
+                return None
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "tiploc": row[0],
+                    "stanox": row[1],
+                    "crs": row[2],
+                    "nlc": row[3],
+                    "name": row[4]
+                }
+            return None
+    
+    def get_smart_berth(self, td_area: str, berth: str) -> Optional[dict]:
+        """Query SMART berth data by TD area and berth identifier.
+        
+        Args:
+            td_area: 2-character TD area code
+            berth: Berth identifier
+            
+        Returns:
+            Dictionary with berth data or None if not found
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT stanox, platform, event, stanme, step_type, from_line, to_line, 
+                       berthoffset, comment
+                FROM smart_berths 
+                WHERE td_area=? AND berth=?
+                LIMIT 1
+                """,
+                (td_area.strip().upper(), berth.strip().upper())
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "stanox": row[0],
+                    "platform": row[1],
+                    "event": row[2],
+                    "stanme": row[3],
+                    "step_type": row[4],
+                    "from_line": row[5],
+                    "to_line": row[6],
+                    "berthoffset": row[7],
+                    "comment": row[8]
+                }
+            return None
     
     def rebuild_mapper_scores(self, pre_ms: int, post_ms: int, tau_ms: int, td_area: Optional[str] = None, progress_callback=None) -> dict:
         """

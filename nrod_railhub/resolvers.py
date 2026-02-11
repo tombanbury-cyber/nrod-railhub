@@ -36,11 +36,12 @@ class LocationResolver:
     CORPUS is documented as mapping STANOX/TIPLOC/NLC/UIC/CRS to location descriptions.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         self.tiploc_to_name: Dict[str, str] = {}
         self.stanox_to_name: Dict[str, str] = {}
         self.crs_to_name: Dict[str, str] = {}
         self.tiploc_to_stanox: Dict[str, str] = {}  # TIPLOC -> STANOX mapping
+        self.db_path = db_path
 
     def load_or_download(
         self,
@@ -243,6 +244,17 @@ class LocationResolver:
                 f"CORPUS loaded: "
                 f"{len(tiploc)} TIPLOC, {len(stanox)} STANOX, {len(crs)} CRS mappings"
             )
+        
+        # Persist to database if db_path is provided
+        if self.db_path and rows:
+            try:
+                from .database import RailDB
+                db = RailDB(self.db_path)
+                count = db.populate_corpus_data(rows)
+                if not quiet:
+                    logger.info(f"CORPUS: persisted {count} records to database")
+            except Exception as e:
+                logger.warning(f"CORPUS: failed to persist to database: {e}")
 
 
 
@@ -500,6 +512,17 @@ class SmartResolver:
         self.berth_map = mp
         if not quiet:
             logger.info(f"SMART loaded: {len(self.berth_map)} berth mappings")
+        
+        # Persist to database if db_path is provided
+        if self.db_path and rows:
+            try:
+                from .database import RailDB
+                db = RailDB(self.db_path)
+                count = db.populate_smart_data(rows)
+                if not quiet:
+                    logger.info(f"SMART: persisted {count} berth records to database")
+            except Exception as e:
+                logger.warning(f"SMART: failed to persist to database: {e}")
 
     def lookup(self, td_area: str, berth: str) -> Optional[Dict[str, str]]:
         """Look up berth information, with fallback to inferred data.

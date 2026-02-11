@@ -150,7 +150,52 @@ CREATE TABLE vstp_state (
     raw_json TEXT,
     PRIMARY KEY (uid, start_date)
 );
+
+-- CORPUS reference data (TIPLOC/STANOX/CRS locations)
+CREATE TABLE corpus_locations (
+    tiploc TEXT,
+    stanox TEXT,
+    crs TEXT,
+    nlc TEXT,
+    name TEXT NOT NULL,
+    raw_json TEXT,
+    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (tiploc, stanox, crs)
+);
+CREATE INDEX idx_corpus_tiploc ON corpus_locations(tiploc) WHERE tiploc IS NOT NULL;
+CREATE INDEX idx_corpus_stanox ON corpus_locations(stanox) WHERE stanox IS NOT NULL;
+CREATE INDEX idx_corpus_crs ON corpus_locations(crs) WHERE crs IS NOT NULL;
+
+-- SMART berth stepping reference data (TD area + berth -> location)
+CREATE TABLE smart_berths (
+    td_area TEXT NOT NULL,
+    berth TEXT NOT NULL,
+    stanox TEXT,
+    platform TEXT,
+    event TEXT,
+    stanme TEXT,
+    step_type TEXT,
+    from_line TEXT,
+    to_line TEXT,
+    berthoffset INTEGER,
+    comment TEXT,
+    raw_json TEXT,
+    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (td_area, berth)
+);
+CREATE INDEX idx_smart_stanox ON smart_berths(stanox) WHERE stanox IS NOT NULL;
 ```
+
+**New Tables (v2024-02-11):**
+- `corpus_locations`: Persisted location reference data from CORPUS feed
+  - Enables SQL queries on TIPLOC/STANOX/CRS mappings
+  - Supports offline location resolution without loading full JSON
+  - Populated automatically when resolvers load CORPUS data (if db_path provided)
+  
+- `smart_berths`: Persisted berth stepping data from SMART feed
+  - Enables SQL queries on TD berth locations
+  - Supports web dashboard queries without loading full SMART JSON
+  - Populated automatically when resolvers load SMART data (if db_path provided)
 
 **WAL Mode:** Enabled for concurrent reads during writes
 
@@ -174,6 +219,7 @@ CREATE TABLE vstp_state (
 3. GET S3 URL **without** Authorization header (S3 uses query auth)
 4. Decompress gzip if needed
 5. Cache to `~/.cache/openraildata/CORPUSExtract. json`
+6. **Persist to database** (if db_path provided to LocationResolver)
 
 **Format:** Either `[{...}, {...}]` or `{"TIPLOCDATA": [{...}]}`
 
@@ -183,15 +229,25 @@ CREATE TABLE vstp_state (
 - `3ALPHA` - CRS code (e.g. `CLJ`)
 - `NLCDESC` - Human name (e.g. `CLAPHAM JUNCTION`)
 
+**Database Persistence:**
+- Data automatically saved to `corpus_locations` table when `LocationResolver` is initialized with a database path
+- Enables SQL queries without loading full JSON into memory
+- Supports offline location resolution via `RailDB.get_corpus_location()`
+
 #### SMART (TD Berth → STANOX/Platform)
 
 **Source:** Berth stepping reference data
 
 **Purpose:** Map `(TD_area, berth)` → `(STANOX, platform, location_name)`
 
-**Download Flow:** Same as CORPUS but `type=SMART`
+**Download Flow:** Same as CORPUS but `type=SMART`, persisted to database if db_path provided
 
 **Format:** `[{"TD":  "EK", "FROMBERTH": "0152", "TOBERTH": "0154", "STANOX": "12345", "PLATFORM": "2", ... }]`
+
+**Database Persistence:**
+- Data automatically saved to `smart_berths` table when `SmartResolver` is initialized with a database path
+- Enables SQL queries on berth locations without loading full JSON
+- Supports web dashboard queries via `RailDB.get_smart_berth()`
 
 **Coverage:** Not all berths are in SMART; gaps exist especially in: 
 - Sidings and yards
