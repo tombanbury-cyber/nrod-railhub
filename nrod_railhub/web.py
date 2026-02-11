@@ -419,10 +419,14 @@ filterInput.addEventListener('input', updateFilter);
                 retention_interval_str = request.form.get("retention_interval", "").strip()
                 if retention_interval_str:
                     config_data["retention-interval"] = int(retention_interval_str)
+                elif "retention-interval" in config_data:
+                    del config_data["retention-interval"]
                 
                 retention_batch_size_str = request.form.get("retention_batch_size", "").strip()
                 if retention_batch_size_str:
                     config_data["retention-batch-size"] = int(retention_batch_size_str)
+                elif "retention-batch-size" in config_data:
+                    del config_data["retention-batch-size"]
                 
                 # Save to file
                 if save_yaml_config(config_data):
@@ -725,10 +729,10 @@ filterInput.addEventListener('input', updateFilter);
         body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
         body.append("<legend style='font-weight:600;padding:0 8px'>Data Retention</legend>")
         body.append("<p class='dim' style='margin-top:0'>Configure automatic data retention. Changes require application restart.</p>")
-        retain_trust_days = config_data.get('retain_trust_days') or config_data.get('retain-trust-days', '')
-        retain_vstp_days = config_data.get('retain_vstp_days') or config_data.get('retain-vstp-days', '')
-        retention_interval = config_data.get('retention_interval') or config_data.get('retention-interval', 3600)
-        retention_batch_size = config_data.get('retention_batch_size') or config_data.get('retention-batch-size', 1000)
+        retain_trust_days = config_data.get('retain_trust_days') if config_data.get('retain_trust_days') is not None else config_data.get('retain-trust-days', '')
+        retain_vstp_days = config_data.get('retain_vstp_days') if config_data.get('retain_vstp_days') is not None else config_data.get('retain-vstp-days', '')
+        retention_interval = config_data.get('retention_interval') if config_data.get('retention_interval') is not None else config_data.get('retention-interval', 3600)
+        retention_batch_size = config_data.get('retention_batch_size') if config_data.get('retention_batch_size') is not None else config_data.get('retention-batch-size', 1000)
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Retain TRUST (days):</label><input type='number' name='retain_trust_days' value=\"{retain_trust_days}\" placeholder='Leave empty to disable' style='width:150px;padding:6px'><span class='dim' style='margin-left:8px'>Days to keep TRUST messages</span></div>")
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Retain VSTP (days):</label><input type='number' name='retain_vstp_days' value=\"{retain_vstp_days}\" placeholder='Leave empty to disable' style='width:150px;padding:6px'><span class='dim' style='margin-left:8px'>Days to keep VSTP schedules</span></div>")
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Check Interval (sec):</label><input type='number' name='retention_interval' value=\"{retention_interval}\" style='width:150px;padding:6px'><span class='dim' style='margin-left:8px'>Time between retention checks</span></div>")
