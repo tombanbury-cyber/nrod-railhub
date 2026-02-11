@@ -259,7 +259,7 @@ class LocationResolver:
         """Return STANOX for a given TIPLOC, or None if not found."""
         return self.tiploc_to_stanox.get((code or "").strip().upper())
     
-    def add_tiploc_data(self, tiploc_records: List[Dict[str, str]], quiet: bool = False) -> int:
+    def add_tiploc_data(self, tiploc_records: List[Dict[str, Any]], quiet: bool = False) -> int:
         """Add TIPLOC data from schedule files to the resolver.
         
         This allows enriching the location resolver with TIPLOC data extracted
@@ -1087,7 +1087,7 @@ class ScheduleResolver:
                                 }
                                 tiploc_records.append(record)
                         
-                        # If we see a schedule record, we've past the TIPLOC section
+                        # If we see a schedule record, we've passed the TIPLOC section
                         elif "JsonScheduleV1" in obj:
                             # This marks the start of actual schedule data
                             break

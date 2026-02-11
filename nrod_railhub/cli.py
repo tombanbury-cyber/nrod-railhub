@@ -200,7 +200,16 @@ def connect_and_run(args: argparse.Namespace) -> None:
                             quiet=False,
                         )
                     
-                    total_size_mb = sum(os.path.getsize(fp) / (1024 * 1024) for _, fp in downloaded_files)
+                    # Calculate total size, handling missing files gracefully
+                    total_size_mb = 0
+                    for _, fp in downloaded_files:
+                        try:
+                            if os.path.exists(fp):
+                                total_size_mb += os.path.getsize(fp) / (1024 * 1024)
+                        except (OSError, IOError):
+                            # Silently skip if file can't be accessed
+                            pass
+                    
                     logger.info(
                         f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
                         f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records)"
