@@ -15,6 +15,8 @@ import yaml
 import logging
 import queue
 from datetime import datetime
+import html
+from urllib.parse import urlencode
 
 import pathlib
 import sqlite3
@@ -895,7 +897,6 @@ filterInput.addEventListener('input', updateFilter);
                 rows = q(sql, params)
                 
                 # Helper function to build sort URL with current filters
-                from urllib.parse import urlencode
                 def sort_url(column: str) -> str:
                     """Build URL for column sorting while preserving filters."""
                     params = {"view": "messages"}
@@ -934,27 +935,27 @@ filterInput.addEventListener('input', updateFilter);
                         <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px'>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Train ID:</label>
-                                <input type='text' name='train_id' value='""" + train_id + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
+                                <input type='text' name='train_id' value='""" + html.escape(train_id) + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Headcode:</label>
-                                <input type='text' name='headcode' value='""" + headcode + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
+                                <input type='text' name='headcode' value='""" + html.escape(headcode) + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Event Type:</label>
-                                <input type='text' name='event_type' value='""" + event_type + """' placeholder='e.g. ARRIVAL' style='padding:6px;width:100%'>
+                                <input type='text' name='event_type' value='""" + html.escape(event_type) + """' placeholder='e.g. ARRIVAL' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>STANOX:</label>
-                                <input type='text' name='stanox' value='""" + stanox + """' placeholder='e.g. 87701' style='padding:6px;width:100%'>
+                                <input type='text' name='stanox' value='""" + html.escape(stanox) + """' placeholder='e.g. 87701' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Platform:</label>
-                                <input type='text' name='platform' value='""" + platform + """' placeholder='e.g. 2' style='padding:6px;width:100%'>
+                                <input type='text' name='platform' value='""" + html.escape(platform) + """' placeholder='e.g. 2' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Variation Status:</label>
-                                <input type='text' name='variation_status' value='""" + variation_status + """' placeholder='e.g. LATE' style='padding:6px;width:100%'>
+                                <input type='text' name='variation_status' value='""" + html.escape(variation_status) + """' placeholder='e.g. LATE' style='padding:6px;width:100%'>
                             </div>
                         </div>
                         <div style='margin-top:12px'>
@@ -1056,7 +1057,6 @@ filterInput.addEventListener('input', updateFilter);
                 rows = q(sql, params)
                 
                 # Helper function to build sort URL with current filters
-                from urllib.parse import urlencode
                 def sort_url(column: str) -> str:
                     """Build URL for column sorting while preserving filters."""
                     params = {"view": "state"}
@@ -1089,15 +1089,15 @@ filterInput.addEventListener('input', updateFilter);
                         <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px'>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Train ID:</label>
-                                <input type='text' name='train_id' value='""" + train_id + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
+                                <input type='text' name='train_id' value='""" + html.escape(train_id) + """' placeholder='e.g. 123A45678' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Headcode:</label>
-                                <input type='text' name='headcode' value='""" + headcode + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
+                                <input type='text' name='headcode' value='""" + html.escape(headcode) + """' placeholder='e.g. 2C90' style='padding:6px;width:100%'>
                             </div>
                             <div>
                                 <label style='font-weight:600;display:block;margin-bottom:4px'>Location:</label>
-                                <input type='text' name='location' value='""" + location + """' placeholder='e.g. Clapham' style='padding:6px;width:100%'>
+                                <input type='text' name='location' value='""" + html.escape(location) + """' placeholder='e.g. Clapham' style='padding:6px;width:100%'>
                             </div>
                         </div>
                         <div style='margin-top:12px'>

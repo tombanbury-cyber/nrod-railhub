@@ -412,3 +412,60 @@ def test_trust_view_switching_preserves_filters():
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+
+
+def test_trust_xss_protection():
+    """Test that user inputs are properly escaped to prevent XSS attacks."""
+    from flask import Flask
+    from nrod_railhub import web
+    
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+        db_path = f.name
+    
+    try:
+        # Set up test database
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE trust_state (train_id TEXT, headcode TEXT, uid TEXT, toc_id TEXT, last_event_time TEXT, last_location TEXT, last_delay_min INTEGER)")
+        conn.execute("CREATE TABLE trust_messages (id INTEGER PRIMARY KEY, train_id TEXT, actual_timestamp_ms INTEGER, event_type TEXT, reporting_stanox TEXT, toc_id TEXT, toc_code TEXT, timetable_variation INTEGER, variation_status TEXT, platform TEXT, created_at_utc TEXT)")
+        conn.execute("CREATE TABLE toc_reference (toc_code TEXT PRIMARY KEY, toc_name TEXT)")
+        conn.execute("CREATE TABLE td_state (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        
+        app_holder = {}
+        def start_app():
+            original_flask_init = Flask.__init__
+            def patched_init(self, *args, **kwargs):
+                original_flask_init(self, *args, **kwargs)
+                app_holder['app'] = self
+            Flask.__init__ = patched_init
+            web.start_web_dashboard(db_path, 8088, None, None)
+            Flask.__init__ = original_flask_init
+        
+        import unittest.mock as mock
+        with mock.patch('flask.Flask.run'):
+            start_app()
+        
+        app = app_holder['app']
+        client = app.test_client()
+        
+        # Test XSS attempt in state view filters
+        xss_payload = '<script>alert("XSS")</script>'
+        response = client.get(f'/trust?view=state&train_id={xss_payload}')
+        result = response.data.decode('utf-8')
+        
+        # Raw script tags should not appear in output (should be escaped)
+        assert '<script>alert("XSS")</script>' not in result, "XSS payload should be escaped"
+        # Escaped version should be present
+        assert '&lt;script&gt;' in result or '&amp;lt;' in result, "HTML entities should be escaped"
+        
+        # Test XSS attempt in messages view filters
+        response = client.get(f'/trust?view=messages&event_type={xss_payload}')
+        result = response.data.decode('utf-8')
+        
+        assert '<script>alert("XSS")</script>' not in result, "XSS payload should be escaped in messages view"
+        assert '&lt;script&gt;' in result or '&amp;lt;' in result, "HTML entities should be escaped in messages view"
+        
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
