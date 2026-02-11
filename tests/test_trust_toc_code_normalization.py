@@ -238,9 +238,18 @@ def test_trust_messages_backfill_migration():
         with open(migration_path, 'r') as f:
             migration_sql = f.read()
         
+        # Remove comment lines and execute migration
+        statements = []
+        for line in migration_sql.split('\n'):
+            line = line.strip()
+            if line and not line.startswith('--'):
+                statements.append(line)
+        
+        clean_sql = '\n'.join(statements)
+        
         # Execute migration (split by semicolon to handle multiple statements)
-        for statement in migration_sql.split(';'):
-            if statement.strip() and not statement.strip().startswith('--'):
+        for statement in clean_sql.split(';'):
+            if statement.strip():
                 conn.execute(statement)
         
         conn.commit()
