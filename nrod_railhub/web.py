@@ -359,9 +359,9 @@ filterInput.addEventListener('input', updateFilter);
                 
                 # Filtering
                 headcode = request.form.get("headcode", "").strip()
-                config_data["headcode"] = headcode if headcode else None
+                config_data["headcode"] = headcode if headcode else ""
                 uid = request.form.get("uid", "").strip()
-                config_data["uid"] = uid if uid else None
+                config_data["uid"] = uid if uid else ""
                 td_area_str = request.form.get("td_area", "").strip()
                 config_data["td_area"] = [a.strip() for a in td_area_str.split(",") if a.strip()] if td_area_str else []
                 # TOC filter (multi-select list)
