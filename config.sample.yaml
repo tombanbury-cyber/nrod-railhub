@@ -34,6 +34,13 @@ vhost: publicdatafeeds.networkrail.co.uk
 # Example: ["EK", "WR"] for East Kent and Western Region
 # td_area: []
 
+# Filter to specific Train Operating Companies (TOCs) for schedule downloads
+# When specified, downloads and processes schedules only for these TOCs
+# This uses per-TOC downloads which are much smaller than the full CIF dataset
+# Example: ["SE", "GW"] for Southeastern and Great Western Railway
+# If not specified, schedule downloads are disabled
+# toc_filter: []
+
 # ============================================================================
 # Display Options
 # ============================================================================

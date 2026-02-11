@@ -258,6 +258,52 @@ class LocationResolver:
     def stanox_for_tiploc(self, code: str) -> Optional[str]:
         """Return STANOX for a given TIPLOC, or None if not found."""
         return self.tiploc_to_stanox.get((code or "").strip().upper())
+    
+    def add_tiploc_data(self, tiploc_records: List[Dict[str, str]], quiet: bool = False) -> int:
+        """Add TIPLOC data from schedule files to the resolver.
+        
+        This allows enriching the location resolver with TIPLOC data extracted
+        from CIF schedule files, which may contain locations not in CORPUS.
+        
+        Args:
+            tiploc_records: List of TIPLOC records with keys: tiploc, name, stanox, crs
+            quiet: If True, suppress log messages
+            
+        Returns:
+            Number of new TIPLOC entries added (not counting duplicates)
+        """
+        added = 0
+        
+        for record in tiploc_records:
+            tiploc = record.get("tiploc", "").strip().upper()
+            if not tiploc:
+                continue
+            
+            name = record.get("name", "").strip()
+            stanox = record.get("stanox", "").strip()
+            crs = record.get("crs", "").strip().upper()
+            
+            # Add TIPLOC -> name mapping if we have a name and it's new
+            if name and tiploc not in self.tiploc_to_name:
+                self.tiploc_to_name[tiploc] = name
+                added += 1
+            
+            # Add STANOX -> name mapping if we have both
+            if stanox and name and stanox not in self.stanox_to_name:
+                self.stanox_to_name[stanox] = name
+            
+            # Add CRS -> name mapping if we have both
+            if crs and name and crs not in self.crs_to_name:
+                self.crs_to_name[crs] = name
+            
+            # Add TIPLOC -> STANOX mapping
+            if tiploc and stanox and tiploc not in self.tiploc_to_stanox:
+                self.tiploc_to_stanox[tiploc] = stanox
+        
+        if not quiet and added > 0:
+            logger.info(f"Added {added} new TIPLOC entries from schedule data")
+        
+        return added
 
 
 class SmartResolver:
@@ -853,6 +899,212 @@ class ScheduleResolver:
             f.write(data)
         os.replace(tmp, out_gz)
 
+    def download_toc_schedule(
+        self,
+        username: str,
+        password: str,
+        toc_code: str,
+        business_code: str,
+        out_gz: str,
+        update_mode: bool = False,
+        day: str = "toc-full",
+        quiet: bool = False,
+    ) -> None:
+        """Download a TOC-specific schedule file.
+        
+        Args:
+            username: Network Rail username
+            password: Network Rail password
+            toc_code: 2-character TOC code (e.g., 'SE', 'GW')
+            business_code: Business code for the TOC (e.g., '84', '79')
+            out_gz: Path to save the downloaded gzip file
+            update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
+            day: Day selector for the schedule
+            quiet: If True, suppress log messages
+        """
+        schedule_type = f"CIF_{business_code}_TOC_UPDATE_DAILY" if update_mode else f"CIF_{business_code}_TOC_FULL_DAILY"
+        
+        if not quiet:
+            mode_str = "update" if update_mode else "full"
+            logger.info(f"Downloading {mode_str} schedule for {toc_code} (business code: {business_code})...")
+        
+        # Use the existing download method with TOC-specific parameters
+        self.download(
+            username=username,
+            password=password,
+            out_gz=out_gz,
+            schedule_type=schedule_type,
+            day=day,
+            quiet=quiet,
+        )
+
+    def download_multiple_toc_schedules(
+        self,
+        username: str,
+        password: str,
+        toc_filter: List[str],
+        toc_resolver: 'TOCResolver',
+        cache_dir: str,
+        update_mode: bool = False,
+        day: str = "toc-full",
+        quiet: bool = False,
+    ) -> List[Tuple[str, str]]:
+        """Download schedules for multiple TOCs based on filter.
+        
+        Args:
+            username: Network Rail username
+            password: Network Rail password
+            toc_filter: List of 2-character TOC codes to download
+            toc_resolver: TOCResolver instance to get business codes
+            cache_dir: Directory to store downloaded files
+            update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
+            day: Day selector for the schedule
+            quiet: If True, suppress log messages
+            
+        Returns:
+            List of (toc_code, file_path) tuples for successfully downloaded files
+        """
+        downloaded_files = []
+        
+        for toc_code in toc_filter:
+            # Get business code for this TOC
+            toc_data = toc_resolver.TOC_DATA.get(toc_code.upper())
+            if not toc_data:
+                if not quiet:
+                    logger.warning(f"TOC code {toc_code} not found in TOC reference data, skipping")
+                continue
+                
+            business_code = toc_data.get('business_code')
+            if not business_code:
+                if not quiet:
+                    logger.warning(f"No business code for TOC {toc_code}, skipping")
+                continue
+            
+            # Construct output path
+            mode_suffix = "_update" if update_mode else "_full"
+            out_gz = os.path.join(cache_dir, f"schedule_{toc_code.upper()}{mode_suffix}.json.gz")
+            
+            try:
+                self.download_toc_schedule(
+                    username=username,
+                    password=password,
+                    toc_code=toc_code.upper(),
+                    business_code=business_code,
+                    out_gz=out_gz,
+                    update_mode=update_mode,
+                    day=day,
+                    quiet=quiet,
+                )
+                downloaded_files.append((toc_code.upper(), out_gz))
+                
+                if not quiet:
+                    file_size = os.path.getsize(out_gz) / (1024 * 1024)  # MB
+                    logger.info(f"Downloaded {toc_code} schedule ({file_size:.1f}MB)")
+                    
+            except Exception as e:
+                if not quiet:
+                    logger.error(f"Failed to download schedule for {toc_code}: {e}")
+                # Continue with other TOCs even if one fails
+                continue
+        
+        return downloaded_files
+
+    def extract_tiploc_data(
+        self,
+        gz_path: str,
+        quiet: bool = False,
+    ) -> List[Dict[str, str]]:
+        """Extract TIPLOC data from the beginning of a CIF schedule file.
+        
+        According to the OpenRailData documentation, TOC-specific schedule files
+        contain TIPLOC reference data in the first few thousand lines before the
+        actual schedule records.
+        
+        Args:
+            gz_path: Path to the gzipped schedule file
+            quiet: If True, suppress log messages
+            
+        Returns:
+            List of TIPLOC records as dictionaries with keys:
+            - tiploc: TIPLOC code
+            - name: Station/location name (if available)
+            - stanox: STANOX code (if available)
+            - crs: CRS code (if available)
+        """
+        import gzip
+        import json
+        
+        tiploc_records = []
+        path = pathlib.Path(gz_path).expanduser()
+        
+        if not path.exists():
+            if not quiet:
+                logger.warning(f"Schedule file not found: {gz_path}")
+            return tiploc_records
+        
+        try:
+            with gzip.open(str(path), "rt", encoding="utf-8", errors="replace") as f:
+                # According to docs, TIPLOC data is in the first few thousand lines
+                # We'll scan the first 10,000 lines or until we see schedule records
+                line_count = 0
+                max_lines_to_scan = 10000
+                
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    line_count += 1
+                    if line_count > max_lines_to_scan:
+                        break
+                    
+                    try:
+                        obj = json.loads(line)
+                        
+                        # Look for TIPLOC records (various possible formats)
+                        # Format 1: {"TiplocV1": {...}}
+                        if "TiplocV1" in obj:
+                            tiploc_data = obj["TiplocV1"]
+                            tiploc_code = tiploc_data.get("tiploc_code", "").strip()
+                            if tiploc_code:
+                                record = {
+                                    "tiploc": tiploc_code,
+                                    "name": tiploc_data.get("nlc_description", "").strip() or tiploc_data.get("tps_description", "").strip(),
+                                    "stanox": tiploc_data.get("stanox", "").strip(),
+                                    "crs": tiploc_data.get("three_alpha", "").strip() or tiploc_data.get("crs_code", "").strip(),
+                                }
+                                tiploc_records.append(record)
+                        
+                        # Format 2: Direct TIPLOC data (alternative format)
+                        elif "tiploc_code" in obj:
+                            tiploc_code = obj.get("tiploc_code", "").strip()
+                            if tiploc_code:
+                                record = {
+                                    "tiploc": tiploc_code,
+                                    "name": obj.get("nlc_description", "").strip() or obj.get("tps_description", "").strip(),
+                                    "stanox": obj.get("stanox", "").strip(),
+                                    "crs": obj.get("three_alpha", "").strip() or obj.get("crs_code", "").strip(),
+                                }
+                                tiploc_records.append(record)
+                        
+                        # If we see a schedule record, we've past the TIPLOC section
+                        elif "JsonScheduleV1" in obj:
+                            # This marks the start of actual schedule data
+                            break
+                            
+                    except json.JSONDecodeError:
+                        # Skip invalid JSON lines
+                        continue
+            
+            if not quiet and tiploc_records:
+                logger.info(f"Extracted {len(tiploc_records)} TIPLOC records from {gz_path}")
+                
+        except Exception as e:
+            if not quiet:
+                logger.error(f"Failed to extract TIPLOC data from {gz_path}: {e}")
+        
+        return tiploc_records
+
 
 class TOCResolver:
     """
@@ -1012,6 +1264,24 @@ class TOCResolver:
             return None
         code = toc_code.strip().upper()
         return self.toc_map.get(code)
+    
+    def get_business_code(self, toc_code: str) -> Optional[str]:
+        """
+        Get the business code for a TOC code.
+        
+        Args:
+            toc_code: 2-character TOC code (e.g., 'SE', 'GW')
+            
+        Returns:
+            Business code if found, None otherwise
+        """
+        if not toc_code:
+            return None
+        code = toc_code.strip().upper()
+        toc_data = self.TOC_DATA.get(code)
+        if toc_data:
+            return toc_data.get('business_code')
+        return None
     
     def get_all_tocs(self) -> List[Dict[str, str]]:
         """
