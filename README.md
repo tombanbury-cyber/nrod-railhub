@@ -73,7 +73,47 @@ log_level: info
 
 # Filtering
 headcode: 2C90  # Optional: monitor specific train
+toc_filter: ["SE", "GW"]  # Optional: filter to specific TOCs for schedule downloads
 ```
+
+### Schedule Downloads
+
+The application can download and use daily timetable data to enrich train information. **Schedule downloads are now TOC-specific** to reduce storage and bandwidth usage.
+
+**Configuration:**
+```yaml
+# Enable schedule downloads for specific Train Operating Companies
+toc_filter: ["SE", "GW"]  # Southeastern, Great Western Railway
+```
+
+**Behavior:**
+- **When `toc_filter` is configured:** Downloads schedules only for the specified TOCs
+  - Uses per-TOC endpoints (e.g., `CIF_HU_TOC_FULL_DAILY` for Southeastern)
+  - Format: JSON (despite "CIF" in the type name)
+  - Smaller download size (15-20MB per TOC vs 300MB for full dataset)
+  - Extracts TIPLOC location data from schedule files
+  - Enriches location resolver with TOC-specific stations
+  
+- **When `toc_filter` is NOT configured:** Schedule downloads are disabled
+  - Displays: "Per-TOC schedule downloads are disabled"
+  - Application continues without timetable enrichment
+  - VSTP (late-notice changes) still provides schedule data
+
+**Business Codes vs Sector Codes:**
+Schedule downloads use 2-letter **business codes** (e.g., HU, HY, HW). These are different from:
+- **Sector codes**: Numeric codes (80, 84, 88) that appear in TRUST messages
+- **TOC codes**: Our canonical identifiers (SE, SW, SN)
+
+**Available TOC Codes and Business Codes:**
+- `SE` - Southeastern (business code: HU)
+- `SW` - South Western Railway (business code: HY)
+- `SN` - Southern (business code: HW)
+- `SR` - ScotRail (business code: HA)
+- `EM` - East Midlands Railway (business code: EM)
+- `VT` - Avanti West Coast (business code: HF)
+- See [TOCResolver](nrod_railhub/resolvers.py) for complete list
+
+**Note:** Only TOCs with known business codes support schedule downloads.
 
 ### Using the Configuration File
 

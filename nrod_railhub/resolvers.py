@@ -258,6 +258,52 @@ class LocationResolver:
     def stanox_for_tiploc(self, code: str) -> Optional[str]:
         """Return STANOX for a given TIPLOC, or None if not found."""
         return self.tiploc_to_stanox.get((code or "").strip().upper())
+    
+    def add_tiploc_data(self, tiploc_records: List[Dict[str, Any]], quiet: bool = False) -> int:
+        """Add TIPLOC data from schedule files to the resolver.
+        
+        This allows enriching the location resolver with TIPLOC data extracted
+        from CIF schedule files, which may contain locations not in CORPUS.
+        
+        Args:
+            tiploc_records: List of TIPLOC records with keys: tiploc, name, stanox, crs
+            quiet: If True, suppress log messages
+            
+        Returns:
+            Number of new TIPLOC entries added (not counting duplicates)
+        """
+        added = 0
+        
+        for record in tiploc_records:
+            tiploc = record.get("tiploc", "").strip().upper()
+            if not tiploc:
+                continue
+            
+            name = record.get("name", "").strip()
+            stanox = record.get("stanox", "").strip()
+            crs = record.get("crs", "").strip().upper()
+            
+            # Add TIPLOC -> name mapping if we have a name and it's new
+            if name and tiploc not in self.tiploc_to_name:
+                self.tiploc_to_name[tiploc] = name
+                added += 1
+            
+            # Add STANOX -> name mapping if we have both
+            if stanox and name and stanox not in self.stanox_to_name:
+                self.stanox_to_name[stanox] = name
+            
+            # Add CRS -> name mapping if we have both
+            if crs and name and crs not in self.crs_to_name:
+                self.crs_to_name[crs] = name
+            
+            # Add TIPLOC -> STANOX mapping
+            if tiploc and stanox and tiploc not in self.tiploc_to_stanox:
+                self.tiploc_to_stanox[tiploc] = stanox
+        
+        if not quiet and added > 0:
+            logger.info(f"Added {added} new TIPLOC entries from schedule data")
+        
+        return added
 
 
 class SmartResolver:
@@ -853,6 +899,216 @@ class ScheduleResolver:
             f.write(data)
         os.replace(tmp, out_gz)
 
+    def download_toc_schedule(
+        self,
+        username: str,
+        password: str,
+        toc_code: str,
+        business_code: str,
+        out_gz: str,
+        update_mode: bool = False,
+        day: str = "toc-full",
+        quiet: bool = False,
+    ) -> None:
+        """Download a TOC-specific schedule file.
+        
+        The schedule type format CIF_XX_TOC_FULL_DAILY uses 2-letter business codes (e.g., HU, HY, HW).
+        Returns JSON format despite the "CIF" prefix.
+        Only CIF_ALL_FULL_DAILY with .CIF.gz suffix returns actual CIF format.
+        
+        Args:
+            username: Network Rail username
+            password: Network Rail password
+            toc_code: 2-character TOC code (e.g., 'SE', 'GW')
+            business_code: 2-letter business code for the TOC (e.g., 'HU' for Southeastern)
+            out_gz: Path to save the downloaded gzip file
+            update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
+            day: Day selector for the schedule (e.g., 'toc-full' or 'toc-update-mon')
+            quiet: If True, suppress log messages
+        """
+        schedule_type = f"CIF_{business_code}_TOC_UPDATE_DAILY" if update_mode else f"CIF_{business_code}_TOC_FULL_DAILY"
+        
+        if not quiet:
+            mode_str = "update" if update_mode else "full"
+            logger.info(f"Downloading {mode_str} schedule for {toc_code} (business code: {business_code})...")
+        
+        # Use the existing download method with TOC-specific parameters
+        self.download(
+            username=username,
+            password=password,
+            out_gz=out_gz,
+            schedule_type=schedule_type,
+            day=day,
+            quiet=quiet,
+        )
+
+    def download_multiple_toc_schedules(
+        self,
+        username: str,
+        password: str,
+        toc_filter: List[str],
+        toc_resolver: 'TOCResolver',
+        cache_dir: str,
+        update_mode: bool = False,
+        day: str = "toc-full",
+        quiet: bool = False,
+    ) -> List[Tuple[str, str]]:
+        """Download schedules for multiple TOCs based on filter.
+        
+        Args:
+            username: Network Rail username
+            password: Network Rail password
+            toc_filter: List of 2-character TOC codes to download
+            toc_resolver: TOCResolver instance to get business codes
+            cache_dir: Directory to store downloaded files
+            update_mode: If True, downloads UPDATE_DAILY, otherwise FULL_DAILY
+            day: Day selector for the schedule
+            quiet: If True, suppress log messages
+            
+        Returns:
+            List of (toc_code, file_path) tuples for successfully downloaded files
+        """
+        downloaded_files = []
+        
+        for toc_code in toc_filter:
+            # Get business code for this TOC
+            toc_data = toc_resolver.TOC_DATA.get(toc_code.upper())
+            if not toc_data:
+                if not quiet:
+                    logger.warning(f"TOC code {toc_code} not found in TOC reference data, skipping")
+                continue
+                
+            business_code = toc_data.get('business_code')
+            if not business_code:
+                if not quiet:
+                    logger.warning(f"No business code for TOC {toc_code}, skipping")
+                continue
+            
+            # Construct output path
+            mode_suffix = "_update" if update_mode else "_full"
+            out_gz = os.path.join(cache_dir, f"schedule_{toc_code.upper()}{mode_suffix}.json.gz")
+            
+            try:
+                self.download_toc_schedule(
+                    username=username,
+                    password=password,
+                    toc_code=toc_code.upper(),
+                    business_code=business_code,
+                    out_gz=out_gz,
+                    update_mode=update_mode,
+                    day=day,
+                    quiet=quiet,
+                )
+                downloaded_files.append((toc_code.upper(), out_gz))
+                
+                if not quiet:
+                    file_size = os.path.getsize(out_gz) / (1024 * 1024)  # MB
+                    logger.info(f"Downloaded {toc_code} schedule ({file_size:.1f}MB)")
+                    
+            except Exception as e:
+                if not quiet:
+                    logger.error(f"Failed to download schedule for {toc_code}: {e}")
+                # Continue with other TOCs even if one fails
+                continue
+        
+        return downloaded_files
+
+    def extract_tiploc_data(
+        self,
+        gz_path: str,
+        quiet: bool = False,
+    ) -> List[Dict[str, str]]:
+        """Extract TIPLOC data from the beginning of a CIF schedule file.
+        
+        According to the OpenRailData documentation, TOC-specific schedule files
+        contain TIPLOC reference data in the first few thousand lines before the
+        actual schedule records.
+        
+        Args:
+            gz_path: Path to the gzipped schedule file
+            quiet: If True, suppress log messages
+            
+        Returns:
+            List of TIPLOC records as dictionaries with keys:
+            - tiploc: TIPLOC code
+            - name: Station/location name (if available)
+            - stanox: STANOX code (if available)
+            - crs: CRS code (if available)
+        """
+        import gzip
+        import json
+        
+        tiploc_records = []
+        path = pathlib.Path(gz_path).expanduser()
+        
+        if not path.exists():
+            if not quiet:
+                logger.warning(f"Schedule file not found: {gz_path}")
+            return tiploc_records
+        
+        try:
+            with gzip.open(str(path), "rt", encoding="utf-8", errors="replace") as f:
+                # According to docs, TIPLOC data is in the first few thousand lines
+                # We'll scan the first 10,000 lines or until we see schedule records
+                line_count = 0
+                max_lines_to_scan = 10000
+                
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    line_count += 1
+                    if line_count > max_lines_to_scan:
+                        break
+                    
+                    try:
+                        obj = json.loads(line)
+                        
+                        # Look for TIPLOC records (various possible formats)
+                        # Format 1: {"TiplocV1": {...}}
+                        if "TiplocV1" in obj:
+                            tiploc_data = obj["TiplocV1"]
+                            tiploc_code = tiploc_data.get("tiploc_code", "").strip()
+                            if tiploc_code:
+                                record = {
+                                    "tiploc": tiploc_code,
+                                    "name": tiploc_data.get("nlc_description", "").strip() or tiploc_data.get("tps_description", "").strip(),
+                                    "stanox": tiploc_data.get("stanox", "").strip(),
+                                    "crs": tiploc_data.get("three_alpha", "").strip() or tiploc_data.get("crs_code", "").strip(),
+                                }
+                                tiploc_records.append(record)
+                        
+                        # Format 2: Direct TIPLOC data (alternative format)
+                        elif "tiploc_code" in obj:
+                            tiploc_code = obj.get("tiploc_code", "").strip()
+                            if tiploc_code:
+                                record = {
+                                    "tiploc": tiploc_code,
+                                    "name": obj.get("nlc_description", "").strip() or obj.get("tps_description", "").strip(),
+                                    "stanox": obj.get("stanox", "").strip(),
+                                    "crs": obj.get("three_alpha", "").strip() or obj.get("crs_code", "").strip(),
+                                }
+                                tiploc_records.append(record)
+                        
+                        # If we see a schedule record, we've passed the TIPLOC section
+                        elif "JsonScheduleV1" in obj:
+                            # This marks the start of actual schedule data
+                            break
+                            
+                    except json.JSONDecodeError:
+                        # Skip invalid JSON lines
+                        continue
+            
+            if not quiet and tiploc_records:
+                logger.info(f"Extracted {len(tiploc_records)} TIPLOC records from {gz_path}")
+                
+        except Exception as e:
+            if not quiet:
+                logger.error(f"Failed to extract TIPLOC data from {gz_path}: {e}")
+        
+        return tiploc_records
+
 
 class TOCResolver:
     """
@@ -870,50 +1126,53 @@ class TOCResolver:
     # - name: Full operator name
     # - sector: Type of operator (Passenger, Freight, etc.)
     # - atoc_code: ATOC (Association of Train Operating Companies) 3-letter code
-    # - business_code: Numeric business code (if known from TRUST messages)
+    # - business_code: 2-letter business code used in Network Rail feed URLs (e.g., CIF_HU_TOC_FULL_DAILY)
+    #                  This is the actual business code as defined in rail industry standards
+    # - sector_code: Numeric sector code that appears in TRUST messages for TOC identification
+    #                These were previously (incorrectly) stored in business_code field
     # - legacy_codes: List of historical codes that may appear in feeds
     TOC_DATA = {
         'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'ATW'},
-        'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CCR', 'business_code': '23'},
-        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CHR', 'business_code': '74'},
-        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CSL', 'business_code': '85'},
-        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': '61'},
-        'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'EST', 'business_code': '28'},
+        'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CCR', 'sector_code': '23'},
+        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CHR', 'sector_code': '74'},
+        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CSL', 'sector_code': '85'},
+        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': 'EM', 'sector_code': '28'},
+        'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'EST', 'sector_code': '28'},
         'EX': {'name': 'Express Passenger', 'sector': 'Passenger'},
         'FC': {'name': 'First Capital Connect', 'sector': 'Passenger', 'atoc_code': 'FCC'},
-        'GC': {'name': 'Grand Central', 'sector': 'Passenger', 'atoc_code': 'GCR', 'business_code': '22'},
+        'GC': {'name': 'Grand Central', 'sector': 'Passenger', 'atoc_code': 'GCR', 'sector_code': '22'},
         'GN': {'name': 'Great Northern', 'sector': 'Passenger', 'atoc_code': 'GNR'},
-        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger', 'atoc_code': 'LNR', 'business_code': '24'},
-        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger', 'atoc_code': 'GWR', 'business_code': '79'},
-        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger', 'atoc_code': 'GX', 'business_code': '26'},
+        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger', 'atoc_code': 'LNR', 'sector_code': '24'},
+        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger', 'atoc_code': 'GWR', 'sector_code': '79'},
+        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger', 'atoc_code': 'GX', 'sector_code': '26'},
         'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger', 'atoc_code': 'HEX'},
-        'HT': {'name': 'Hull Trains', 'sector': 'Passenger', 'atoc_code': 'HT', 'business_code': '80'},
-        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger', 'atoc_code': 'HEX', 'business_code': '29'},
+        'HT': {'name': 'Hull Trains', 'sector': 'Passenger', 'atoc_code': 'HT', 'sector_code': '80'},
+        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger', 'atoc_code': 'HEX', 'sector_code': '29'},
         'IL': {'name': 'Island Line', 'sector': 'Passenger', 'atoc_code': 'IL'},
         'LE': {'name': 'Greater Anglia', 'sector': 'Passenger', 'atoc_code': 'LEA'},
-        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'LMR', 'business_code': '72'},
-        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger', 'atoc_code': 'LNW', 'business_code': '86'},
-        'LO': {'name': 'London Overground', 'sector': 'Passenger', 'atoc_code': 'LOO', 'business_code': '87'},
-        'LT': {'name': 'London Underground', 'sector': 'Passenger', 'atoc_code': 'LUL', 'business_code': '91'},
-        'ME': {'name': 'Merseyrail', 'sector': 'Passenger', 'atoc_code': 'MER', 'business_code': '65'},
-        'NC': {'name': 'Northern Trains', 'sector': 'Passenger', 'atoc_code': 'NT', 'business_code': '60'},
+        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'LMR', 'sector_code': '72'},
+        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger', 'atoc_code': 'LNW', 'sector_code': '86'},
+        'LO': {'name': 'London Overground', 'sector': 'Passenger', 'atoc_code': 'LOO', 'sector_code': '87'},
+        'LT': {'name': 'London Underground', 'sector': 'Passenger', 'atoc_code': 'LUL', 'sector_code': '91'},
+        'ME': {'name': 'Merseyrail', 'sector': 'Passenger', 'atoc_code': 'MER', 'sector_code': '65'},
+        'NC': {'name': 'Northern Trains', 'sector': 'Passenger', 'atoc_code': 'NT', 'sector_code': '60'},
         'NT': {'name': 'Northern Rail', 'sector': 'Passenger', 'atoc_code': 'NT'},
         'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage'},
         'PE': {'name': 'Penmere', 'sector': 'Freight'},
         'PO': {'name': 'Provincial', 'sector': 'Passenger'},
-        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': '84'},
+        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': 'HU', 'sector_code': '80'},
         'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger', 'atoc_code': 'SWT'},
-        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': '88'},
-        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': '55'},
-        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': '71'},
+        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': 'HW', 'sector_code': '88'},
+        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': 'HA', 'sector_code': '60'},
+        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': 'HY', 'sector_code': '84'},
         'SX': {'name': 'Stansted Express', 'sector': 'Passenger', 'atoc_code': 'SX'},
         'TL': {'name': 'Thameslink', 'sector': 'Passenger', 'atoc_code': 'TLK'},
-        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TPE', 'business_code': '20'},
-        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TFW', 'business_code': '83'},
-        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': '25'},
+        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TPE', 'sector_code': '20'},
+        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TFW', 'sector_code': '83'},
+        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': 'HF', 'sector_code': '65'},
         'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter', 'atoc_code': 'WCR'},
-        'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XCT', 'business_code': '27'},
-        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'ELZ', 'business_code': '92'},
+        'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XCT', 'sector_code': '27'},
+        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'ELZ', 'sector_code': '92'},
         'ZZ': {'name': 'Unidentified', 'sector': 'Unknown'},
         # Freight operators
         'DB': {'name': 'DB Cargo UK', 'sector': 'Freight', 'atoc_code': 'DBC'},
@@ -943,6 +1202,7 @@ class TOCResolver:
         self.toc_map: Dict[str, str] = {}
         self.atoc_to_canonical: Dict[str, str] = {}  # Maps ATOC codes to canonical 2-char codes
         self.business_to_canonical: Dict[str, str] = {}  # Maps business codes to canonical 2-char codes
+        self.sector_to_canonical: Dict[str, str] = {}  # Maps sector codes to canonical 2-char codes
         self._load_static_data()
     
     def _load_static_data(self) -> None:
@@ -959,6 +1219,11 @@ class TOCResolver:
             if 'business_code' in data:
                 business = data['business_code']
                 self.business_to_canonical[business] = code
+            
+            # Build sector code mapping (for TRUST message normalization)
+            if 'sector_code' in data:
+                sector = data['sector_code']
+                self.sector_to_canonical[sector] = code
     
     def resolve_toc_code(self, incoming: Optional[str]) -> Optional[str]:
         """
@@ -967,10 +1232,11 @@ class TOCResolver:
         Handles various identifier formats:
         - Canonical 2-character codes (e.g., 'SW', 'GW') - returned as-is
         - ATOC 3-letter codes (e.g., 'SWR', 'GWR') - mapped to canonical code
-        - Numeric business codes (e.g., '71', '79') - mapped to canonical code
+        - 2-letter business codes (e.g., 'HY', 'HU') - mapped to canonical code
+        - Numeric sector codes (e.g., '84', '80') - mapped to canonical code (for TRUST messages)
         
         Args:
-            incoming: TOC identifier from TRUST message (may be None, canonical, ATOC, or numeric)
+            incoming: TOC identifier from message (may be None, canonical, ATOC, business, or sector code)
             
         Returns:
             Canonical 2-character TOC code if mapping found, None otherwise
@@ -991,9 +1257,13 @@ class TOCResolver:
         if code in self.atoc_to_canonical:
             return self.atoc_to_canonical[code]
         
-        # Check if it's a business code (numeric)
+        # Check if it's a business code
         if code in self.business_to_canonical:
             return self.business_to_canonical[code]
+        
+        # Check if it's a sector code (for TRUST message compatibility)
+        if code in self.sector_to_canonical:
+            return self.sector_to_canonical[code]
         
         # No mapping found
         return None
@@ -1012,6 +1282,24 @@ class TOCResolver:
             return None
         code = toc_code.strip().upper()
         return self.toc_map.get(code)
+    
+    def get_business_code(self, toc_code: str) -> Optional[str]:
+        """
+        Get the business code for a TOC code.
+        
+        Args:
+            toc_code: 2-character TOC code (e.g., 'SE', 'GW')
+            
+        Returns:
+            Business code if found, None otherwise
+        """
+        if not toc_code:
+            return None
+        code = toc_code.strip().upper()
+        toc_data = self.TOC_DATA.get(code)
+        if toc_data:
+            return toc_data.get('business_code')
+        return None
     
     def get_all_tocs(self) -> List[Dict[str, str]]:
         """
@@ -1047,6 +1335,7 @@ class TOCResolver:
                     toc_code=code,
                     toc_name=data['name'],
                     business_code=data.get('business_code'),
+                    sector_code=data.get('sector_code'),
                     atoc_code=data.get('atoc_code'),
                     sector=data.get('sector')
                 )

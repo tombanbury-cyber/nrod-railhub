@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import threading
@@ -145,35 +146,82 @@ def connect_and_run(args: argparse.Namespace) -> None:
     #
     # Important: the daily schedule file can be large; we load it in a background thread
     # so TD/TRUST streaming starts immediately.
+    #
+    # With TOC filtering: downloads separate files per TOC and extracts TIPLOC data.
+    # Without TOC filtering: displays message and skips schedule downloads.
     if getattr(args, "use_schedule", True):
         import threading
 
         def _schedule_worker() -> None:
             try:
-                sched_path = pathlib.Path(args.schedule_cache).expanduser()
-                sched_path.parent.mkdir(parents=True, exist_ok=True)
-
-                if args.schedule_refresh or (not sched_path.exists()):
-                    logger.info(f"SCHEDULE: downloading to {sched_path} ...")
-                    ScheduleResolver().download(
+                # Check if toc_filter is configured
+                toc_filter = getattr(args, 'toc_filter', None)
+                
+                if toc_filter and isinstance(toc_filter, list) and len(toc_filter) > 0:
+                    # TOC-filtered schedule downloads
+                    logger.info(f"TOC filter configured: {', '.join(toc_filter)}")
+                    
+                    schedule_resolver = ScheduleResolver()
+                    cache_dir = str(pathlib.Path(args.schedule_cache).expanduser().parent)
+                    
+                    # Download schedules for each filtered TOC
+                    downloaded_files = schedule_resolver.download_multiple_toc_schedules(
                         username=args.user,
                         password=args.password,
-                        out_gz=str(sched_path),
-                        schedule_type=args.schedule_type,
-                        day=args.schedule_day,
+                        toc_filter=toc_filter,
+                        toc_resolver=toc_resolver,
+                        cache_dir=cache_dir,
+                        update_mode=False,  # Use FULL_DAILY
+                        day="toc-full",
                         quiet=False,
                     )
+                    
+                    if not downloaded_files:
+                        logger.warning("No TOC schedules downloaded, continuing without timetable enrichment")
+                        return
+                    
+                    # Load and merge schedules from all downloaded files
+                    total_schedules = 0
+                    total_tiplocs = 0
+                    
+                    for toc_code, file_path in downloaded_files:
+                        # Extract TIPLOC data from this schedule file
+                        tiploc_records = schedule_resolver.extract_tiploc_data(file_path, quiet=False)
+                        if tiploc_records:
+                            added = resolver.add_tiploc_data(tiploc_records, quiet=False)
+                            total_tiplocs += len(tiploc_records)
+                        
+                        # Load schedule data
+                        hv.load_schedule_gz(
+                            file_path,
+                            service_date=datetime.now(timezone.utc).date().isoformat(),
+                            headcode_filter=args.headcode,
+                            uid_filter=args.uid,
+                            quiet=False,
+                        )
+                    
+                    # Calculate total size, handling missing files gracefully
+                    total_size_mb = 0
+                    for _, fp in downloaded_files:
+                        try:
+                            if os.path.exists(fp):
+                                total_size_mb += os.path.getsize(fp) / (1024 * 1024)
+                        except (OSError, IOError):
+                            # Silently skip if file can't be accessed
+                            pass
+                    
+                    logger.info(
+                        f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
+                        f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records)"
+                    )
+                    
                 else:
-                    logger.info(f"SCHEDULE: using cached file {sched_path}")
-
-                hv.load_schedule_gz(
-                    str(sched_path),
-                    service_date=datetime.now(timezone.utc).date().isoformat(),
-                    headcode_filter=args.headcode,
-                    uid_filter=args.uid,
-                    quiet=False,
-                )
-                logger.info("SCHEDULE: loaded (timetable enrichment enabled)")
+                    # No TOC filter - display informative message
+                    logger.info("No TOC filter specified in configuration")
+                    logger.info("Per-TOC schedule downloads are disabled")
+                    logger.info("To enable schedule downloads, configure toc_filter in settings")
+                    logger.info("Continuing without timetable enrichment")
+                    
             except Exception as e:
                 logger.error(f"SCHEDULE: failed to load ({e}); continuing without timetable enrichment")
 

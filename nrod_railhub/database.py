@@ -234,6 +234,7 @@ class RailDB:
                     toc_code TEXT PRIMARY KEY,
                     toc_name TEXT NOT NULL,
                     business_code TEXT,
+                    sector_code TEXT,
                     atoc_code TEXT,
                     sector TEXT,
                     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -873,30 +874,33 @@ class RailDB:
                 raise
 
     def upsert_toc(self, toc_code: str, toc_name: str, business_code: Optional[str] = None, 
-                   atoc_code: Optional[str] = None, sector: Optional[str] = None) -> None:
+                   sector_code: Optional[str] = None, atoc_code: Optional[str] = None, 
+                   sector: Optional[str] = None) -> None:
         """
         Insert or update a TOC reference entry.
         
         Args:
             toc_code: 2-character TOC code (e.g., 'SW' for South Western Railway)
             toc_name: Full name of the train operating company
-            business_code: Business code if available
+            business_code: 2-letter business code if available
+            sector_code: Numeric sector code if available
             atoc_code: ATOC membership code if available
             sector: Sector classification (e.g., 'Passenger', 'Freight')
         """
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO toc_reference(toc_code, toc_name, business_code, atoc_code, sector)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO toc_reference(toc_code, toc_name, business_code, sector_code, atoc_code, sector)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(toc_code) DO UPDATE SET
                     toc_name=excluded.toc_name,
                     business_code=excluded.business_code,
+                    sector_code=excluded.sector_code,
                     atoc_code=excluded.atoc_code,
                     sector=excluded.sector,
                     updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
                 """,
-                (toc_code, toc_name, business_code, atoc_code, sector),
+                (toc_code, toc_name, business_code, sector_code, atoc_code, sector),
             )
     
     def get_all_tocs(self) -> list[dict]:
@@ -904,21 +908,22 @@ class RailDB:
         Retrieve all TOC reference data.
         
         Returns:
-            List of dicts with keys: toc_code, toc_name, business_code, atoc_code, sector, updated_at_utc
+            List of dicts with keys: toc_code, toc_name, business_code, sector_code, atoc_code, sector, updated_at_utc
         """
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT toc_code, toc_name, business_code, atoc_code, sector, updated_at_utc FROM toc_reference ORDER BY toc_code"
+                "SELECT toc_code, toc_name, business_code, sector_code, atoc_code, sector, updated_at_utc FROM toc_reference ORDER BY toc_code"
             )
             return [
                 {
                     'toc_code': row[0],
                     'toc_name': row[1],
                     'business_code': row[2],
-                    'atoc_code': row[3],
-                    'sector': row[4],
-                    'updated_at_utc': row[5]
+                    'sector_code': row[3],
+                    'atoc_code': row[4],
+                    'sector': row[5],
+                    'updated_at_utc': row[6]
                 }
                 for row in cursor.fetchall()
             ]
@@ -943,12 +948,12 @@ class RailDB:
         """
         Get canonical TOC code from an external identifier.
         
-        Queries toc_reference for a match on toc_code, atoc_code, or business_code,
+        Queries toc_reference for a match on toc_code, atoc_code, business_code, or sector_code,
         returning the canonical toc_code if found. This is a defensive lookup useful
         when the TOCResolver is not available.
         
         Args:
-            external_code: TOC identifier (may be canonical, ATOC, or business code)
+            external_code: TOC identifier (may be canonical, ATOC, business, or sector code)
             
         Returns:
             Canonical 2-character TOC code if found, None otherwise
@@ -963,8 +968,8 @@ class RailDB:
             # Check all possible code columns
             cursor.execute("""
                 SELECT toc_code FROM toc_reference 
-                WHERE toc_code=? OR atoc_code=? OR business_code=?
-            """, (code, code, code))
+                WHERE toc_code=? OR atoc_code=? OR business_code=? OR sector_code=?
+            """, (code, code, code, code))
             row = cursor.fetchone()
             return row[0] if row else None
 
