@@ -28,6 +28,7 @@ class RailDB:
         enable_mapper: bool = True,
         retain_trust_days: Optional[int] = None,
         retain_vstp_days: Optional[int] = None,
+        retain_cif_days: Optional[int] = None,
         retention_check_interval_s: int = 3600,
         retention_batch_size: int = 1000,
         save_raw_json: bool = True,
@@ -39,6 +40,7 @@ class RailDB:
             enable_mapper: If True, enables automatic berth-to-signal correlation
             retain_trust_days: Days to retain TRUST messages (None = no cleanup)
             retain_vstp_days: Days to retain VSTP schedules (None = no cleanup)
+            retain_cif_days: Days to retain CIF schedules (None = no cleanup)
             retention_check_interval_s: Seconds between retention checks (default 3600)
             retention_batch_size: Batch size for deletion (default 1000)
             save_raw_json: If True, saves raw JSON messages to database (default True)
@@ -56,6 +58,7 @@ class RailDB:
         # Retention settings
         self.retain_trust_days = retain_trust_days
         self.retain_vstp_days = retain_vstp_days
+        self.retain_cif_days = retain_cif_days
         self.retention_check_interval_s = retention_check_interval_s
         self.retention_batch_size = retention_batch_size
         self._retention_thread: Optional[threading.Thread] = None
@@ -74,7 +77,7 @@ class RailDB:
             self._start_batch_processor()
         
         # Start retention thread if enabled
-        if retain_trust_days or retain_vstp_days:
+        if retain_trust_days or retain_vstp_days or retain_cif_days:
             self._start_retention_thread()
 
     def _init_schema(self) -> None:
@@ -229,6 +232,59 @@ class RailDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_loc_uid ON vstp_schedule_locations(uid);
                 
+                -- CIF: downloaded schedule header table (from daily TOC schedule downloads)
+                CREATE TABLE IF NOT EXISTS cif_schedules (
+                    uid TEXT NOT NULL,
+                    schedule_start_date TEXT NOT NULL,
+                    schedule_end_date TEXT,
+                    toc_code TEXT,
+                    transaction_type TEXT,
+                    train_status TEXT,
+                    schedule_days_runs TEXT,
+                    applicable_timetable TEXT,
+                    CIF_train_uid TEXT,
+                    CIF_stp_indicator TEXT,
+                    signalling_id TEXT,
+                    CIF_train_service_code TEXT,
+                    CIF_train_category TEXT,
+                    CIF_power_type TEXT,
+                    CIF_headcode TEXT,
+                    raw_json TEXT,
+                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    PRIMARY KEY (uid, schedule_start_date, CIF_stp_indicator)
+                );
+                CREATE INDEX IF NOT EXISTS idx_cif_schedules_uid ON cif_schedules(uid);
+                CREATE INDEX IF NOT EXISTS idx_cif_schedules_toc ON cif_schedules(toc_code);
+                CREATE INDEX IF NOT EXISTS idx_cif_schedules_headcode ON cif_schedules(CIF_headcode);
+                CREATE INDEX IF NOT EXISTS idx_cif_schedules_created_ts ON cif_schedules(created_at_ts);
+                
+                -- CIF: per-location rows
+                CREATE TABLE IF NOT EXISTS cif_schedule_locations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uid TEXT NOT NULL,
+                    schedule_start_date TEXT NOT NULL,
+                    segment_index INTEGER NOT NULL,
+                    location_index INTEGER NOT NULL,
+                    tiploc TEXT,
+                    scheduled_pass_time TEXT,
+                    scheduled_departure_time TEXT,
+                    scheduled_arrival_time TEXT,
+                    public_departure_time TEXT,
+                    public_arrival_time TEXT,
+                    platform TEXT,
+                    CIF_pathing_allowance TEXT,
+                    CIF_activity TEXT,
+                    CIF_line TEXT,
+                    CIF_path TEXT,
+                    CIF_engineering_allowance TEXT,
+                    CIF_performance_allowance TEXT,
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                );
+                CREATE INDEX IF NOT EXISTS idx_cif_loc_uid ON cif_schedule_locations(uid);
+                CREATE INDEX IF NOT EXISTS idx_cif_loc_tiploc ON cif_schedule_locations(tiploc);
+                CREATE INDEX IF NOT EXISTS idx_cif_loc_created_ts ON cif_schedule_locations(created_at_ts);
+                
                 -- TOC (Train Operating Company) reference data
                 CREATE TABLE IF NOT EXISTS toc_reference (
                     toc_code TEXT PRIMARY KEY,
@@ -250,16 +306,16 @@ class RailDB:
             logger = get_logger("database.retention")
             logger.info(
                 f"Retention thread started: trust={self.retain_trust_days}d, "
-                f"vstp={self.retain_vstp_days}d, interval={self.retention_check_interval_s}s"
+                f"vstp={self.retain_vstp_days}d, cif={self.retain_cif_days}d, interval={self.retention_check_interval_s}s"
             )
             
             while not self._retention_stop_event.wait(self.retention_check_interval_s):
                 try:
                     deleted = self.purge_old_data()
-                    if deleted['trust_messages'] > 0 or deleted['vstp_schedules'] > 0:
+                    if deleted['trust_messages'] > 0 or deleted['vstp_schedules'] > 0 or deleted['cif_schedules'] > 0:
                         logger.info(
                             f"Retention purge: deleted {deleted['trust_messages']} trust_messages, "
-                            f"{deleted['vstp_schedules']} vstp_schedules"
+                            f"{deleted['vstp_schedules']} vstp_schedules, {deleted['cif_schedules']} cif_schedules"
                         )
                 except Exception as e:
                     logger.error(f"Retention worker error: {e}", exc_info=True)
@@ -279,14 +335,14 @@ class RailDB:
     
     def purge_old_data(self) -> dict:
         """
-        Purge old trust_messages and vstp_schedules based on retention settings.
+        Purge old trust_messages, vstp_schedules, and cif_schedules based on retention settings.
         
         Performs batched deletes to avoid long write locks.
         
         Returns:
-            Dict with counts: {'trust_messages': int, 'vstp_schedules': int}
+            Dict with counts: {'trust_messages': int, 'vstp_schedules': int, 'cif_schedules': int}
         """
-        result = {'trust_messages': 0, 'vstp_schedules': 0}
+        result = {'trust_messages': 0, 'vstp_schedules': 0, 'cif_schedules': 0}
         now_ms = int(time.time() * 1000)
         
         # Purge trust_messages
@@ -298,6 +354,11 @@ class RailDB:
         if self.retain_vstp_days and self.retain_vstp_days > 0:
             cutoff_ms = now_ms - (self.retain_vstp_days * 24 * 60 * 60 * 1000)
             result['vstp_schedules'] = self._purge_vstp_schedules(cutoff_ms, self.retention_batch_size)
+        
+        # Purge cif_schedules
+        if self.retain_cif_days and self.retain_cif_days > 0:
+            cutoff_ms = now_ms - (self.retain_cif_days * 24 * 60 * 60 * 1000)
+            result['cif_schedules'] = self._purge_cif_schedules(cutoff_ms, self.retention_batch_size)
         
         return result
     
@@ -377,6 +438,55 @@ class RailDB:
                     cursor.execute(
                         "DELETE FROM vstp_schedules WHERE uid=? AND schedule_start_date=?",
                         (uid, start_date)
+                    )
+                
+                deleted = len(keys)
+                total_deleted += deleted
+                
+                # Small sleep to avoid starving other operations
+                if deleted >= batch_size:
+                    time.sleep(0.1)
+        
+        return total_deleted
+    
+    def _purge_cif_schedules(self, cutoff_ms: int, batch_size: int) -> int:
+        """
+        Purge cif_schedules (and locations) older than cutoff_ms in batches.
+        
+        Args:
+            cutoff_ms: Delete schedules older than this timestamp (epoch ms)
+            batch_size: Number of schedule headers to delete per transaction
+            
+        Returns:
+            Total number of schedule headers deleted
+        """
+        total_deleted = 0
+        
+        while True:
+            with self._lock, self._conn:
+                cursor = self._conn.cursor()
+                # Select schedule keys to delete
+                cursor.execute(
+                    "SELECT uid, schedule_start_date, CIF_stp_indicator FROM cif_schedules WHERE created_at_ts < ? LIMIT ?",
+                    (cutoff_ms, batch_size)
+                )
+                keys = cursor.fetchall()
+                
+                if not keys:
+                    break
+                
+                # Delete locations first (foreign key semantics)
+                for uid, start_date, stp in keys:
+                    cursor.execute(
+                        "DELETE FROM cif_schedule_locations WHERE uid=? AND schedule_start_date=?",
+                        (uid, start_date)
+                    )
+                
+                # Delete schedule headers
+                for uid, start_date, stp in keys:
+                    cursor.execute(
+                        "DELETE FROM cif_schedules WHERE uid=? AND schedule_start_date=? AND CIF_stp_indicator=?",
+                        (uid, start_date, stp)
                     )
                 
                 deleted = len(keys)
@@ -872,6 +982,156 @@ class RailDB:
             except Exception:
                 # Propagate exception to caller so caller can log
                 raise
+
+    def insert_cif_schedule(self, cif_record: dict, toc_code: str) -> None:
+        """
+        Persist CIF schedule from downloaded TOC schedule file into cif_schedules + cif_schedule_locations.
+        
+        Expects a JsonScheduleV1 record from the CIF JSON file.
+        
+        Note: CIF schedules always have a single segment (unlike VSTP which can have multiple segments
+        for complex train journeys). This is a business rule of the CIF format.
+        
+        Args:
+            cif_record: Dictionary containing schedule data (typically from "JsonScheduleV1" key)
+            toc_code: 2-character TOC code for this schedule (e.g., 'SE', 'GW')
+        """
+        # CIF schedules always have a single segment (business rule)
+        CIF_SINGLE_SEGMENT_INDEX = 0
+        
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
+        if not isinstance(cif_record, dict):
+            return
+        
+        # Extract schedule metadata
+        uid = (cif_record.get("CIF_train_uid") or "").strip() or None
+        schedule_start_date = (cif_record.get("schedule_start_date") or "").strip()
+        schedule_end_date = (cif_record.get("schedule_end_date") or "").strip() or None
+        schedule_days_runs = (cif_record.get("schedule_days_runs") or "").strip() or None
+        # CIF_stp_indicator: P=Permanent, O=Overlay, C=Cancellation, N=New (default to P)
+        CIF_stp_indicator = (cif_record.get("CIF_stp_indicator") or "").strip() or "P"
+        train_status = (cif_record.get("train_status") or "").strip() or None
+        transaction_type = (cif_record.get("transaction_type") or "").strip() or None
+        applicable_timetable = (cif_record.get("applicable_timetable") or "").strip() or None
+        
+        # Get schedule_segment data
+        schedule_segment = cif_record.get("schedule_segment") or {}
+        if isinstance(schedule_segment, list) and len(schedule_segment) > 0:
+            schedule_segment = schedule_segment[0]
+        
+        signalling_id = (schedule_segment.get("signalling_id") or "").strip() or None
+        CIF_headcode = signalling_id  # Headcode is the signalling_id
+        CIF_train_service_code = (schedule_segment.get("CIF_train_service_code") or "").strip() or None
+        CIF_train_category = (schedule_segment.get("CIF_train_category") or "").strip() or None
+        CIF_power_type = (schedule_segment.get("CIF_power_type") or "").strip() or None
+        
+        # Extract location data
+        schedule_location = schedule_segment.get("schedule_location") or []
+        if not isinstance(schedule_location, list):
+            schedule_location = [schedule_location] if schedule_location else []
+        
+        # Skip if no UID or start date
+        if not uid or not schedule_start_date:
+            return
+        
+        raw_compact = json.dumps(cif_record, separators=(',',':')) if self.save_raw_json else None
+        
+        # Insert header + locations inside a lock/transaction
+        with self._lock, self._conn:
+            cur = self._conn.cursor()
+            try:
+                # Upsert schedule header (use INSERT OR REPLACE to update)
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO cif_schedules (
+                        uid, schedule_start_date, schedule_end_date, toc_code, transaction_type, train_status,
+                        schedule_days_runs, applicable_timetable, CIF_train_uid, CIF_stp_indicator,
+                        signalling_id, CIF_train_service_code, CIF_train_category, CIF_power_type,
+                        CIF_headcode, raw_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        uid,
+                        schedule_start_date,
+                        schedule_end_date,
+                        toc_code,
+                        transaction_type,
+                        train_status,
+                        schedule_days_runs,
+                        applicable_timetable,
+                        uid,  # CIF_train_uid = uid
+                        CIF_stp_indicator,
+                        signalling_id,
+                        CIF_train_service_code,
+                        CIF_train_category,
+                        CIF_power_type,
+                        CIF_headcode,
+                        raw_compact,
+                    ),
+                )
+                
+                # Delete old location rows if replacing
+                cur.execute(
+                    "DELETE FROM cif_schedule_locations WHERE uid=? AND schedule_start_date=?",
+                    (uid, schedule_start_date)
+                )
+                
+                # Insert location rows
+                for loc_index, loc in enumerate(schedule_location):
+                    if not isinstance(loc, dict):
+                        continue
+                    
+                    tiploc = (loc.get("tiploc_code") or "").strip() or None
+                    scheduled_pass = (loc.get("scheduled_pass_time") or loc.get("pass") or "").strip() or None
+                    scheduled_dep = (loc.get("scheduled_departure_time") or loc.get("departure") or "").strip() or None
+                    scheduled_arr = (loc.get("scheduled_arrival_time") or loc.get("arrival") or "").strip() or None
+                    public_dep = (loc.get("public_departure") or "").strip() or None
+                    public_arr = (loc.get("public_arrival") or "").strip() or None
+                    platform = (loc.get("platform") or "").strip() or None
+                    CIF_pathing_allowance = (loc.get("CIF_pathing_allowance") or "").strip() or None
+                    CIF_activity = (loc.get("CIF_activity") or "").strip() or None
+                    CIF_line = (loc.get("CIF_line") or "").strip() or None
+                    CIF_path = (loc.get("CIF_path") or "").strip() or None
+                    CIF_engineering_allowance = (loc.get("CIF_engineering_allowance") or "").strip() or None
+                    CIF_performance_allowance = (loc.get("CIF_performance_allowance") or "").strip() or None
+                    
+                    cur.execute(
+                        """
+                        INSERT INTO cif_schedule_locations (
+                            uid, schedule_start_date, segment_index, location_index,
+                            tiploc, scheduled_pass_time, scheduled_departure_time, scheduled_arrival_time,
+                            public_departure_time, public_arrival_time, platform,
+                            CIF_pathing_allowance, CIF_activity, CIF_line, CIF_path,
+                            CIF_engineering_allowance, CIF_performance_allowance
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            uid,
+                            schedule_start_date,
+                            CIF_SINGLE_SEGMENT_INDEX,  # CIF schedules always have single segment
+                            loc_index,
+                            tiploc,
+                            scheduled_pass,
+                            scheduled_dep,
+                            scheduled_arr,
+                            public_dep,
+                            public_arr,
+                            platform,
+                            CIF_pathing_allowance,
+                            CIF_activity,
+                            CIF_line,
+                            CIF_path,
+                            CIF_engineering_allowance,
+                            CIF_performance_allowance,
+                        ),
+                    )
+                
+                self._conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to insert CIF schedule {uid}: {e}")
+                # Don't raise - continue processing other schedules
 
     def upsert_toc(self, toc_code: str, toc_name: str, business_code: Optional[str] = None, 
                    sector_code: Optional[str] = None, atoc_code: Optional[str] = None, 

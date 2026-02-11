@@ -191,7 +191,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                             added = resolver.add_tiploc_data(tiploc_records, quiet=False)
                             total_tiplocs += len(tiploc_records)
                         
-                        # Load schedule data
+                        # Load schedule data into HumanView for enrichment
                         hv.load_schedule_gz(
                             file_path,
                             service_date=datetime.now(timezone.utc).date().isoformat(),
@@ -199,6 +199,48 @@ def connect_and_run(args: argparse.Namespace) -> None:
                             uid_filter=args.uid,
                             quiet=False,
                         )
+                        
+                        # Persist schedules to database if DB is enabled
+                        if db:
+                            try:
+                                import gzip
+                                import json
+                                
+                                schedules_saved = 0
+                                with gzip.open(file_path, 'rt', encoding='utf-8', errors='replace') as f:
+                                    for line in f:
+                                        line = line.strip()
+                                        if not line:
+                                            continue
+                                        
+                                        try:
+                                            obj = json.loads(line)
+                                            
+                                            # Look for schedule records
+                                            if "JsonScheduleV1" in obj:
+                                                schedule_data = obj["JsonScheduleV1"]
+                                                db.insert_cif_schedule(schedule_data, toc_code)
+                                                schedules_saved += 1
+                                                
+                                                # Log progress for large files (every 1000 records)
+                                                if schedules_saved % 1000 == 0:
+                                                    logger.info(f"Persisting {toc_code} schedules: {schedules_saved} records...")
+                                        
+                                        except json.JSONDecodeError:
+                                            # Skip invalid JSON lines
+                                            continue
+                                        except Exception as e:
+                                            # Log but continue on individual record errors
+                                            logger.debug(f"Error persisting schedule record: {e}")
+                                            continue
+                                
+                                if schedules_saved > 0:
+                                    logger.info(f"Persisted {schedules_saved} {toc_code} schedules to database")
+                                    total_schedules += schedules_saved
+                            
+                            except Exception as e:
+                                logger.error(f"Failed to persist {toc_code} schedules to database: {e}")
+                                # Continue with other TOCs even if one fails
                     
                     # Calculate total size, handling missing files gracefully
                     total_size_mb = 0
@@ -210,10 +252,16 @@ def connect_and_run(args: argparse.Namespace) -> None:
                             # Silently skip if file can't be accessed
                             pass
                     
-                    logger.info(
-                        f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
-                        f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records)"
-                    )
+                    if db and total_schedules > 0:
+                        logger.info(
+                            f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
+                            f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records, {total_schedules} schedules persisted)"
+                        )
+                    else:
+                        logger.info(
+                            f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
+                            f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records)"
+                        )
                     
                 else:
                     # No TOC filter - display informative message
@@ -242,6 +290,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         enable_mapper=args.enable_mapper,
         retain_trust_days=getattr(args, 'retain_trust_days', None),
         retain_vstp_days=getattr(args, 'retain_vstp_days', None),
+        retain_cif_days=getattr(args, 'retain_cif_days', None),
         retention_check_interval_s=getattr(args, 'retention_interval', 3600),
         retention_batch_size=getattr(args, 'retention_batch_size', 1000),
         save_raw_json=getattr(args, 'save_raw_json', True),
@@ -487,6 +536,8 @@ def parse_args() -> argparse.Namespace:
                    help="Days to retain TRUST messages (None = no cleanup)")
     p.add_argument("--retain-vstp-days", type=int, default=None,
                    help="Days to retain VSTP schedules (None = no cleanup)")
+    p.add_argument("--retain-cif-days", type=int, default=None,
+                   help="Days to retain CIF schedules (None = no cleanup)")
     p.add_argument("--retention-interval", type=int, default=3600,
                    help="Seconds between retention checks (default: 3600)")
     p.add_argument("--retention-batch-size", type=int, default=1000,

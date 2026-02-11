@@ -117,3 +117,24 @@ enable_mapper: true
 # Save raw JSON messages to database (enabled by default)
 # Disabling this reduces database size but loses original message data
 save_raw_json: true
+
+# ============================================================================
+# Data Retention Settings
+# ============================================================================
+# Automatic cleanup of old data from the database
+
+# Days to retain TRUST messages (set to null to disable cleanup)
+# retain_trust_days: 7
+
+# Days to retain VSTP schedules (set to null to disable cleanup)
+# retain_vstp_days: 7
+
+# Days to retain CIF schedules from TOC downloads (set to null to disable cleanup)
+# CIF schedules are typically re-downloaded daily when toc_filter is configured
+# retain_cif_days: 2
+
+# Seconds between retention checks (default: 3600 = 1 hour)
+# retention_interval: 3600
+
+# Number of records to delete per batch (default: 1000)
+# retention_batch_size: 1000
