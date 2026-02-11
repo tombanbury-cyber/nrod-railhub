@@ -14,20 +14,24 @@ def test_toc_resolver_get_business_code():
     """Test that TOCResolver can get business codes for TOC codes."""
     resolver = TOCResolver()
     
-    # Test known TOCs with business codes
-    assert resolver.get_business_code('SE') == '84'  # Southeastern
-    assert resolver.get_business_code('GW') == '79'  # Great Western Railway
-    assert resolver.get_business_code('SW') == '71'  # South Western Railway
+    # Test known TOCs with business codes (2-letter codes)
+    assert resolver.get_business_code('SE') == 'HU'  # Southeastern
+    assert resolver.get_business_code('SW') == 'HY'  # South Western Railway
+    assert resolver.get_business_code('SN') == 'HW'  # Southern
+    assert resolver.get_business_code('SR') == 'HA'  # ScotRail
+    assert resolver.get_business_code('EM') == 'EM'  # East Midlands Railway
+    assert resolver.get_business_code('VT') == 'HF'  # Avanti West Coast
     
     # Test TOC without business code
     assert resolver.get_business_code('EX') is None  # Express Passenger
+    assert resolver.get_business_code('GW') is None  # Great Western Railway (no business code known)
     
     # Test non-existent TOC
     assert resolver.get_business_code('ZZZ') is None
     
     # Test case insensitivity
-    assert resolver.get_business_code('se') == '84'
-    assert resolver.get_business_code('gw') == '79'
+    assert resolver.get_business_code('se') == 'HU'
+    assert resolver.get_business_code('sw') == 'HY'
 
 
 def test_schedule_resolver_download_url_construction():
@@ -40,7 +44,7 @@ def test_schedule_resolver_download_url_construction():
             username='test_user',
             password='test_pass',
             toc_code='SE',
-            business_code='84',
+            business_code='HU',  # 2-letter business code
             out_gz='/tmp/test.gz',
             update_mode=False,
             quiet=True,
@@ -49,22 +53,22 @@ def test_schedule_resolver_download_url_construction():
         # Verify the download was called with correct schedule_type
         mock_download.assert_called_once()
         call_kwargs = mock_download.call_args[1]
-        assert call_kwargs['schedule_type'] == 'CIF_84_TOC_FULL_DAILY'
+        assert call_kwargs['schedule_type'] == 'CIF_HU_TOC_FULL_DAILY'
         
     # Test UPDATE mode
     with patch.object(resolver, 'download') as mock_download:
         resolver.download_toc_schedule(
             username='test_user',
             password='test_pass',
-            toc_code='GW',
-            business_code='79',
+            toc_code='SW',
+            business_code='HY',  # South Western Railway
             out_gz='/tmp/test.gz',
             update_mode=True,
             quiet=True,
         )
         
         call_kwargs = mock_download.call_args[1]
-        assert call_kwargs['schedule_type'] == 'CIF_79_TOC_UPDATE_DAILY'
+        assert call_kwargs['schedule_type'] == 'CIF_HY_TOC_UPDATE_DAILY'
 
 
 def test_extract_tiploc_data_from_schedule():
@@ -241,7 +245,7 @@ def test_download_multiple_toc_schedules():
             downloaded = resolver.download_multiple_toc_schedules(
                 username='test',
                 password='test',
-                toc_filter=['SE', 'GW'],
+                toc_filter=['SE', 'SW'],  # Changed from GW to SW since SW has business code HY
                 toc_resolver=toc_resolver,
                 cache_dir=tmpdir,
                 update_mode=False,
@@ -251,7 +255,7 @@ def test_download_multiple_toc_schedules():
             # Verify two downloads
             assert len(downloaded) == 2
             assert downloaded[0][0] == 'SE'
-            assert downloaded[1][0] == 'GW'
+            assert downloaded[1][0] == 'SW'
             
             # Verify files exist
             assert os.path.exists(downloaded[0][1])

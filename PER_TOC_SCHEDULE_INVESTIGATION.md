@@ -1,93 +1,65 @@
-# Per-TOC Schedule Downloads - Terminology Clarification
+# Per-TOC Schedule Downloads - Business Code Correction
 
-## Problem Statement
+## Problem Resolution
 
-User reported: "Check that we're using the correct 'business code' as specified here, https://wiki.openraildata.com/index.php/TOC_Codes, this should not be confused with the 'sector code'"
+The implementation was using numeric **sector codes** (e.g., 84, 79, 71) instead of 2-letter **business codes** (e.g., HU, HY, HW) in schedule download URLs.
 
-## Resolution
+### Correct Format
 
-### User Confirmation ✅
+**Schedule downloads use 2-letter business codes:**
+- URL format: `CIF_{business_code}_TOC_FULL_DAILY` where business_code is 2 letters
+- Example: `CIF_HU_TOC_FULL_DAILY` for Southeastern (NOT `CIF_84_TOC_FULL_DAILY`)
 
-The repository owner confirmed that:
+### Correct Code Mappings
 
-1. **`CIF_XX_TOC_FULL_DAILY` format is CORRECT**
-   - URL: `https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_XX_TOC_FULL_DAILY&day=toc-full`
-   - Downloads TOC daily schedule in **JSON format** (despite "CIF" in the name)
-   - XX = business code (numeric, e.g., 84, 79, 71)
+Based on authoritative data from the user:
 
-2. **`CIF_XX_TOC_UPDATE_DAILY` format is CORRECT**
-   - URL: `https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_XX_TOC_UPDATE_DAILY&day=toc-update-mon`
-   - Downloads schedule updates in **JSON format**
-   - Replace `-mon` with day code (mon/tues/wed etc.)
+| Company Name | TOC Code | Business Code | Sector Code | ATOC Code |
+|--------------|----------|---------------|-------------|-----------|
+| Southeastern | SE | **HU** | 80 | SET |
+| South Western Railway | SW | **HY** | 84 | SWR |
+| Southern | SN | **HW** | 88 | SOU |
+| ScotRail | SR | **HA** | 60 | SCO |
+| East Midlands Railway | EM | **EM** | 28 | EMR |
+| Avanti West Coast | VT | **HF** | 65 | AVC |
 
-3. **Only one format returns actual CIF:**
-   - URL: `https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz`
-   - Note the `.CIF.gz` suffix - indicates gzipped CIF file
-   - This is for ALL operators, not per-TOC
+### Key Distinctions
 
-### Implementation Status ✅
+1. **Business Code** (2-letter): Used in schedule download URLs (CIF_XX_TOC_FULL_DAILY)
+2. **Sector Code** (numeric): Appears in TRUST messages for TOC identification
+3. **TOC Code** (2-letter): Canonical identifier in our system
+4. **ATOC Code** (3-letter): Association of Train Operating Companies standard code
 
-**Current implementation is CORRECT** - No changes needed to core functionality!
+### Changes Made
 
-## Terminology Clarification
+1. **TOC_DATA structure updated:**
+   - `business_code`: Now contains 2-letter codes (HU, HY, HW, etc.)
+   - `sector_code`: New field for numeric codes (80, 84, 88, etc.)
 
-### The Confusion: "Business Code" Has Multiple Meanings
+2. **Database schema updated:**
+   - Added `sector_code` column to `toc_reference` table
+   - Both business and sector codes stored separately
 
-The term "business code" is used differently in various contexts within UK rail systems:
+3. **TOCResolver updated:**
+   - Added `sector_to_canonical` mapping for TRUST messages
+   - `resolve_toc_code()` checks business codes, sector codes, and ATOC codes
 
-#### Traditional Rail Industry Usage
-In traditional UK rail documentation (e.g., railwaycodes.org.uk):
-- **Business Code**: 2-letter alphanumeric (e.g., "HU", "EF", "HY")
-- **Sector Code**: 2-digit numeric (e.g., "80", "25", "84")
-- Used for operational categorization and franchise management
+4. **Schedule downloads now correct:**
+   - `CIF_HU_TOC_FULL_DAILY` ✅ (Southeastern)
+   - `CIF_HY_TOC_FULL_DAILY` ✅ (South Western Railway)
+   - `CIF_HW_TOC_FULL_DAILY` ✅ (Southern)
 
-#### Network Rail Data Feeds Usage
-In Network Rail's data feed URLs and documentation:
-- **Business Code**: Numeric identifier used in feed URLs
-- Format: `CIF_XX_TOC_FULL_DAILY` where XX is the numeric "business code"
-- Examples: 84 (Southeastern), 79 (Great Western), 71 (South Western Railway)
-- **These are the codes used for per-TOC schedule downloads**
+### TRUST Message Compatibility
 
-#### TRUST Messages
-- **Historic topic format**: `TRAIN_MVT_XX_TOC` where XX is business code
-- **Message content**: Contains sector code to reference operator
-- The numeric codes may be the same in both contexts
+TRUST messages contain numeric sector codes for TOC identification. The system now:
+1. Stores sector codes separately
+2. Resolves sector codes to canonical TOC codes
+3. Maintains backward compatibility with existing TRUST message handling
 
-### Our Implementation
+### Summary
 
-The field named `business_code` in our `TOC_DATA` structure:
-```python
-'SE': {'name': 'Southeastern', 'business_code': '84'}
-'GW': {'name': 'Great Western Railway', 'business_code': '79'}
-'SW': {'name': 'South Western Railway', 'business_code': '71'}
-```
-
-These numeric codes are:
-- ✅ **Correct** for Network Rail schedule download URLs
-- ✅ **Used correctly** in `CIF_XX_TOC_FULL_DAILY` format
-- ℹ️ Called "business codes" in Network Rail's data feed context
-- ℹ️ May also be "sector codes" in TRUST message context
-- ℹ️ Different from traditional 2-letter "business codes" (HU, EF, HY)
-
-### Recommendation
-
-The implementation is correct. For clarity, we should:
-1. Add code comments explaining the terminology nuance
-2. Update documentation to distinguish Network Rail "business codes" from traditional codes
-3. Note that the same numeric codes serve multiple purposes across different feeds
-
-## Summary
-
-✅ **No code changes required to core functionality**
-✅ Format `CIF_XX_TOC_FULL_DAILY` is correct and confirmed working
-✅ Numeric codes (84, 79, 71) are correct for schedule downloads
-ℹ️ Terminology "business code" is context-dependent but correct in our usage
-
-The confusion arose from conflicting definitions of "business code" in different rail industry contexts. In the context of Network Rail's data feeds, our implementation uses the correct terminology and codes.
-
-## Actions Taken
-
-1. ✅ Updated this document to reflect correct understanding
-2. ⏭️ Add clarifying comments to code
-3. ⏭️ Update ARCHITECTURE.md and README.md documentation
-4. ⏭️ Ensure comments explain the terminology nuance
+✅ **Implementation corrected**
+✅ Schedule URLs now use 2-letter business codes  
+✅ Sector codes preserved for TRUST message handling
+✅ All tests updated and passing
+✅ Documentation corrected
