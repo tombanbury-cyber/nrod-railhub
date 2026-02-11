@@ -166,6 +166,7 @@ class RailDB:
                     train_service_code TEXT,
                     division_code TEXT,
                     toc_id TEXT,
+                    toc_code TEXT,
                     timetable_variation INTEGER,
                     variation_status TEXT,
                     next_report_stanox TEXT,
@@ -181,6 +182,7 @@ class RailDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_trust_messages_train_id ON trust_messages(train_id);
                 CREATE INDEX IF NOT EXISTS idx_trust_messages_actual_ts ON trust_messages(actual_timestamp_ms);
+                CREATE INDEX IF NOT EXISTS idx_trust_messages_toc_code ON trust_messages(toc_code);
 
                 -- VSTP: schedule header table
                 CREATE TABLE IF NOT EXISTS vstp_schedules (
@@ -608,6 +610,9 @@ class RailDB:
         reporting_stanox = (body.get("reporting_stanox") or body.get("reportingStanox") or "").strip() or None
         auto_expected = _to_bool_int(body.get("auto_expected") or body.get("autoExpected"))
 
+        # Resolve canonical toc_code from raw toc_id
+        toc_code = self.get_canonical_toc_code(toc_id) if toc_id else None
+
         raw_compact = json.dumps(body, separators=(',',':')) if self.save_raw_json else None
 
         with self._lock, self._conn:
@@ -618,9 +623,9 @@ class RailDB:
                         train_id, actual_timestamp_ms, gbtt_timestamp_ms, planned_timestamp_ms,
                         planned_event_type, event_type, event_source, correction_ind, offroute_ind,
                         direction_ind, line_ind, platform, route, train_service_code, division_code,
-                        toc_id, timetable_variation, variation_status, next_report_stanox, next_report_run_time,
+                        toc_id, toc_code, timetable_variation, variation_status, next_report_stanox, next_report_run_time,
                         train_terminated, delay_monitoring_point, reporting_stanox, auto_expected, raw_json
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         train_id,
@@ -639,6 +644,7 @@ class RailDB:
                         train_service_code,
                         division_code,
                         toc_id,
+                        toc_code,
                         timetable_variation,
                         variation_status,
                         next_report_stanox,
