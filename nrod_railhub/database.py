@@ -989,10 +989,16 @@ class RailDB:
         
         Expects a JsonScheduleV1 record from the CIF JSON file.
         
+        Note: CIF schedules always have a single segment (unlike VSTP which can have multiple segments
+        for complex train journeys). This is a business rule of the CIF format.
+        
         Args:
             cif_record: Dictionary containing schedule data (typically from "JsonScheduleV1" key)
             toc_code: 2-character TOC code for this schedule (e.g., 'SE', 'GW')
         """
+        # CIF schedules always have a single segment (business rule)
+        CIF_SINGLE_SEGMENT_INDEX = 0
+        
         from .logging_config import get_logger
         logger = get_logger("database")
         
@@ -1004,7 +1010,8 @@ class RailDB:
         schedule_start_date = (cif_record.get("schedule_start_date") or "").strip()
         schedule_end_date = (cif_record.get("schedule_end_date") or "").strip() or None
         schedule_days_runs = (cif_record.get("schedule_days_runs") or "").strip() or None
-        CIF_stp_indicator = (cif_record.get("CIF_stp_indicator") or "").strip() or "P"  # Default to P (Permanent)
+        # CIF_stp_indicator: P=Permanent, O=Overlay, C=Cancellation, N=New (default to P)
+        CIF_stp_indicator = (cif_record.get("CIF_stp_indicator") or "").strip() or "P"
         train_status = (cif_record.get("train_status") or "").strip() or None
         transaction_type = (cif_record.get("transaction_type") or "").strip() or None
         applicable_timetable = (cif_record.get("applicable_timetable") or "").strip() or None
@@ -1103,7 +1110,7 @@ class RailDB:
                         (
                             uid,
                             schedule_start_date,
-                            0,  # segment_index (always 0 for CIF, unlike VSTP which can have multiple segments)
+                            CIF_SINGLE_SEGMENT_INDEX,  # CIF schedules always have single segment
                             loc_index,
                             tiploc,
                             scheduled_pass,
