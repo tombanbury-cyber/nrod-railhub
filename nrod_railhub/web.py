@@ -1669,7 +1669,8 @@ function sortTable(columnIndex) {
     const ascending = sortDirection[columnIndex];
     
     // Clear all sort indicators
-    for (let i = 0; i < 7; i++) {
+    const numColumns = table.querySelector('thead tr').cells.length;
+    for (let i = 0; i < numColumns; i++) {
         const sortSpan = document.getElementById('sort' + i);
         if (sortSpan) sortSpan.textContent = '';
     }
