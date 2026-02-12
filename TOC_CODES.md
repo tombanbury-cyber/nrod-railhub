@@ -1,11 +1,14 @@
-*. Company Name - The name of the company
-*. Business Code- a two-character code used within the TRUST system. It is used in the names of the individual train movement feeds
-*. Sector Code- sector code used to represent the TOC in TRUST messages
-*. ATOC Code- two-character code used to representing the TOC in the SCHEDULE feed. Non-passenger operators are represented by an ATOC code of ZZ
+- Company Name: The name of the company - toc_name
+
+- Business Code: two-character code used within the TRUST system. It is used in the names of the individual train movement feeds - business_code
+
+- Sector Code: sector code used to represent the TOC in TRUST messages - sector_code
+
+- ATOC Code: two-character code used to representing the TOC in the SCHEDULE feed. Non-passenger operators are represented by an ATOC code of ZZ - atoc_code
 
 
 | Company Name | Business Code | Sector | Code | ATOC Code |
-| ------------ | ------------- | ------ | ---- | ---- ---- |
+| ------------ | ------------- | ------ | ---- | --------- |
 |Virtual European Paths|EU||EU|
 |Unmapped (was Alliance Rail)|ZB|14|AR|
 |Northern Trains|ED|23|NT|
@@ -25,7 +28,7 @@
 |Govia Thameslink Railway (Great Northern)|ET|88|GN|
 |Govia Thameslink Railway (Thameslink)|ET|88|TL|
 |Grand Central|EC|22|GC|
-|Grand Central (North West)|LN|14|GC/LF|
+|Grand Central (North West)|LN|14|LF|
 |Great Western Railway|EF|25|GW|
 |Greater Anglia|EB|21|LE|
 |Heathrow Connect|EE|24|HC|
