@@ -7,8 +7,8 @@
 - ATOC Code: two-character code used to representing the TOC in the SCHEDULE feed. Non-passenger operators are represented by an ATOC code of ZZ - atoc_code
 
 
-| Company Name | Business Code | Sector | Code | ATOC Code |
-| ------------ | ------------- | ------ | ---- | --------- |
+| Company Name | Business Code | Sector Code | ATOC Code |
+| ------------ | ------------- | ----------- | --------- |
 |Virtual European Paths|EU||EU|
 |Unmapped (was Alliance Rail)|ZB|14|AR|
 |Northern Trains|ED|23|NT|
