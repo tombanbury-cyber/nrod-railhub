@@ -238,7 +238,20 @@ When `--web-port` is set, open `http://localhost: PORT` in your browser:
 - **Filter by area** - Click area pill to filter (e.g. EK, AD, WR)
 - **Train detail** - Click headcode for event history
 - **Events** - Recent TD berth movements
+- **VSTP** - View and filter VSTP schedules with sorting and pagination
+- **CIF** - View and filter CIF schedules by TOC, headcode, status, etc.
+- **TRUST** - View TRUST train movement data
 - **Mapper** - Configure and rebuild berth-signal correlation mappings
+
+### Schedule Filtering and Sorting
+
+Both VSTP and CIF schedule pages support:
+
+- **Filtering**: UID, headcode, status, category, date ranges
+  - CIF schedules also support filtering by TOC code
+- **Sorting**: Click column headers to sort (ascending/descending)
+- **Pagination**: 50 records per page with navigation controls
+- **Details**: Click UID to expand and view schedule locations with times and platforms
 
 ### Mapper Configuration
 

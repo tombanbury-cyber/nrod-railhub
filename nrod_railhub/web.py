@@ -85,6 +85,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
             f"<a href='/trust' class='navlink {'active' if active=='trust' else ''}'>TRUST</a>"
             f"<a href='/vstp' class='navlink {'active' if active=='vstp' else ''}'>VSTP</a>"
+            f"<a href='/cif' class='navlink {'active' if active=='cif' else ''}'>CIF</a>"
             f"<a href='/tocs' class='navlink {'active' if active=='tocs' else ''}'>TOCs</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
@@ -1150,10 +1151,35 @@ filterInput.addEventListener('input', updateFilter);
 
     @app.get("/vstp")
     def vstp():
-        """Display VSTP schedules with expandable locations."""
+        """Display VSTP schedules with filtering, sorting, and pagination."""
         # Get filter parameters
         uid = request.args.get("uid", "").strip()
         headcode = request.args.get("headcode", "").strip()
+        status = request.args.get("status", "").strip()
+        category = request.args.get("category", "").strip()
+        start_date_from = request.args.get("start_date_from", "").strip()
+        start_date_to = request.args.get("start_date_to", "").strip()
+        
+        # Get sorting parameters
+        sort_by = request.args.get("sort_by", "created_at_utc").strip()
+        sort_dir = request.args.get("sort_dir", "DESC").strip().upper()
+        if sort_dir not in ["ASC", "DESC"]:
+            sort_dir = "DESC"
+        
+        # Validate sort_by to prevent SQL injection
+        valid_sort_columns = ["uid", "schedule_start_date", "schedule_end_date", "transaction_type", 
+                              "train_status", "created_at_utc", "CIF_train_category"]
+        if sort_by not in valid_sort_columns:
+            sort_by = "created_at_utc"
+        
+        # Pagination
+        try:
+            page = max(1, int(request.args.get("page", "1")))
+        except ValueError:
+            page = 1
+        per_page = 50
+        offset = (page - 1) * per_page
+        
         view = request.args.get("view", "schedules").strip()  # 'schedules' or 'state'
         
         body = []
@@ -1202,6 +1228,20 @@ filterInput.addEventListener('input', updateFilter);
             body.append("<h2>VSTP Schedules</h2>")
             body.append("<p><a href='/vstp?view=state'>Switch to State Summary View</a></p>")
             
+            # Add filter form
+            body.append("<div style='background:#f7f9fc;padding:15px;border-radius:8px;margin:15px 0'>")
+            body.append("<form method='get' action='/vstp' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px'>")
+            body.append(f"<input type='hidden' name='view' value='schedules'/>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>UID:</label><br/><input type='text' name='uid' value='{html.escape(uid)}' placeholder='Schedule UID' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>Headcode:</label><br/><input type='text' name='headcode' value='{html.escape(headcode)}' placeholder='Train headcode' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>Status:</label><br/><input type='text' name='status' value='{html.escape(status)}' placeholder='Train status' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>Category:</label><br/><input type='text' name='category' value='{html.escape(category)}' placeholder='Category' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>Start Date From:</label><br/><input type='date' name='start_date_from' value='{html.escape(start_date_from)}' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append(f"<div><label style='font-size:12px;color:#666'>Start Date To:</label><br/><input type='date' name='start_date_to' value='{html.escape(start_date_to)}' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+            body.append("<div style='grid-column:span 2'><button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:4px;cursor:pointer;margin-right:8px'>Apply Filters</button>")
+            body.append("<a href='/vstp?view=schedules' style='padding:8px 16px;background:#eee;color:#333;border:0;border-radius:4px;text-decoration:none;display:inline-block'>Clear Filters</a></div>")
+            body.append("</form></div>")
+            
             sql = """SELECT uid, schedule_start_date, schedule_end_date, transaction_type, 
                      train_status, signalling_id, CIF_train_service_code, CIF_train_category, 
                      CIF_power_type, sender_organisation, created_at_utc 
@@ -1211,18 +1251,66 @@ filterInput.addEventListener('input', updateFilter);
             if uid:
                 sql += " AND uid=?"
                 params.append(uid)
+            if headcode:
+                # Note: VSTP schedules don't have headcode field directly, but we can filter by UID pattern
+                sql += " AND uid LIKE ?"
+                params.append(f"%{headcode}%")
+            if status:
+                sql += " AND train_status LIKE ?"
+                params.append(f"%{status}%")
+            if category:
+                sql += " AND CIF_train_category LIKE ?"
+                params.append(f"%{category}%")
+            if start_date_from:
+                sql += " AND schedule_start_date >= ?"
+                params.append(start_date_from)
+            if start_date_to:
+                sql += " AND schedule_start_date <= ?"
+                params.append(start_date_to)
             
-            sql += " ORDER BY created_at_utc DESC LIMIT 100"
+            # Get total count for pagination
+            count_sql = f"SELECT COUNT(*) as total FROM ({sql})"
+            total_count = q(count_sql, params)[0]['total']
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            sql += f" ORDER BY {sort_by} {sort_dir} LIMIT ? OFFSET ?"
+            params.extend([per_page, offset])
             
             try:
                 rows = q(sql, params)
                 if rows:
-                    body.append(f"<p class='dim'>Showing {len(rows)} schedule(s). Click UID to see locations.</p>")
+                    body.append(f"<p class='dim'>Showing {len(rows)} of {total_count} schedule(s) (Page {page} of {total_pages}). Click UID to see locations.</p>")
+                    
+                    # Add sorting helper function
+                    def sort_link(column, label):
+                        # Preserve all current query params
+                        params_dict = {
+                            'view': 'schedules',
+                            'uid': uid,
+                            'headcode': headcode,
+                            'status': status,
+                            'category': category,
+                            'start_date_from': start_date_from,
+                            'start_date_to': start_date_to,
+                            'page': str(page),
+                            'sort_by': column,
+                            'sort_dir': 'ASC' if sort_by == column and sort_dir == 'DESC' else 'DESC'
+                        }
+                        # Remove empty params
+                        params_dict = {k: v for k, v in params_dict.items() if v}
+                        arrow = ""
+                        if sort_by == column:
+                            arrow = " ↓" if sort_dir == "DESC" else " ↑"
+                        return f"<a href='/vstp?{urlencode(params_dict)}' style='color:inherit;text-decoration:none'>{label}{arrow}</a>"
+                    
                     body.append("<table>")
-                    body.append("<tr><th>UID</th><th>Start Date</th><th>End Date</th><th>Type</th><th>Status</th><th>Signalling ID</th><th>Service Code</th><th>Category</th><th>Power</th><th>Created</th></tr>")
+                    body.append(f"<tr><th>{sort_link('uid', 'UID')}</th><th>{sort_link('schedule_start_date', 'Start Date')}</th><th>{sort_link('schedule_end_date', 'End Date')}</th><th>{sort_link('transaction_type', 'Type')}</th><th>{sort_link('train_status', 'Status')}</th><th>Signalling ID</th><th>Service Code</th><th>{sort_link('CIF_train_category', 'Category')}</th><th>Power</th><th>{sort_link('created_at_utc', 'Created')}</th></tr>")
                     for r in rows:
-                        # Create a detail link
-                        detail_url = f"/vstp?view=schedules&uid={r['uid']}&detail=1"
+                        # Create a detail link with all current filters
+                        detail_params = {k: v for k, v in request.args.items() if k not in ['page', 'detail']}
+                        detail_params['detail'] = '1'
+                        detail_params['uid'] = r['uid']
+                        detail_url = f"/vstp?{urlencode(detail_params)}"
                         body.append(
                             f"<tr>"
                             f"<td><a href='{detail_url}'><b>{r['uid']}</b></a></td>"
@@ -1238,6 +1326,33 @@ filterInput.addEventListener('input', updateFilter);
                             f"</tr>"
                         )
                     body.append("</table>")
+                    
+                    # Add pagination controls
+                    if total_pages > 1:
+                        body.append("<div style='margin:20px 0;text-align:center'>")
+                        # Preserve filter params in pagination
+                        page_params = {k: v for k, v in request.args.items() if k != 'page'}
+                        
+                        if page > 1:
+                            page_params['page'] = str(page - 1)
+                            body.append(f"<a href='/vstp?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#0b5cff;color:white;text-decoration:none;border-radius:4px'>← Previous</a>")
+                        
+                        # Show page numbers
+                        start_page = max(1, page - 2)
+                        end_page = min(total_pages, page + 2)
+                        
+                        for p in range(start_page, end_page + 1):
+                            if p == page:
+                                body.append(f"<span style='padding:8px 12px;margin:0 4px;background:#333;color:white;border-radius:4px'>{p}</span>")
+                            else:
+                                page_params['page'] = str(p)
+                                body.append(f"<a href='/vstp?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#eee;color:#333;text-decoration:none;border-radius:4px'>{p}</a>")
+                        
+                        if page < total_pages:
+                            page_params['page'] = str(page + 1)
+                            body.append(f"<a href='/vstp?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#0b5cff;color:white;text-decoration:none;border-radius:4px'>Next →</a>")
+                        
+                        body.append("</div>")
                     
                     # If detail is requested, show locations for the selected schedule
                     if uid and request.args.get("detail"):
@@ -1283,6 +1398,223 @@ filterInput.addEventListener('input', updateFilter);
                 body.append(f"<p><i>Error querying vstp_schedules: {e}</i></p>")
         
         return render_page("VSTP - NR RailHub", body, active="vstp")
+
+    @app.get("/cif")
+    def cif():
+        """Display CIF schedules with filtering, sorting, and pagination."""
+        # Get filter parameters
+        uid = request.args.get("uid", "").strip()
+        headcode = request.args.get("headcode", "").strip()
+        toc_code = request.args.get("toc_code", "").strip()
+        status = request.args.get("status", "").strip()
+        category = request.args.get("category", "").strip()
+        start_date_from = request.args.get("start_date_from", "").strip()
+        start_date_to = request.args.get("start_date_to", "").strip()
+        
+        # Get sorting parameters
+        sort_by = request.args.get("sort_by", "created_at_utc").strip()
+        sort_dir = request.args.get("sort_dir", "DESC").strip().upper()
+        if sort_dir not in ["ASC", "DESC"]:
+            sort_dir = "DESC"
+        
+        # Validate sort_by to prevent SQL injection
+        valid_sort_columns = ["uid", "schedule_start_date", "schedule_end_date", "toc_code",
+                              "transaction_type", "train_status", "created_at_utc", "CIF_train_category",
+                              "CIF_headcode"]
+        if sort_by not in valid_sort_columns:
+            sort_by = "created_at_utc"
+        
+        # Pagination
+        try:
+            page = max(1, int(request.args.get("page", "1")))
+        except ValueError:
+            page = 1
+        per_page = 50
+        offset = (page - 1) * per_page
+        
+        body = []
+        body.append("<h2>CIF Schedules</h2>")
+        body.append("<p>Schedules loaded from daily Train Operating Company (TOC) downloads.</p>")
+        
+        # Add filter form
+        body.append("<div style='background:#f7f9fc;padding:15px;border-radius:8px;margin:15px 0'>")
+        body.append("<form method='get' action='/cif' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px'>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>UID:</label><br/><input type='text' name='uid' value='{html.escape(uid)}' placeholder='Schedule UID' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>Headcode:</label><br/><input type='text' name='headcode' value='{html.escape(headcode)}' placeholder='Train headcode' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>TOC Code:</label><br/><input type='text' name='toc_code' value='{html.escape(toc_code)}' placeholder='TOC code' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>Status:</label><br/><input type='text' name='status' value='{html.escape(status)}' placeholder='Train status' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>Category:</label><br/><input type='text' name='category' value='{html.escape(category)}' placeholder='Category' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>Start Date From:</label><br/><input type='date' name='start_date_from' value='{html.escape(start_date_from)}' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append(f"<div><label style='font-size:12px;color:#666'>Start Date To:</label><br/><input type='date' name='start_date_to' value='{html.escape(start_date_to)}' style='width:100%;padding:6px;border:1px solid #ddd;border-radius:4px'/></div>")
+        body.append("<div style='grid-column:span 2'><button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:4px;cursor:pointer;margin-right:8px'>Apply Filters</button>")
+        body.append("<a href='/cif' style='padding:8px 16px;background:#eee;color:#333;border:0;border-radius:4px;text-decoration:none;display:inline-block'>Clear Filters</a></div>")
+        body.append("</form></div>")
+        
+        sql = """SELECT uid, schedule_start_date, schedule_end_date, toc_code, transaction_type, 
+                 train_status, signalling_id, CIF_train_service_code, CIF_train_category, 
+                 CIF_power_type, CIF_headcode, CIF_stp_indicator, created_at_utc 
+                 FROM cif_schedules WHERE 1=1"""
+        params = []
+        
+        if uid:
+            sql += " AND uid=?"
+            params.append(uid)
+        if headcode:
+            sql += " AND CIF_headcode LIKE ?"
+            params.append(f"%{headcode}%")
+        if toc_code:
+            sql += " AND toc_code=?"
+            params.append(toc_code)
+        if status:
+            sql += " AND train_status LIKE ?"
+            params.append(f"%{status}%")
+        if category:
+            sql += " AND CIF_train_category LIKE ?"
+            params.append(f"%{category}%")
+        if start_date_from:
+            sql += " AND schedule_start_date >= ?"
+            params.append(start_date_from)
+        if start_date_to:
+            sql += " AND schedule_start_date <= ?"
+            params.append(start_date_to)
+        
+        # Get total count for pagination
+        count_sql = f"SELECT COUNT(*) as total FROM ({sql})"
+        try:
+            total_count = q(count_sql, params)[0]['total']
+        except Exception as e:
+            logger.error(f"Web dashboard: Error counting cif_schedules: {e}")
+            total_count = 0
+        
+        total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+        
+        sql += f" ORDER BY {sort_by} {sort_dir} LIMIT ? OFFSET ?"
+        params.extend([per_page, offset])
+        
+        try:
+            rows = q(sql, params)
+            if rows:
+                body.append(f"<p class='dim'>Showing {len(rows)} of {total_count} schedule(s) (Page {page} of {total_pages}). Click UID to see locations.</p>")
+                
+                # Add sorting helper function
+                def sort_link(column, label):
+                    # Preserve all current query params
+                    params_dict = {
+                        'uid': uid,
+                        'headcode': headcode,
+                        'toc_code': toc_code,
+                        'status': status,
+                        'category': category,
+                        'start_date_from': start_date_from,
+                        'start_date_to': start_date_to,
+                        'page': str(page),
+                        'sort_by': column,
+                        'sort_dir': 'ASC' if sort_by == column and sort_dir == 'DESC' else 'DESC'
+                    }
+                    # Remove empty params
+                    params_dict = {k: v for k, v in params_dict.items() if v}
+                    arrow = ""
+                    if sort_by == column:
+                        arrow = " ↓" if sort_dir == "DESC" else " ↑"
+                    return f"<a href='/cif?{urlencode(params_dict)}' style='color:inherit;text-decoration:none'>{label}{arrow}</a>"
+                
+                body.append("<table>")
+                body.append(f"<tr><th>{sort_link('uid', 'UID')}</th><th>{sort_link('CIF_headcode', 'Headcode')}</th><th>{sort_link('toc_code', 'TOC')}</th><th>{sort_link('schedule_start_date', 'Start Date')}</th><th>{sort_link('schedule_end_date', 'End Date')}</th><th>{sort_link('transaction_type', 'Type')}</th><th>{sort_link('train_status', 'Status')}</th><th>{sort_link('CIF_train_category', 'Category')}</th><th>Power</th><th>STP</th><th>{sort_link('created_at_utc', 'Created')}</th></tr>")
+                for r in rows:
+                    # Create a detail link with all current filters
+                    detail_params = {k: v for k, v in request.args.items() if k not in ['page', 'detail']}
+                    detail_params['detail'] = '1'
+                    detail_params['uid'] = r['uid']
+                    detail_url = f"/cif?{urlencode(detail_params)}"
+                    body.append(
+                        f"<tr>"
+                        f"<td><a href='{detail_url}'><b>{r['uid']}</b></a></td>"
+                        f"<td class='mono'><b>{r['CIF_headcode'] or ''}</b></td>"
+                        f"<td class='mono'>{r['toc_code'] or ''}</td>"
+                        f"<td class='mono'>{r['schedule_start_date']}</td>"
+                        f"<td class='mono'>{r['schedule_end_date'] or ''}</td>"
+                        f"<td>{r['transaction_type'] or ''}</td>"
+                        f"<td>{r['train_status'] or ''}</td>"
+                        f"<td>{r['CIF_train_category'] or ''}</td>"
+                        f"<td>{r['CIF_power_type'] or ''}</td>"
+                        f"<td>{r['CIF_stp_indicator'] or ''}</td>"
+                        f"<td class='mono dim'>{r['created_at_utc'][:19] if r['created_at_utc'] else ''}</td>"
+                        f"</tr>"
+                    )
+                body.append("</table>")
+                
+                # Add pagination controls
+                if total_pages > 1:
+                    body.append("<div style='margin:20px 0;text-align:center'>")
+                    # Preserve filter params in pagination
+                    page_params = {k: v for k, v in request.args.items() if k != 'page'}
+                    
+                    if page > 1:
+                        page_params['page'] = str(page - 1)
+                        body.append(f"<a href='/cif?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#0b5cff;color:white;text-decoration:none;border-radius:4px'>← Previous</a>")
+                    
+                    # Show page numbers
+                    start_page = max(1, page - 2)
+                    end_page = min(total_pages, page + 2)
+                    
+                    for p in range(start_page, end_page + 1):
+                        if p == page:
+                            body.append(f"<span style='padding:8px 12px;margin:0 4px;background:#333;color:white;border-radius:4px'>{p}</span>")
+                        else:
+                            page_params['page'] = str(p)
+                            body.append(f"<a href='/cif?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#eee;color:#333;text-decoration:none;border-radius:4px'>{p}</a>")
+                    
+                    if page < total_pages:
+                        page_params['page'] = str(page + 1)
+                        body.append(f"<a href='/cif?{urlencode(page_params)}' style='padding:8px 12px;margin:0 4px;background:#0b5cff;color:white;text-decoration:none;border-radius:4px'>Next →</a>")
+                    
+                    body.append("</div>")
+                
+                # If detail is requested, show locations for the selected schedule
+                if uid and request.args.get("detail"):
+                    body.append(f"<h3>Locations for Schedule {uid}</h3>")
+                    # Get schedule_start_date and stp_indicator from the schedule row first
+                    schedule_row = q("SELECT schedule_start_date, CIF_stp_indicator FROM cif_schedules WHERE uid=? ORDER BY created_at_utc DESC LIMIT 1", (uid,))
+                    if schedule_row:
+                        schedule_start_date = schedule_row[0]['schedule_start_date']
+                        loc_sql = """SELECT tiploc, scheduled_pass_time, scheduled_departure_time, 
+                                     scheduled_arrival_time, public_departure_time, public_arrival_time,
+                                     platform, CIF_pathing_allowance, CIF_activity, CIF_line
+                                     FROM cif_schedule_locations 
+                                     WHERE uid=? AND schedule_start_date=?
+                                     ORDER BY segment_index, location_index"""
+                        loc_rows = q(loc_sql, (uid, schedule_start_date))
+                        
+                        if loc_rows:
+                            body.append("<table>")
+                            body.append("<tr><th>TIPLOC</th><th>Pass Time</th><th>Departure</th><th>Arrival</th><th>Public Dep</th><th>Public Arr</th><th>Platform</th><th>Pathing</th><th>Activity</th><th>Line</th></tr>")
+                            for loc in loc_rows:
+                                body.append(
+                                    f"<tr>"
+                                    f"<td class='mono'>{loc['tiploc'] or ''}</td>"
+                                    f"<td class='mono'>{loc['scheduled_pass_time'] or ''}</td>"
+                                    f"<td class='mono'>{loc['scheduled_departure_time'] or ''}</td>"
+                                    f"<td class='mono'>{loc['scheduled_arrival_time'] or ''}</td>"
+                                    f"<td class='mono'>{loc['public_departure_time'] or ''}</td>"
+                                    f"<td class='mono'>{loc['public_arrival_time'] or ''}</td>"
+                                    f"<td class='mono'>{loc['platform'] or ''}</td>"
+                                    f"<td>{loc['CIF_pathing_allowance'] or ''}</td>"
+                                    f"<td>{loc['CIF_activity'] or ''}</td>"
+                                    f"<td>{loc['CIF_line'] or ''}</td>"
+                                    f"</tr>"
+                                )
+                            body.append("</table>")
+                        else:
+                            body.append("<p><i>No locations found for this schedule</i></p>")
+                    else:
+                        body.append("<p><i>Schedule not found</i></p>")
+            else:
+                body.append("<p><i>No CIF schedules found. Schedules are loaded from daily TOC downloads. Check if the application has downloaded TOC schedules.</i></p>")
+        except Exception as e:
+            logger.error(f"Web dashboard: Error querying cif_schedules: {e}")
+            body.append(f"<p><i>Error querying cif_schedules: {e}</i></p>")
+        
+        return render_page("CIF Schedules - NR RailHub", body, active="cif")
 
     @app.get("/tocs")
     def tocs():
