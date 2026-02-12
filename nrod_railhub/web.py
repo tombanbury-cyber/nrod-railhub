@@ -1623,21 +1623,115 @@ filterInput.addEventListener('input', updateFilter);
         body.append("<p>Reference data for UK train operating companies. TOC codes are used in TRUST messages.</p>")
         
         try:
-            rows = q("SELECT toc_code, toc_name, sector, updated_at_utc FROM toc_reference ORDER BY toc_code")
+            rows = q("SELECT toc_name, toc_code, business_code, sector_code, atoc_code, sector, updated_at_utc FROM toc_reference ORDER BY toc_name")
             if rows:
                 body.append(f"<p class='dim'>Showing {len(rows)} TOC(s)</p>")
-                body.append("<table>")
-                body.append("<tr><th>TOC Code</th><th>TOC Name</th><th>Sector</th><th>Last Updated</th></tr>")
+                
+                # Add search filter box
+                body.append("<div style='margin:10px 0'><input type='text' id='tableFilter' placeholder='Filter by TOC name, code, sector...' style='padding:8px;width:300px;border:1px solid #ccc;border-radius:4px'/> <span id='filterCount' style='margin-left:10px;color:#6c757d'></span></div>")
+                
+                # Table with sortable headers
+                body.append("<table id='tocTable'><thead><tr>")
+                body.append("<th onclick='sortTable(0)' style='cursor:pointer'>TOC Name <span id='sort0'></span></th>")
+                body.append("<th onclick='sortTable(1)' style='cursor:pointer'>TOC Code <span id='sort1'></span></th>")
+                body.append("<th onclick='sortTable(2)' style='cursor:pointer'>Business Code <span id='sort2'></span></th>")
+                body.append("<th onclick='sortTable(3)' style='cursor:pointer'>Sector Code <span id='sort3'></span></th>")
+                body.append("<th onclick='sortTable(4)' style='cursor:pointer'>ATOC Code <span id='sort4'></span></th>")
+                body.append("<th onclick='sortTable(5)' style='cursor:pointer'>Sector <span id='sort5'></span></th>")
+                body.append("<th onclick='sortTable(6)' style='cursor:pointer'>Last Updated <span id='sort6'></span></th>")
+                body.append("</tr></thead><tbody>")
+                
                 for r in rows:
-                    body.append(
-                        f"<tr>"
-                        f"<td class='mono'><b>{r['toc_code']}</b></td>"
-                        f"<td>{r['toc_name']}</td>"
-                        f"<td>{r['sector'] or ''}</td>"
-                        f"<td class='mono dim'>{r['updated_at_utc'][:19] if r['updated_at_utc'] else ''}</td>"
-                        f"</tr>"
-                    )
-                body.append("</table>")
+                    body.append("<tr>")
+                    body.append(f"<td><b>{r['toc_name']}</b></td>")
+                    body.append(f"<td class='mono'>{r['toc_code']}</td>")
+                    body.append(f"<td class='mono'>{r['business_code'] or ''}</td>")
+                    body.append(f"<td class='mono'>{r['sector_code'] or ''}</td>")
+                    body.append(f"<td class='mono'>{r['atoc_code'] or ''}</td>")
+                    body.append(f"<td>{r['sector'] or ''}</td>")
+                    body.append(f"<td class='mono dim'>{r['updated_at_utc'][:19] if r['updated_at_utc'] else ''}</td>")
+                    body.append("</tr>")
+                
+                body.append("</tbody></table>")
+                
+                # Add JavaScript for sorting and filtering
+                body.append("""
+<script>
+// Sorting functionality
+let sortDirection = {};
+function sortTable(columnIndex) {
+    const table = document.getElementById('tocTable');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    sortDirection[columnIndex] = !sortDirection[columnIndex];
+    const ascending = sortDirection[columnIndex];
+    
+    // Clear all sort indicators
+    for (let i = 0; i < 7; i++) {
+        const sortSpan = document.getElementById('sort' + i);
+        if (sortSpan) sortSpan.textContent = '';
+    }
+    
+    // Set current sort indicator
+    const currentSortSpan = document.getElementById('sort' + columnIndex);
+    if (currentSortSpan) currentSortSpan.textContent = ascending ? ' ▲' : ' ▼';
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        let aVal = a.cells[columnIndex].textContent.trim();
+        let bVal = b.cells[columnIndex].textContent.trim();
+        
+        // Handle timestamps (ISO format YYYY-MM-DD...)
+        if (columnIndex === 6 && aVal && bVal) {
+            return ascending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        }
+        
+        // Handle empty values
+        if (!aVal) return ascending ? 1 : -1;
+        if (!bVal) return ascending ? -1 : 1;
+        
+        // Default: case-insensitive string comparison
+        const comparison = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+        return ascending ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+}
+
+// Filtering functionality
+const filterInput = document.getElementById('tableFilter');
+const filterCount = document.getElementById('filterCount');
+const table = document.getElementById('tocTable');
+const tbody = table.querySelector('tbody');
+const allRows = Array.from(tbody.querySelectorAll('tr'));
+
+function updateFilter() {
+    const filterText = filterInput.value.toLowerCase();
+    let visibleCount = 0;
+    
+    allRows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        if (text.includes(filterText)) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    if (filterText) {
+        filterCount.textContent = `Showing ${visibleCount} of ${allRows.length} rows`;
+    } else {
+        filterCount.textContent = '';
+    }
+}
+
+filterInput.addEventListener('input', updateFilter);
+</script>
+""")
             else:
                 body.append("<p><i>No TOC reference data found. Make sure the application has been started with a database path.</i></p>")
         except Exception as e:
