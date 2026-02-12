@@ -1141,61 +1141,62 @@ class TOCResolver:
     Data is based on Network Rail open data TOC codes.
     """
     
-    # TOC reference data (updated as of 2024)
+    # TOC reference data (updated from TOC_CODES.md - 2024)
     # Source: Network Rail Open Data Wiki (https://wiki.openraildata.com/index.php/TOC_Codes)
-    # and Rail Data Marketplace
+    # and Rail Data Marketplace, TOC_CODES.md (authoritative)
     # 
     # Fields:
     # - name: Full operator name
     # - sector: Type of operator (Passenger, Freight, etc.)
-    # - atoc_code: ATOC (Association of Train Operating Companies) 3-letter code
-    # - business_code: 2-letter business code used in Network Rail feed URLs (e.g., CIF_HU_TOC_FULL_DAILY)
-    #                  This is the actual business code as defined in rail industry standards
-    # - sector_code: Numeric sector code that appears in TRUST messages for TOC identification
-    #                These were previously (incorrectly) stored in business_code field
+    # - atoc_code: ATOC (Association of Train Operating Companies) 2-character code (e.g., SW, GW, SE)
+    #              Used in SCHEDULE messages. Non-passenger operators use ZZ.
+    # - business_code: 2-character business code used in Network Rail feed URLs (e.g., CIF_HU_TOC_FULL_DAILY)
+    #                  This is the actual business code as defined in rail industry standards (e.g., HY, HU, EF)
+    # - sector_code: Numeric sector code that appears in TRUST messages for TOC identification (e.g., 84, 80, 25)
+    #                These numeric codes are used in TRUST toc_id field
     # - legacy_codes: List of historical codes that may appear in feeds
     TOC_DATA = {
-        'AW': {'name': 'Arriva Trains Wales / Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'ATW'},
-        'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CCR', 'sector_code': '23'},
-        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CHR', 'sector_code': '74'},
-        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CSL', 'sector_code': '85'},
-        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EMR', 'business_code': 'EM', 'sector_code': '28'},
-        'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'EST', 'sector_code': '28'},
+        'AW': {'name': 'Transport for Wales', 'sector': 'Passenger', 'atoc_code': 'AW', 'business_code': 'HL', 'sector_code': '71'},
+        'CC': {'name': 'c2c', 'sector': 'Passenger', 'atoc_code': 'CC', 'business_code': 'HT', 'sector_code': '79'},
+        'CH': {'name': 'Chiltern Railways', 'sector': 'Passenger', 'atoc_code': 'CH', 'business_code': 'HO', 'sector_code': '74'},
+        'CS': {'name': 'Caledonian Sleeper', 'sector': 'Passenger', 'atoc_code': 'CS', 'business_code': 'ES', 'sector_code': '35'},
+        'EM': {'name': 'East Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'EM', 'business_code': 'EM', 'sector_code': '28'},
+        'ES': {'name': 'Eurostar', 'sector': 'Passenger', 'atoc_code': 'ES', 'business_code': 'GA', 'sector_code': '6'},
         'EX': {'name': 'Express Passenger', 'sector': 'Passenger'},
-        'FC': {'name': 'First Capital Connect', 'sector': 'Passenger', 'atoc_code': 'FCC'},
-        'GC': {'name': 'Grand Central', 'sector': 'Passenger', 'atoc_code': 'GCR', 'sector_code': '22'},
-        'GN': {'name': 'Great Northern', 'sector': 'Passenger', 'atoc_code': 'GNR'},
-        'GR': {'name': 'LNER (London North Eastern Railway)', 'sector': 'Passenger', 'atoc_code': 'LNR', 'sector_code': '24'},
-        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger', 'atoc_code': 'GWR', 'sector_code': '79'},
-        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger', 'atoc_code': 'GX', 'sector_code': '26'},
-        'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger', 'atoc_code': 'HEX'},
-        'HT': {'name': 'Hull Trains', 'sector': 'Passenger', 'atoc_code': 'HT', 'sector_code': '80'},
-        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger', 'atoc_code': 'HEX', 'sector_code': '29'},
-        'IL': {'name': 'Island Line', 'sector': 'Passenger', 'atoc_code': 'IL'},
-        'LE': {'name': 'Greater Anglia', 'sector': 'Passenger', 'atoc_code': 'LEA'},
-        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'LMR', 'sector_code': '72'},
-        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger', 'atoc_code': 'LNW', 'sector_code': '86'},
-        'LO': {'name': 'London Overground', 'sector': 'Passenger', 'atoc_code': 'LOO', 'sector_code': '87'},
-        'LT': {'name': 'London Underground', 'sector': 'Passenger', 'atoc_code': 'LUL', 'sector_code': '91'},
-        'ME': {'name': 'Merseyrail', 'sector': 'Passenger', 'atoc_code': 'MER', 'sector_code': '65'},
-        'NC': {'name': 'Northern Trains', 'sector': 'Passenger', 'atoc_code': 'NT', 'sector_code': '60'},
-        'NT': {'name': 'Northern Rail', 'sector': 'Passenger', 'atoc_code': 'NT'},
-        'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage'},
+        'FC': {'name': 'First Capital Connect', 'sector': 'Passenger', 'atoc_code': 'FC'},
+        'GC': {'name': 'Grand Central', 'sector': 'Passenger', 'atoc_code': 'GC', 'business_code': 'EC', 'sector_code': '22'},
+        'GN': {'name': 'Great Northern', 'sector': 'Passenger', 'atoc_code': 'GN', 'business_code': 'ET', 'sector_code': '88'},
+        'GR': {'name': 'London North Eastern Railway', 'sector': 'Passenger', 'atoc_code': 'GR', 'business_code': 'HB', 'sector_code': '61'},
+        'GW': {'name': 'Great Western Railway', 'sector': 'Passenger', 'atoc_code': 'GW', 'business_code': 'EF', 'sector_code': '25'},
+        'GX': {'name': 'Gatwick Express', 'sector': 'Passenger', 'atoc_code': 'GX'},
+        'HC': {'name': 'Heathrow Connect', 'sector': 'Passenger', 'atoc_code': 'HC', 'business_code': 'EE', 'sector_code': '24'},
+        'HT': {'name': 'Hull Trains', 'sector': 'Passenger', 'atoc_code': 'HT', 'business_code': 'PF', 'sector_code': '55'},
+        'HX': {'name': 'Heathrow Express', 'sector': 'Passenger', 'atoc_code': 'HX', 'business_code': 'HM', 'sector_code': '86'},
+        'IL': {'name': 'Island Line', 'sector': 'Passenger', 'atoc_code': 'IL', 'business_code': 'HZ', 'sector_code': '85'},
+        'LE': {'name': 'Greater Anglia', 'sector': 'Passenger', 'atoc_code': 'LE', 'business_code': 'EB', 'sector_code': '21'},
+        'LM': {'name': 'West Midlands Railway', 'sector': 'Passenger', 'atoc_code': 'LM', 'business_code': 'EJ', 'sector_code': '29'},
+        'LN': {'name': 'London Northwestern Railway', 'sector': 'Passenger', 'atoc_code': 'LN'},
+        'LO': {'name': 'London Overground', 'sector': 'Passenger', 'atoc_code': 'LO', 'business_code': 'EK', 'sector_code': '30'},
+        'LT': {'name': 'London Underground', 'sector': 'Passenger', 'atoc_code': 'LT', 'business_code': 'XC', 'sector_code': '91'},
+        'ME': {'name': 'Merseyrail', 'sector': 'Passenger', 'atoc_code': 'ME', 'business_code': 'HE', 'sector_code': '64'},
+        'NC': {'name': 'Northern Trains', 'sector': 'Passenger', 'atoc_code': 'NT', 'business_code': 'ED', 'sector_code': '23'},
+        'NT': {'name': 'Northern Rail', 'sector': 'Passenger', 'atoc_code': 'NT', 'business_code': 'ED', 'sector_code': '23'},
+        'NY': {'name': 'North Yorkshire Moors Railway', 'sector': 'Heritage', 'atoc_code': 'NY', 'business_code': 'PR', 'sector_code': '51'},
         'PE': {'name': 'Penmere', 'sector': 'Freight'},
         'PO': {'name': 'Provincial', 'sector': 'Passenger'},
-        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SET', 'business_code': 'HU', 'sector_code': '80'},
-        'SJ': {'name': 'South West Trains / Stagecoach', 'sector': 'Passenger', 'atoc_code': 'SWT'},
-        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SOU', 'business_code': 'HW', 'sector_code': '88'},
-        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SCO', 'business_code': 'HA', 'sector_code': '60'},
-        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SWR', 'business_code': 'HY', 'sector_code': '84'},
+        'SE': {'name': 'Southeastern', 'sector': 'Passenger', 'atoc_code': 'SE', 'business_code': 'HU', 'sector_code': '80'},
+        'SJ': {'name': 'South Yorkshire Supertram', 'sector': 'Passenger', 'atoc_code': 'SJ', 'business_code': 'SJ', 'sector_code': '19'},
+        'SN': {'name': 'Southern', 'sector': 'Passenger', 'atoc_code': 'SN', 'business_code': 'HW', 'sector_code': '88'},
+        'SR': {'name': 'ScotRail', 'sector': 'Passenger', 'atoc_code': 'SR', 'business_code': 'HA', 'sector_code': '60'},
+        'SW': {'name': 'South Western Railway', 'sector': 'Passenger', 'atoc_code': 'SW', 'business_code': 'HY', 'sector_code': '84'},
         'SX': {'name': 'Stansted Express', 'sector': 'Passenger', 'atoc_code': 'SX'},
-        'TL': {'name': 'Thameslink', 'sector': 'Passenger', 'atoc_code': 'TLK'},
-        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TPE', 'sector_code': '20'},
-        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TFW', 'sector_code': '83'},
-        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'AVC', 'business_code': 'HF', 'sector_code': '65'},
-        'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter', 'atoc_code': 'WCR'},
-        'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XCT', 'sector_code': '27'},
-        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'ELZ', 'sector_code': '92'},
+        'TL': {'name': 'Thameslink', 'sector': 'Passenger', 'atoc_code': 'TL', 'business_code': 'ET', 'sector_code': '88'},
+        'TP': {'name': 'TransPennine Express', 'sector': 'Passenger', 'atoc_code': 'TP', 'business_code': 'EA', 'sector_code': '20'},
+        'TW': {'name': 'Transport for Wales Rail', 'sector': 'Passenger', 'atoc_code': 'TW'},
+        'VT': {'name': 'Avanti West Coast', 'sector': 'Passenger', 'atoc_code': 'VT', 'business_code': 'HF', 'sector_code': '65'},
+        'WR': {'name': 'West Coast Railway Company', 'sector': 'Charter', 'atoc_code': 'WR', 'business_code': 'PA', 'sector_code': '50'},
+        'XC': {'name': 'CrossCountry', 'sector': 'Passenger', 'atoc_code': 'XC', 'business_code': 'EH', 'sector_code': '27'},
+        'XR': {'name': 'Elizabeth Line', 'sector': 'Passenger', 'atoc_code': 'XR', 'business_code': 'EX', 'sector_code': '33'},
         'ZZ': {'name': 'Unidentified', 'sector': 'Unknown'},
         # Freight operators
         'DB': {'name': 'DB Cargo UK', 'sector': 'Freight', 'atoc_code': 'DBC'},

@@ -35,37 +35,37 @@ def test_resolve_toc_code_canonical():
 
 
 def test_resolve_toc_code_atoc():
-    """Test that ATOC codes are mapped to canonical codes."""
+    """Test that ATOC codes are already canonical (2-char)."""
     resolver = TOCResolver()
     
-    # Test ATOC code mappings
-    assert resolver.resolve_toc_code('SWR') == 'SW', "SWR (ATOC) should map to SW"
-    assert resolver.resolve_toc_code('GWR') == 'GW', "GWR (ATOC) should map to GW"
-    assert resolver.resolve_toc_code('XCT') == 'XC', "XCT (ATOC) should map to XC"
-    assert resolver.resolve_toc_code('ATW') == 'AW', "ATW (ATOC) should map to AW"
-    assert resolver.resolve_toc_code('TPE') == 'TP', "TPE (ATOC) should map to TP"
-    assert resolver.resolve_toc_code('AVC') == 'VT', "AVC (ATOC) should map to VT"
+    # Test ATOC code mappings (2-char ATOC codes are canonical)
+    assert resolver.resolve_toc_code('SW') == 'SW', "SW (ATOC) is canonical"
+    assert resolver.resolve_toc_code('GW') == 'GW', "GW (ATOC) is canonical"
+    assert resolver.resolve_toc_code('XC') == 'XC', "XC (ATOC) is canonical"
+    assert resolver.resolve_toc_code('AW') == 'AW', "AW (ATOC) is canonical"
+    assert resolver.resolve_toc_code('TP') == 'TP', "TP (ATOC) is canonical"
+    assert resolver.resolve_toc_code('VT') == 'VT', "VT (ATOC) is canonical"
     
     # Test case insensitivity
-    assert resolver.resolve_toc_code('swr') == 'SW'
-    assert resolver.resolve_toc_code('gwr') == 'GW'
+    assert resolver.resolve_toc_code('sw') == 'SW'
+    assert resolver.resolve_toc_code('gw') == 'GW'
 
 
 def test_resolve_toc_code_business():
-    """Test that numeric business codes are mapped to canonical codes."""
+    """Test that numeric sector codes are mapped to canonical codes."""
     resolver = TOCResolver()
     
-    # Test numeric business code mappings
-    assert resolver.resolve_toc_code('71') == 'SW', "71 should map to SW (South Western Railway)"
-    assert resolver.resolve_toc_code('79') == 'GW', "79 should map to GW (Great Western Railway)"
-    assert resolver.resolve_toc_code('27') == 'XC', "27 should map to XC (CrossCountry)"
-    assert resolver.resolve_toc_code('84') == 'SE', "84 should map to SE (Southeastern)"
-    assert resolver.resolve_toc_code('20') == 'TP', "20 should map to TP (TransPennine Express)"
-    assert resolver.resolve_toc_code('25') == 'VT', "25 should map to VT (Avanti West Coast)"
+    # Test numeric sector code mappings (from TRUST messages)
+    assert resolver.resolve_toc_code('84') == 'SW', "84 (sector_code) should map to SW (South Western Railway)"
+    assert resolver.resolve_toc_code('25') == 'GW', "25 (sector_code) should map to GW (Great Western Railway)"
+    assert resolver.resolve_toc_code('27') == 'XC', "27 (sector_code) should map to XC (CrossCountry)"
+    assert resolver.resolve_toc_code('80') == 'SE', "80 (sector_code) should map to SE (Southeastern)"
+    assert resolver.resolve_toc_code('20') == 'TP', "20 (sector_code) should map to TP (TransPennine Express)"
+    assert resolver.resolve_toc_code('65') == 'VT', "65 (sector_code) should map to VT (Avanti West Coast)"
     
     # Test whitespace handling
-    assert resolver.resolve_toc_code(' 71 ') == 'SW'
-    assert resolver.resolve_toc_code('  79  ') == 'GW'
+    assert resolver.resolve_toc_code(' 84 ') == 'SW'
+    assert resolver.resolve_toc_code('  25  ') == 'GW'
 
 
 def test_resolve_toc_code_unknown():
@@ -89,13 +89,13 @@ def test_atoc_and_business_indices_built():
     
     # Check that indices exist and have entries
     assert len(resolver.atoc_to_canonical) > 0, "ATOC mapping should not be empty"
-    assert len(resolver.business_to_canonical) > 0, "Business code mapping should not be empty"
+    assert len(resolver.sector_to_canonical) > 0, "Sector code mapping should not be empty"
     
-    # Check specific mappings exist
-    assert 'SWR' in resolver.atoc_to_canonical
-    assert 'GWR' in resolver.atoc_to_canonical
-    assert '71' in resolver.business_to_canonical
-    assert '79' in resolver.business_to_canonical
+    # Check specific mappings exist (ATOC codes are 2-char and already canonical)
+    assert 'SW' in resolver.atoc_to_canonical
+    assert 'GW' in resolver.atoc_to_canonical
+    assert '84' in resolver.sector_to_canonical  # sector_code for SW
+    assert '25' in resolver.sector_to_canonical  # sector_code for GW
 
 
 def test_populate_database_with_atoc_and_business():
@@ -118,22 +118,25 @@ def test_populate_database_with_atoc_and_business():
         cursor.execute("SELECT * FROM toc_reference WHERE toc_code='SW'")
         row = cursor.fetchone()
         assert row is not None
-        assert row['atoc_code'] == 'SWR', f"Expected ATOC code 'SWR', got {row['atoc_code']}"
-        assert row['business_code'] == '71', f"Expected business code '71', got {row['business_code']}"
+        assert row['atoc_code'] == 'SW', f"Expected ATOC code 'SW', got {row['atoc_code']}"
+        assert row['business_code'] == 'HY', f"Expected business code 'HY', got {row['business_code']}"
+        assert row['sector_code'] == '84', f"Expected sector code '84', got {row['sector_code']}"
         
         # Check Great Western Railway
         cursor.execute("SELECT * FROM toc_reference WHERE toc_code='GW'")
         row = cursor.fetchone()
         assert row is not None
-        assert row['atoc_code'] == 'GWR'
-        assert row['business_code'] == '79'
+        assert row['atoc_code'] == 'GW', f"Expected ATOC code 'GW', got {row['atoc_code']}"
+        assert row['business_code'] == 'EF', f"Expected business code 'EF', got {row['business_code']}"
+        assert row['sector_code'] == '25', f"Expected sector code '25', got {row['sector_code']}"
         
         # Check CrossCountry
         cursor.execute("SELECT * FROM toc_reference WHERE toc_code='XC'")
         row = cursor.fetchone()
         assert row is not None
-        assert row['atoc_code'] == 'XCT'
-        assert row['business_code'] == '27'
+        assert row['atoc_code'] == 'XC', f"Expected ATOC code 'XC', got {row['atoc_code']}"
+        assert row['business_code'] == 'EH', f"Expected business code 'EH', got {row['business_code']}"
+        assert row['sector_code'] == '27', f"Expected sector code '27', got {row['sector_code']}"
         
         conn.close()
 
@@ -148,23 +151,23 @@ def test_get_canonical_toc_code_database():
         resolver = TOCResolver()
         resolver.populate_database(db, quiet=True)
         
-        # Test canonical code lookup
+        # Test canonical code lookup (ATOC codes are already canonical)
         assert db.get_canonical_toc_code('SW') == 'SW'
         assert db.get_canonical_toc_code('GW') == 'GW'
         
-        # Test ATOC code lookup
-        assert db.get_canonical_toc_code('SWR') == 'SW'
-        assert db.get_canonical_toc_code('GWR') == 'GW'
-        assert db.get_canonical_toc_code('XCT') == 'XC'
+        # Test ATOC code lookup (2-char, same as canonical)
+        assert db.get_canonical_toc_code('SW') == 'SW'
+        assert db.get_canonical_toc_code('GW') == 'GW'
+        assert db.get_canonical_toc_code('XC') == 'XC'
         
-        # Test business code lookup
-        assert db.get_canonical_toc_code('71') == 'SW'
-        assert db.get_canonical_toc_code('79') == 'GW'
+        # Test sector code lookup (numeric codes from TRUST messages)
+        assert db.get_canonical_toc_code('84') == 'SW'
+        assert db.get_canonical_toc_code('25') == 'GW'
         assert db.get_canonical_toc_code('27') == 'XC'
         
         # Test case insensitivity
-        assert db.get_canonical_toc_code('swr') == 'SW'
-        assert db.get_canonical_toc_code('gwr') == 'GW'
+        assert db.get_canonical_toc_code('sw') == 'SW'
+        assert db.get_canonical_toc_code('gw') == 'GW'
         
         # Test unknown codes
         assert db.get_canonical_toc_code('ZZZ') is None
@@ -177,11 +180,11 @@ def test_trust_message_with_atoc_code():
     toc_resolver = TOCResolver()
     hv = HumanView(resolver=None, smart=None, toc_resolver=toc_resolver)
     
-    # Mock TRUST message with ATOC code
+    # Mock TRUST message with ATOC code (2-char)
     trust_msg = {
         'body': {
             'train_id': '123456',
-            'toc_id': 'SWR',  # ATOC code for South Western Railway
+            'toc_id': 'SW',  # ATOC code for South Western Railway (2-char)
             'msg_type': '0001',
             'event_timestamp': '1640000000000'
         }
@@ -194,15 +197,15 @@ def test_trust_message_with_atoc_code():
 
 
 def test_trust_message_with_business_code():
-    """Test that TRUST messages with numeric business codes are normalized."""
+    """Test that TRUST messages with numeric sector codes are normalized."""
     toc_resolver = TOCResolver()
     hv = HumanView(resolver=None, smart=None, toc_resolver=toc_resolver)
     
-    # Mock TRUST message with numeric business code
+    # Mock TRUST message with numeric sector code
     trust_msg = {
         'body': {
             'train_id': '789012',
-            'toc_id': '71',  # Business code for South Western Railway
+            'toc_id': '84',  # Sector code for South Western Railway
             'msg_type': '0001',
             'event_timestamp': '1640000000000'
         }
@@ -264,7 +267,7 @@ def test_trust_message_without_resolver():
     trust_msg = {
         'body': {
             'train_id': '999888',
-            'toc_id': 'SWR',
+            'toc_id': 'SW',  # 2-char ATOC code
             'msg_type': '0001',
             'event_timestamp': '1640000000000'
         }
@@ -274,7 +277,7 @@ def test_trust_message_without_resolver():
     
     assert st is not None
     # Without resolver, should preserve raw value
-    assert st.toc_id == 'SWR', f"Without resolver, should preserve 'SWR', got {st.toc_id}"
+    assert st.toc_id == 'SW', f"Without resolver, should preserve 'SW', got {st.toc_id}"
 
 
 def test_trust_state_toc_join_with_atoc_code():
@@ -291,11 +294,11 @@ def test_trust_state_toc_join_with_atoc_code():
         toc_resolver = TOCResolver()
         hv = HumanView(resolver=None, smart=None, toc_resolver=toc_resolver)
         
-        # Process TRUST message with ATOC code
+        # Process TRUST message with ATOC code (2-char)
         trust_msg = {
             'body': {
                 'train_id': '123456',
-                'toc_id': 'SWR',  # ATOC code
+                'toc_id': 'SW',  # ATOC code (2-char, already canonical)
                 'train_uid': 'C43876',
                 'msg_type': '0001',
                 'event_timestamp': '1640000000000'
@@ -303,14 +306,14 @@ def test_trust_state_toc_join_with_atoc_code():
         }
         
         st = hv.upsert_trust(trust_msg)
-        assert st.toc_id == 'SW', "TOC should be normalized to SW"
+        assert st.toc_id == 'SW', "TOC should be SW"
         
         # Insert into database
         db.upsert_trust(
             train_id=st.train_id,
             headcode='2C90',
             uid=st.train_uid,
-            toc_id=st.toc_id,  # Should be normalized to 'SW'
+            toc_id=st.toc_id,  # Should be 'SW'
             last_event_time=st.last_event_time,
             last_location='',
             last_delay_min=None,
@@ -337,7 +340,7 @@ def test_trust_state_toc_join_with_atoc_code():
 
 
 def test_trust_message_toc_join_with_business_code():
-    """Test that TRUST message with business code joins correctly to toc_reference."""
+    """Test that TRUST message with sector code joins correctly to toc_reference."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         db = RailDB(db_path, enable_mapper=False)
@@ -350,11 +353,11 @@ def test_trust_message_toc_join_with_business_code():
         toc_resolver = TOCResolver()
         hv = HumanView(resolver=None, smart=None, toc_resolver=toc_resolver)
         
-        # Process TRUST message with business code
+        # Process TRUST message with sector code (numeric)
         trust_msg = {
             'body': {
                 'train_id': '789012',
-                'toc_id': '79',  # Business code for Great Western
+                'toc_id': '25',  # Sector code for Great Western
                 'msg_type': '0001',
                 'event_timestamp': '1640000000000'
             }

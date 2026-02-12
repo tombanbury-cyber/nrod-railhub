@@ -1242,9 +1242,11 @@ class RailDB:
         """
         Get canonical TOC code from an external identifier.
         
-        Queries toc_reference for a match on toc_code, atoc_code, business_code, or sector_code,
-        returning the canonical toc_code if found. This is a defensive lookup useful
-        when the TOCResolver is not available.
+        Queries toc_reference with priority order:
+        1. Exact match on toc_code (canonical)
+        2. Match on atoc_code (SCHEDULE messages)
+        3. Match on sector_code (TRUST messages)
+        4. Match on business_code (schedule URLs)
         
         Args:
             external_code: TOC identifier (may be canonical, ATOC, business, or sector code)
@@ -1259,13 +1261,32 @@ class RailDB:
         
         with self._lock:
             cursor = self._conn.cursor()
-            # Check all possible code columns
-            cursor.execute("""
-                SELECT toc_code FROM toc_reference 
-                WHERE toc_code=? OR atoc_code=? OR business_code=? OR sector_code=?
-            """, (code, code, code, code))
+            
+            # Priority 1: Check if it's already canonical
+            cursor.execute("SELECT toc_code FROM toc_reference WHERE toc_code=?", (code,))
             row = cursor.fetchone()
-            return row[0] if row else None
+            if row:
+                return row[0]
+            
+            # Priority 2: Check ATOC code (from SCHEDULE messages)
+            cursor.execute("SELECT toc_code FROM toc_reference WHERE atoc_code=?", (code,))
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+            
+            # Priority 3: Check sector code (from TRUST messages)
+            cursor.execute("SELECT toc_code FROM toc_reference WHERE sector_code=?", (code,))
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+            
+            # Priority 4: Check business code (from schedule URLs)
+            cursor.execute("SELECT toc_code FROM toc_reference WHERE business_code=?", (code,))
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+            
+            return None
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""
