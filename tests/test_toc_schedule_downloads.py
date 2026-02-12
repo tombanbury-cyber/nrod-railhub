@@ -21,10 +21,11 @@ def test_toc_resolver_get_business_code():
     assert resolver.get_business_code('SR') == 'HA'  # ScotRail
     assert resolver.get_business_code('EM') == 'EM'  # East Midlands Railway
     assert resolver.get_business_code('VT') == 'HF'  # Avanti West Coast
+    assert resolver.get_business_code('GW') == 'EF'  # Great Western Railway
     
     # Test TOC without business code
     assert resolver.get_business_code('EX') is None  # Express Passenger
-    assert resolver.get_business_code('GW') is None  # Great Western Railway (no business code known)
+    assert resolver.get_business_code('FC') is None  # First Capital Connect (no business code)
     
     # Test non-existent TOC
     assert resolver.get_business_code('ZZZ') is None

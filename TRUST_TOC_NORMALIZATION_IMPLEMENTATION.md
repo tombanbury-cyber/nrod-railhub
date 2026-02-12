@@ -2,20 +2,21 @@
 
 ## Overview
 
-This document summarizes the implementation of TOC (Train Operating Company) code normalization for TRUST messages, addressing the issue where filtering by canonical TOC codes failed to match messages containing business codes or ATOC codes.
+This document summarizes the implementation of TOC (Train Operating Company) code normalization for TRUST messages, addressing the issue where filtering by canonical TOC codes failed to match messages containing sector codes, business codes, or ATOC codes.
 
 ## Problem Statement
 
 The TRUST messages history page was missing records when a `toc_filter` was configured because:
 
 1. **`trust_messages.toc_id`** stored the raw message-provided identifier, which could be:
-   - A canonical 2-character TOC code (e.g., 'SE')
-   - A numeric business code (e.g., '84')
-   - An ATOC code (e.g., 'SWR', 'GWR')
+   - A canonical 2-character TOC code (e.g., 'SE', 'SW')
+   - A numeric sector code (e.g., '80', '84')
+   - A 2-character business code (e.g., 'HU', 'HY')
+   - A 2-character ATOC code (e.g., 'SE', 'SW' - same as canonical for passenger)
 
 2. **Filter list** contained only canonical TOC codes from `toc_reference.toc_code`
 
-3. **Web UI join** used `tm.toc_id = tr.toc_code`, which failed to match when `toc_id` contained business_code or atoc_code values
+3. **Web UI join** used `tm.toc_id = tr.toc_code`, which failed to match when `toc_id` contained sector_code or business_code values
 
 ## Solution Architecture
 
@@ -30,15 +31,15 @@ Added a new column to `trust_messages` table:
 #### Insert Logic
 Modified `insert_trust_message()` in `database.py`:
 ```python
-# Resolve canonical toc_code from raw toc_id
+# Resolve canonical toc_code from raw toc_id with priority
 toc_code = self.get_canonical_toc_code(toc_id) if toc_id else None
 ```
 
-The method leverages the existing `get_canonical_toc_code()` which queries:
-```sql
-SELECT toc_code FROM toc_reference 
-WHERE toc_code=? OR business_code=? OR atoc_code=?
-```
+The method leverages the existing `get_canonical_toc_code()` which checks with priority:
+1. Exact match on toc_code (canonical)
+2. Match on atoc_code (SCHEDULE messages)
+3. Match on sector_code (TRUST messages)
+4. Match on business_code (schedule URLs)
 
 ### Web Layer
 
@@ -130,34 +131,34 @@ ON trust_messages(toc_code);
 
 | Test | Scenario | Input | Expected Output |
 |------|----------|-------|-----------------|
-| `test_trust_message_insert_with_business_code` | Business code resolution | toc_id='84' | toc_code='SE' |
-| `test_trust_message_insert_with_atoc_code` | ATOC code resolution | toc_id='SWR' | toc_code='SW' |
+| `test_trust_message_insert_with_business_code` | Sector code resolution | toc_id='80' | toc_code='SE' |
+| `test_trust_message_insert_with_atoc_code` | ATOC code resolution | toc_id='SW' | toc_code='SW' |
 | `test_trust_message_insert_with_canonical_code` | Canonical preservation | toc_id='GW' | toc_code='GW' |
 | `test_trust_message_insert_with_unknown_code` | Unknown code handling | toc_id='ZZZ' | toc_code=NULL |
 | `test_trust_messages_backfill_migration` | Migration backfill | Existing rows | Correct mapping |
-| `test_trust_messages_join_and_filter` | Web UI filtering | Filter by 'SE' | Finds '84' messages |
+| `test_trust_messages_join_and_filter` | Web UI filtering | Filter by 'SE' | Finds '80' messages |
 
-### Integration Tests (19/19 passing)
+### Integration Tests (20/20 passing)
 - All existing `test_listener_db_persistence.py` tests pass
-- All existing `test_toc_normalization.py` tests pass
+- All `test_toc_normalization.py` tests pass (20 total)
 
 ### Security
 - CodeQL: 0 alerts
 
 ## Verification Examples
 
-### Example 1: Business Code Resolution
+### Example 1: Sector Code Resolution
 ```
-Input Message:  { "toc_id": "84", "train_id": "123456" }
-Database Row:   toc_id='84', toc_code='SE'
-Display:        "Southeastern" (with tooltip "Raw: 84")
+Input Message:  { "toc_id": "80", "train_id": "123456" }
+Database Row:   toc_id='80', toc_code='SE'
+Display:        "Southeastern" (with tooltip "Raw: 80")
 ```
 
 ### Example 2: ATOC Code Resolution
 ```
-Input Message:  { "toc_id": "SWR", "train_id": "789012" }
-Database Row:   toc_id='SWR', toc_code='SW'
-Display:        "South Western Railway" (with tooltip "Raw: SWR")
+Input Message:  { "toc_id": "SW", "train_id": "789012" }
+Database Row:   toc_id='SW', toc_code='SW'
+Display:        "South Western Railway" (with tooltip "Raw: SW")
 ```
 
 ### Example 3: Unknown Code Handling
