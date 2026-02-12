@@ -16,7 +16,7 @@ from nrod_railhub.resolvers import TOCResolver
 
 
 def test_trust_message_insert_with_business_code():
-    """Test that insert_trust_message resolves business code to canonical toc_code."""
+    """Test that insert_trust_message resolves sector code to canonical toc_code."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         db = RailDB(db_path, enable_mapper=False)
@@ -25,10 +25,10 @@ def test_trust_message_insert_with_business_code():
         resolver = TOCResolver()
         resolver.populate_database(db, quiet=True)
         
-        # Insert a TRUST message with business code '84' (Southeastern)
+        # Insert a TRUST message with sector code '80' (Southeastern)
         trust_body = {
             'train_id': '123456',
-            'toc_id': '84',  # Business code for Southeastern
+            'toc_id': '80',  # Sector code for Southeastern
             'actual_timestamp': '1640000000000',
             'event_type': 'ARRIVAL',
             'reporting_stanox': '87701'
@@ -49,7 +49,7 @@ def test_trust_message_insert_with_business_code():
         row = cursor.fetchone()
         
         assert row is not None, "Message should be inserted"
-        assert row['toc_id'] == '84', "Raw toc_id should be preserved as '84'"
+        assert row['toc_id'] == '80', "Raw toc_id should be preserved as '80'"
         assert row['toc_code'] == 'SE', "Canonical toc_code should be 'SE'"
         
         conn.close()
@@ -65,10 +65,10 @@ def test_trust_message_insert_with_atoc_code():
         resolver = TOCResolver()
         resolver.populate_database(db, quiet=True)
         
-        # Insert a TRUST message with ATOC code 'SWR' (South Western Railway)
+        # Insert a TRUST message with ATOC code 'SW' (South Western Railway, 2-char)
         trust_body = {
             'train_id': '789012',
-            'toc_id': 'SWR',  # ATOC code for South Western Railway
+            'toc_id': 'SW',  # ATOC code for South Western Railway (2-char)
             'actual_timestamp': '1640000001000',
             'event_type': 'DEPARTURE',
             'reporting_stanox': '87701'
@@ -89,7 +89,7 @@ def test_trust_message_insert_with_atoc_code():
         row = cursor.fetchone()
         
         assert row is not None, "Message should be inserted"
-        assert row['toc_id'] == 'SWR', "Raw toc_id should be preserved as 'SWR'"
+        assert row['toc_id'] == 'SW', "Raw toc_id should be preserved as 'SW'"
         assert row['toc_code'] == 'SW', "Canonical toc_code should be 'SW'"
         
         conn.close()
@@ -188,6 +188,7 @@ def test_trust_messages_backfill_migration():
                 toc_code TEXT PRIMARY KEY,
                 toc_name TEXT NOT NULL,
                 business_code TEXT,
+                sector_code TEXT,
                 atoc_code TEXT,
                 sector TEXT,
                 updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -209,22 +210,22 @@ def test_trust_messages_backfill_migration():
         
         # Step 2: Insert TOC reference data
         conn.execute("""
-            INSERT INTO toc_reference (toc_code, toc_name, business_code, atoc_code, sector)
-            VALUES ('SE', 'Southeastern', '84', 'SET', 'Regional')
+            INSERT INTO toc_reference (toc_code, toc_name, business_code, sector_code, atoc_code, sector)
+            VALUES ('SE', 'Southeastern', 'HU', '80', 'SE', 'Regional')
         """)
         conn.execute("""
-            INSERT INTO toc_reference (toc_code, toc_name, business_code, atoc_code, sector)
-            VALUES ('SW', 'South Western Railway', '71', 'SWR', 'Regional')
+            INSERT INTO toc_reference (toc_code, toc_name, business_code, sector_code, atoc_code, sector)
+            VALUES ('SW', 'South Western Railway', 'HY', '84', 'SW', 'Regional')
         """)
         
         # Step 3: Insert old-format TRUST messages (no toc_code column)
         conn.execute("""
             INSERT INTO trust_messages (train_id, toc_id, actual_timestamp_ms, event_type, reporting_stanox)
-            VALUES ('111111', '84', 1640000000000, 'ARRIVAL', '87701')
+            VALUES ('111111', '80', 1640000000000, 'ARRIVAL', '87701')
         """)
         conn.execute("""
             INSERT INTO trust_messages (train_id, toc_id, actual_timestamp_ms, event_type, reporting_stanox)
-            VALUES ('222222', 'SWR', 1640000001000, 'DEPARTURE', '87701')
+            VALUES ('222222', 'SW', 1640000001000, 'DEPARTURE', '87701')
         """)
         conn.execute("""
             INSERT INTO trust_messages (train_id, toc_id, actual_timestamp_ms, event_type, reporting_stanox)
@@ -267,13 +268,13 @@ def test_trust_messages_backfill_migration():
         # Check business code mapping
         cursor.execute("SELECT toc_id, toc_code FROM trust_messages WHERE train_id='111111'")
         row1 = cursor.fetchone()
-        assert row1['toc_id'] == '84', "Raw toc_id should be '84'"
+        assert row1['toc_id'] == '80', "Raw toc_id should be '80'"
         assert row1['toc_code'] == 'SE', "Should be backfilled to 'SE'"
         
         # Check ATOC code mapping
         cursor.execute("SELECT toc_id, toc_code FROM trust_messages WHERE train_id='222222'")
         row2 = cursor.fetchone()
-        assert row2['toc_id'] == 'SWR', "Raw toc_id should be 'SWR'"
+        assert row2['toc_id'] == 'SW', "Raw toc_id should be 'SW'"
         assert row2['toc_code'] == 'SW', "Should be backfilled to 'SW'"
         
         # Check unknown code handling
@@ -298,14 +299,14 @@ def test_trust_messages_join_and_filter():
         # Insert messages with various TOC identifiers
         db.insert_trust_message({
             'train_id': 'A11111',
-            'toc_id': '84',  # Business code -> SE
+            'toc_id': '80',  # Sector code -> SE
             'actual_timestamp': '1640000000000',
             'event_type': 'ARRIVAL'
         })
         
         db.insert_trust_message({
             'train_id': 'B22222',
-            'toc_id': 'SWR',  # ATOC code -> SW
+            'toc_id': 'SW',  # ATOC code -> SW (2-char, canonical)
             'actual_timestamp': '1640000001000',
             'event_type': 'DEPARTURE'
         })
@@ -334,10 +335,10 @@ def test_trust_messages_join_and_filter():
         
         rows = cursor.fetchall()
         
-        # Should find the message inserted with business code '84'
+        # Should find the message inserted with sector code '80'
         assert len(rows) == 1, "Should find exactly one SE message"
         assert rows[0]['train_id'] == 'A11111'
-        assert rows[0]['msg_toc_id'] == '84'
+        assert rows[0]['msg_toc_id'] == '80'
         assert rows[0]['canonical_toc_code'] == 'SE'
         assert rows[0]['toc_name'] == 'Southeastern'
         
