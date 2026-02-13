@@ -296,6 +296,24 @@ class RailDB:
                     updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
                 );
                 
+                -- TOC-TD Area Mappings: Many-to-many relationships between TOCs and TD areas
+                CREATE TABLE IF NOT EXISTS toc_td_areas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    toc_code TEXT NOT NULL,
+                    td_area TEXT NOT NULL,
+                    is_primary INTEGER NOT NULL DEFAULT 0,
+                    source TEXT,
+                    confidence REAL,
+                    effective_from TEXT,
+                    effective_to TEXT,
+                    created_by TEXT,
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    notes TEXT,
+                    UNIQUE(toc_code, td_area)
+                );
+                CREATE INDEX IF NOT EXISTS idx_toc_td_areas_toc_code ON toc_td_areas(toc_code);
+                CREATE INDEX IF NOT EXISTS idx_toc_td_areas_td_area ON toc_td_areas(td_area);
+                
                 -- CORPUS: Location reference data (TIPLOC, STANOX, CRS mappings)
                 CREATE TABLE IF NOT EXISTS corpus_locations (
                     tiploc TEXT,
@@ -1287,6 +1305,141 @@ class RailDB:
                 return row[0]
             
             return None
+
+    def upsert_toc_td_area(
+        self,
+        toc_code: str,
+        td_area: str,
+        is_primary: bool = False,
+        source: Optional[str] = None,
+        confidence: Optional[float] = None,
+        effective_from: Optional[str] = None,
+        effective_to: Optional[str] = None,
+        created_by: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> None:
+        """
+        Insert or update a TOC-TD area mapping.
+        
+        Args:
+            toc_code: 2-character TOC code (e.g., 'SW')
+            td_area: 2-character TD area code (e.g., 'EK')
+            is_primary: Whether this is the primary mapping for this TOC-area pair
+            source: Source of the mapping (e.g., 'manual', 'import', 'analysis')
+            confidence: Confidence score (0.0-1.0)
+            effective_from: ISO date when mapping becomes effective
+            effective_to: ISO date when mapping expires (None = indefinite)
+            created_by: User or process that created the mapping
+            notes: Additional notes about the mapping
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO toc_td_areas(toc_code, td_area, is_primary, source, confidence, 
+                                        effective_from, effective_to, created_by, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(toc_code, td_area) DO UPDATE SET
+                    is_primary=excluded.is_primary,
+                    source=excluded.source,
+                    confidence=excluded.confidence,
+                    effective_from=excluded.effective_from,
+                    effective_to=excluded.effective_to,
+                    created_by=excluded.created_by,
+                    notes=excluded.notes,
+                    created_at_ts=strftime('%s','now') * 1000
+                """,
+                (toc_code, td_area, 1 if is_primary else 0, source, confidence,
+                 effective_from, effective_to, created_by, notes),
+            )
+    
+    def delete_toc_td_area(self, toc_code: str, td_area: str) -> None:
+        """
+        Delete a TOC-TD area mapping.
+        
+        Args:
+            toc_code: 2-character TOC code
+            td_area: 2-character TD area code
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM toc_td_areas WHERE toc_code=? AND td_area=?",
+                (toc_code, td_area),
+            )
+    
+    def get_toc_td_areas(self) -> list[dict]:
+        """
+        Retrieve all TOC-TD area mappings.
+        
+        Returns:
+            List of dicts with keys: id, toc_code, td_area, is_primary, source, 
+            confidence, effective_from, effective_to, created_by, created_at_ts, notes
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, toc_code, td_area, is_primary, source, confidence,
+                       effective_from, effective_to, created_by, created_at_ts, notes
+                FROM toc_td_areas
+                ORDER BY toc_code, td_area
+                """
+            )
+            return [
+                {
+                    'id': row[0],
+                    'toc_code': row[1],
+                    'td_area': row[2],
+                    'is_primary': bool(row[3]),
+                    'source': row[4],
+                    'confidence': row[5],
+                    'effective_from': row[6],
+                    'effective_to': row[7],
+                    'created_by': row[8],
+                    'created_at_ts': row[9],
+                    'notes': row[10]
+                }
+                for row in cursor.fetchall()
+            ]
+    
+    def get_td_areas_for_toc(self, toc_code: str) -> list[dict]:
+        """
+        Retrieve all TD area mappings for a specific TOC.
+        
+        Args:
+            toc_code: 2-character TOC code
+            
+        Returns:
+            List of dicts with keys: id, toc_code, td_area, is_primary, source,
+            confidence, effective_from, effective_to, created_by, created_at_ts, notes
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, toc_code, td_area, is_primary, source, confidence,
+                       effective_from, effective_to, created_by, created_at_ts, notes
+                FROM toc_td_areas
+                WHERE toc_code=?
+                ORDER BY td_area
+                """,
+                (toc_code,)
+            )
+            return [
+                {
+                    'id': row[0],
+                    'toc_code': row[1],
+                    'td_area': row[2],
+                    'is_primary': bool(row[3]),
+                    'source': row[4],
+                    'confidence': row[5],
+                    'effective_from': row[6],
+                    'effective_to': row[7],
+                    'created_by': row[8],
+                    'created_at_ts': row[9],
+                    'notes': row[10]
+                }
+                for row in cursor.fetchall()
+            ]
 
     def _add_event_to_batch(self, event: dict) -> None:
         """Add an event to the mapper batch for processing."""
