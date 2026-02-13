@@ -87,6 +87,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             f"<a href='/vstp' class='navlink {'active' if active=='vstp' else ''}'>VSTP</a>"
             f"<a href='/cif' class='navlink {'active' if active=='cif' else ''}'>CIF</a>"
             f"<a href='/tocs' class='navlink {'active' if active=='tocs' else ''}'>TOCs</a>"
+            f"<a href='/toc-td-areas' class='navlink {'active' if active=='toc-td-areas' else ''}'>TOC-TD Areas</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
             "</div>"
@@ -1740,6 +1741,209 @@ filterInput.addEventListener('input', updateFilter);
             body.append(f"<p><i>Error querying toc_reference: {e}</i></p>")
         
         return render_page("TOCs - NR RailHub", body, active="tocs")
+
+    @app.route("/toc-td-areas", methods=["GET", "POST"])
+    def toc_td_areas():
+        """Admin page for managing TOC-TD area mappings."""
+        
+        # Handle POST requests (add or delete mappings)
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            
+            if action == "add":
+                toc_code = request.form.get("toc_code", "").strip().upper()
+                td_area = request.form.get("td_area", "").strip().upper()
+                is_primary = request.form.get("is_primary") == "on"
+                notes = request.form.get("notes", "").strip()
+                
+                if toc_code and td_area:
+                    try:
+                        q(
+                            """
+                            INSERT INTO toc_td_areas(toc_code, td_area, is_primary, source, created_by, notes)
+                            VALUES (?, ?, ?, 'web_ui', 'admin', ?)
+                            ON CONFLICT(toc_code, td_area) DO UPDATE SET
+                                is_primary=excluded.is_primary,
+                                notes=excluded.notes,
+                                created_at_ts=strftime('%s','now') * 1000
+                            """,
+                            (toc_code, td_area, 1 if is_primary else 0, notes if notes else None)
+                        )
+                        logger.info(f"Added/updated TOC-TD mapping: {toc_code} <-> {td_area}")
+                    except Exception as e:
+                        logger.error(f"Error adding TOC-TD mapping: {e}")
+                        return render_page("Error - NR RailHub", [f"<p>Error adding mapping: {e}</p>"], active="")
+                
+                return redirect("/toc-td-areas")
+            
+            elif action == "delete":
+                toc_code = request.form.get("toc_code", "").strip()
+                td_area = request.form.get("td_area", "").strip()
+                
+                if toc_code and td_area:
+                    try:
+                        q("DELETE FROM toc_td_areas WHERE toc_code=? AND td_area=?", (toc_code, td_area))
+                        logger.info(f"Deleted TOC-TD mapping: {toc_code} <-> {td_area}")
+                    except Exception as e:
+                        logger.error(f"Error deleting TOC-TD mapping: {e}")
+                
+                return redirect("/toc-td-areas")
+        
+        # Handle GET request (display page)
+        body = ["<h2>TOC ↔ TD Area Mappings</h2>"]
+        body.append("<p>Manage many-to-many relationships between Train Operating Companies and TD areas. ")
+        body.append("These mappings help constrain candidate schedules when matching berth events to trains.</p>")
+        
+        # Add new mapping form
+        body.append("<div style='background:#f7f9fc;padding:15px;margin:20px 0;border-radius:6px'>")
+        body.append("<h3 style='margin-top:0'>Add New Mapping</h3>")
+        body.append("<form method='post' action='/toc-td-areas'>")
+        body.append("<input type='hidden' name='action' value='add'/>")
+        
+        # Get available TOCs for dropdown
+        try:
+            toc_rows = q("SELECT toc_code, toc_name FROM toc_reference ORDER BY toc_code")
+            body.append("<label>TOC: <select name='toc_code' required style='padding:6px;margin:0 10px 0 5px'>")
+            body.append("<option value=''>Select TOC...</option>")
+            for toc_row in toc_rows:
+                body.append(f"<option value='{toc_row['toc_code']}'>{toc_row['toc_code']} - {toc_row['toc_name']}</option>")
+            body.append("</select></label>")
+        except Exception as e:
+            logger.error(f"Error loading TOCs: {e}")
+            body.append("<label>TOC: <input name='toc_code' required placeholder='e.g., SW' style='padding:6px;margin:0 10px 0 5px' size='4'/></label>")
+        
+        body.append("<label>TD Area: <input name='td_area' required placeholder='e.g., EK' style='padding:6px;margin:0 10px 0 5px' size='4' maxlength='2'/></label>")
+        body.append("<label><input type='checkbox' name='is_primary'/> Primary</label>")
+        body.append("<label style='margin-left:10px'>Notes: <input name='notes' placeholder='Optional notes' style='padding:6px;width:200px'/></label>")
+        body.append("<button type='submit' style='padding:6px 12px;margin-left:10px;background:#0b5cff;color:white;border:0;border-radius:4px;cursor:pointer'>Add Mapping</button>")
+        body.append("</form>")
+        body.append("</div>")
+        
+        # Display current mappings
+        try:
+            rows = q("""
+                SELECT toc_code, td_area, is_primary, source, confidence, notes, created_at_ts
+                FROM toc_td_areas
+                ORDER BY toc_code, td_area
+            """)
+            
+            if rows:
+                body.append(f"<p class='dim'>Showing {len(rows)} mapping(s)</p>")
+                
+                # Add search filter box
+                body.append("<div style='margin:10px 0'><input type='text' id='tableFilter' placeholder='Filter by TOC, TD area...' style='padding:8px;width:300px;border:1px solid #ccc;border-radius:4px'/> <span id='filterCount' style='margin-left:10px;color:#6c757d'></span></div>")
+                
+                # Table with sortable headers
+                body.append("<table id='mappingTable'><thead><tr>")
+                body.append("<th onclick='sortTable(0)' style='cursor:pointer'>TOC <span id='sort0'></span></th>")
+                body.append("<th onclick='sortTable(1)' style='cursor:pointer'>TD Area <span id='sort1'></span></th>")
+                body.append("<th onclick='sortTable(2)' style='cursor:pointer'>Primary <span id='sort2'></span></th>")
+                body.append("<th onclick='sortTable(3)' style='cursor:pointer'>Source <span id='sort3'></span></th>")
+                body.append("<th onclick='sortTable(4)' style='cursor:pointer'>Confidence <span id='sort4'></span></th>")
+                body.append("<th>Notes</th>")
+                body.append("<th>Action</th>")
+                body.append("</tr></thead><tbody>")
+                
+                for r in rows:
+                    body.append("<tr>")
+                    body.append(f"<td class='mono'><b>{r['toc_code']}</b></td>")
+                    body.append(f"<td class='mono'><b>{r['td_area']}</b></td>")
+                    body.append(f"<td>{'Yes' if r['is_primary'] else 'No'}</td>")
+                    body.append(f"<td>{r['source'] or ''}</td>")
+                    body.append(f"<td>{r['confidence'] if r['confidence'] is not None else ''}</td>")
+                    body.append(f"<td>{r['notes'] or ''}</td>")
+                    body.append("<td>")
+                    body.append("<form method='post' action='/toc-td-areas' style='display:inline'>")
+                    body.append("<input type='hidden' name='action' value='delete'/>")
+                    body.append(f"<input type='hidden' name='toc_code' value='{r['toc_code']}'/>")
+                    body.append(f"<input type='hidden' name='td_area' value='{r['td_area']}'/>")
+                    body.append("<button type='submit' onclick='return confirm(\"Delete this mapping?\")' style='padding:4px 8px;background:#dc3545;color:white;border:0;border-radius:4px;cursor:pointer;font-size:12px'>Delete</button>")
+                    body.append("</form>")
+                    body.append("</td>")
+                    body.append("</tr>")
+                
+                body.append("</tbody></table>")
+                
+                # Add JavaScript for sorting and filtering
+                body.append("""
+<script>
+// Sorting functionality
+let sortDirection = {};
+function sortTable(columnIndex) {
+    const table = document.getElementById('mappingTable');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    sortDirection[columnIndex] = !sortDirection[columnIndex];
+    const ascending = sortDirection[columnIndex];
+    
+    // Clear all sort indicators
+    for (let i = 0; i < 5; i++) {
+        const sortSpan = document.getElementById('sort' + i);
+        if (sortSpan) sortSpan.textContent = '';
+    }
+    
+    // Set current sort indicator
+    const currentSortSpan = document.getElementById('sort' + columnIndex);
+    if (currentSortSpan) currentSortSpan.textContent = ascending ? ' ▲' : ' ▼';
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        let aVal = a.cells[columnIndex].textContent.trim();
+        let bVal = b.cells[columnIndex].textContent.trim();
+        
+        // Handle empty values
+        if (!aVal) return ascending ? 1 : -1;
+        if (!bVal) return ascending ? -1 : 1;
+        
+        // Default: case-insensitive string comparison
+        const comparison = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+        return ascending ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+}
+
+// Filtering functionality
+const filterInput = document.getElementById('tableFilter');
+const filterCount = document.getElementById('filterCount');
+const table = document.getElementById('mappingTable');
+const tbody = table.querySelector('tbody');
+const allRows = Array.from(tbody.querySelectorAll('tr'));
+
+function updateFilter() {
+    const filterText = filterInput.value.toLowerCase();
+    let visibleCount = 0;
+    
+    allRows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        if (text.includes(filterText)) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    if (filterText) {
+        filterCount.textContent = `Showing ${visibleCount} of ${allRows.length} rows`;
+    } else {
+        filterCount.textContent = '';
+    }
+}
+
+filterInput.addEventListener('input', updateFilter);
+</script>
+""")
+            else:
+                body.append("<p><i>No TOC-TD area mappings found. Use the form above to add your first mapping.</i></p>")
+        except Exception as e:
+            logger.error(f"Web dashboard: Error querying toc_td_areas: {e}")
+            body.append(f"<p><i>Error querying toc_td_areas: {e}</i></p>")
+        
+        return render_page("TOC-TD Areas - NR RailHub", body, active="toc-td-areas")
 
     @app.get("/raw-events")
     def raw_events():
