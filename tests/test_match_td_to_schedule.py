@@ -670,7 +670,7 @@ def test_match_with_toc_boost():
         uid="C12345",
         signalling_id="2C90",
         start_date="2026-01-17",
-        locations=[("CLPHMJC", "12:35", "12:36"), ("VICTRIC", "12:45", "")]  # 5 min later
+        locations=[("CLPHMJC", "12:35", "12:36"), ("VICTRIC", "12:45", "")]  # Departs 5 min after TD time
     )
     vs_sw.toc_code = "SW"  # Southeastern (in allowed_tocs)
     
@@ -678,7 +678,7 @@ def test_match_with_toc_boost():
         uid="C67890",
         signalling_id="2C90",
         start_date="2026-01-17",
-        locations=[("CLPHMJC", "12:31", "12:32"), ("MARGAT", "15:45", "")]  # 1 min later (closer)
+        locations=[("CLPHMJC", "12:31", "12:32"), ("MARGAT", "15:45", "")]  # Departs 1 min after TD time (closer)
     )
     vs_gw.toc_code = "GW"  # Great Western (not in allowed_tocs)
     

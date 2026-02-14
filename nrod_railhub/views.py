@@ -19,6 +19,11 @@ from .logging_config import get_logger
 
 logger = get_logger("views")
 
+# TOC matching boost factor for schedule scoring
+# When a schedule's TOC matches the allowed TOCs for a TD area,
+# reduce effective time delta by this factor to prefer the correct operator
+TOC_MATCH_BOOST_FACTOR = 0.90
+
 # Geographic keyword filtering for TD area route validation
 TD_AREA_REGIONS = {
     "EK": {
@@ -324,9 +329,9 @@ class HumanView:
                             delta = None
                             if td_time and planned_dt:
                                 delta = abs((td_time - planned_dt).total_seconds())
-                                # Apply TOC boost: reduce effective delta by 10% if TOC matches
+                                # Apply TOC boost: reduce effective delta if TOC matches
                                 if toc_match:
-                                    delta = delta * 0.90
+                                    delta = delta * TOC_MATCH_BOOST_FACTOR
                             
                             # Rank: UID match first, then smallest time delta (with TOC boost)
                             if best is None:
