@@ -76,6 +76,9 @@ class Listener(stomp.ConnectionListener):
         self.vstp_callback = vstp_callback  # Optional callback for VSTP messages
         self.db_callback = db_callback  # Optional callback for database operations
 
+        # Initialize TOC-TD area cache on HumanView for filtering candidates
+        self.hv.td_allowed_tocs_cache = {}
+
         self.connected_at: Optional[str] = None
         self.last_message_at: Optional[str] = None
         self.msg_count_total = 0
@@ -493,6 +496,17 @@ class Listener(stomp.ConnectionListener):
                                 logger.error(f"DB: TD berth event persist failed: {type(e).__name__}: {e}")
                         except Exception:
                             pass
+
+                # Populate TOC-TD area cache for this area (used by match_td_to_schedule)
+                # Only query DB if area not already cached to avoid repeated queries
+                if self.db and td.area_id and td.area_id not in self.hv.td_allowed_tocs_cache:
+                    try:
+                        tocs = self.db.get_tocs_for_td_area(td.area_id)
+                        if tocs:
+                            self.hv.td_allowed_tocs_cache[td.area_id] = set(tocs)
+                            logger.debug(f"Loaded TOC-TD mappings for area {td.area_id}: {tocs}")
+                    except Exception as e:
+                        logger.debug(f"Failed to load TOC-TD mappings for area {td.area_id}: {e}")
 
                 if self._print_train_update(td.area_id or '?', td.descr):
                     printed = True

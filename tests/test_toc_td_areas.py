@@ -191,10 +191,46 @@ def test_toc_td_area_unique_constraint():
         os.unlink(db_path)
 
 
+def test_get_tocs_for_td_area():
+    """Test retrieving TOCs for a specific TD area."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
+        db_path = tmp_db.name
+    
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        
+        # Insert mappings for multiple TOCs in same area
+        db.upsert_toc_td_area(toc_code="SW", td_area="EK")
+        db.upsert_toc_td_area(toc_code="SE", td_area="EK")
+        db.upsert_toc_td_area(toc_code="GW", td_area="P1")
+        
+        # Get TOCs for EK area
+        ek_tocs = db.get_tocs_for_td_area("EK")
+        assert len(ek_tocs) == 2
+        assert "SW" in ek_tocs
+        assert "SE" in ek_tocs
+        assert "GW" not in ek_tocs
+        
+        # Get TOCs for P1 area
+        p1_tocs = db.get_tocs_for_td_area("P1")
+        assert len(p1_tocs) == 1
+        assert "GW" in p1_tocs
+        
+        # Get TOCs for non-existent area
+        empty_tocs = db.get_tocs_for_td_area("XX")
+        assert len(empty_tocs) == 0
+        
+        print("✓ get_tocs_for_td_area works correctly")
+        
+    finally:
+        os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_toc_td_areas_schema_creation()
     test_upsert_toc_td_area()
     test_delete_toc_td_area()
     test_get_td_areas_for_toc()
+    test_get_tocs_for_td_area()
     test_toc_td_area_unique_constraint()
     print("\n✅ All TOC-TD area mapping tests passed!")

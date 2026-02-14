@@ -19,6 +19,11 @@ from .logging_config import get_logger
 
 logger = get_logger("views")
 
+# TOC matching boost factor for schedule scoring
+# When a schedule's TOC matches the allowed TOCs for a TD area,
+# reduce effective time delta by this factor to prefer the correct operator
+TOC_MATCH_BOOST_FACTOR = 0.90
+
 # Geographic keyword filtering for TD area route validation
 TD_AREA_REGIONS = {
     "EK": {
@@ -178,7 +183,7 @@ class HumanView:
             station_to_tiplocs[key].append(tiploc)
         return station_to_tiplocs
 
-    def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False) -> tuple[Optional[object], str, Optional[Dict[str, Any]]]:
+    def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False, allowed_tocs: Optional[set[str]] = None) -> tuple[Optional[object], str, Optional[Dict[str, Any]]]:
         """
         Try to find the best matching VSTP/ITPS schedule object for a TD observation.
 
@@ -195,7 +200,18 @@ class HumanView:
            then query schedules_by_tiploc for candidates that call at that station.
          - Rank matches by: UID match, validity, and time delta from TD observation.
          - Fallback to headcode candidates with time proximity if no TIPLOC match.
+         - If allowed_tocs is provided (or loaded from cache), filter candidates by TOC
+           and boost scores for matching TOCs.
         """
+        # Check for allowed TOCs from cache if not explicitly provided
+        if allowed_tocs is None:
+            cache = getattr(self, 'td_allowed_tocs_cache', {})
+            if cache and td_area and td_area in cache:
+                allowed_tocs = cache[td_area]
+                if allowed_tocs:
+                    # Ensure allowed_tocs is a set (converting a set to set is a no-op)
+                    allowed_tocs = set(allowed_tocs)
+        
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
 
         # 1a) Area-scoped TRUST -> train_uid -> lookup (highest priority)
@@ -249,13 +265,28 @@ class HumanView:
                     
                     # Query schedules_by_tiploc for each candidate TIPLOC
                     tiploc_candidates = []
+                    tiploc_candidates_skipped_toc = []
                     for tiploc in candidate_tiplocs:
                         if tiploc in self.schedules_by_tiploc:
                             for sched_obj, stop_idx, planned_hhmm in self.schedules_by_tiploc[tiploc]:
                                 # Filter by headcode - only consider schedules with matching headcode
                                 sched_headcode = getattr(sched_obj, "signalling_id", "") or ""
                                 if sched_headcode == headcode:
+                                    # Check TOC filtering if allowed_tocs is provided
+                                    if allowed_tocs:
+                                        sched_toc = getattr(sched_obj, 'toc_code', None) or getattr(sched_obj, 'toc', None)
+                                        if sched_toc and sched_toc not in allowed_tocs:
+                                            logger.debug(f"Skipping TIPLOC candidate: toc={sched_toc} not in allowed_tocs={allowed_tocs} (headcode={headcode} uid={getattr(sched_obj, 'uid', '?')})")
+                                            tiploc_candidates_skipped_toc.append((sched_obj, stop_idx, planned_hhmm, tiploc))
+                                            continue
                                     tiploc_candidates.append((sched_obj, stop_idx, planned_hhmm, tiploc))
+                    
+                    # If no candidates after TOC filtering, fall back to relaxed mode
+                    fallback_reason_suffix = ""
+                    if not tiploc_candidates and allowed_tocs and tiploc_candidates_skipped_toc:
+                        logger.debug(f"No TIPLOC candidates with mapped TOC for headcode={headcode} area={td_area}, using relaxed fallback")
+                        tiploc_candidates = tiploc_candidates_skipped_toc
+                        fallback_reason_suffix = " (relaxed: no mapped TOC candidates)"
                     
                     if tiploc_candidates:
                         # Rank candidates by time proximity to TD observation
@@ -287,12 +318,22 @@ class HumanView:
                             if ts and ts.train_uid and getattr(sched_obj, "uid", "") == ts.train_uid:
                                 uid_match = True
                             
-                            # Compute time delta
+                            # Check if candidate TOC is in allowed_tocs for score boost
+                            toc_match = False
+                            if allowed_tocs:
+                                cand_toc = getattr(sched_obj, 'toc_code', None) or getattr(sched_obj, 'toc', None)
+                                if cand_toc and cand_toc in allowed_tocs:
+                                    toc_match = True
+                            
+                            # Compute time delta with TOC boost
                             delta = None
                             if td_time and planned_dt:
                                 delta = abs((td_time - planned_dt).total_seconds())
+                                # Apply TOC boost: reduce effective delta if TOC matches
+                                if toc_match:
+                                    delta = delta * TOC_MATCH_BOOST_FACTOR
                             
-                            # Rank: UID match first, then smallest time delta
+                            # Rank: UID match first, then smallest time delta (with TOC boost)
                             if best is None:
                                 best = sched_obj
                                 best_delta = delta
@@ -300,6 +341,7 @@ class HumanView:
                                     "matched_tiploc": tiploc,
                                     "stop_index": stop_idx,
                                     "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                    "toc_match": toc_match,
                                 }
                             elif uid_match and not (best_info and best_info.get("uid_match")):
                                 best = sched_obj
@@ -309,6 +351,7 @@ class HumanView:
                                     "stop_index": stop_idx,
                                     "planned_dt": planned_dt.isoformat() if planned_dt else "",
                                     "uid_match": True,
+                                    "toc_match": toc_match,
                                 }
                             elif delta is not None and (best_delta is None or delta < best_delta):
                                 best = sched_obj
@@ -317,12 +360,16 @@ class HumanView:
                                     "matched_tiploc": tiploc,
                                     "stop_index": stop_idx,
                                     "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                    "toc_match": toc_match,
                                 }
                         
                         if best:
                             reason = f"matched via TIPLOC index: tiploc={best_info['matched_tiploc']} stanox={stanox} stop_idx={best_info['stop_index']}"
                             if best_delta is not None:
                                 reason += f" delta={best_delta:.0f}s"
+                            if best_info.get('toc_match'):
+                                reason += " (TOC boost)"
+                            reason += fallback_reason_suffix
                             if trace:
                                 logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
                             logger.debug(f"TIPLOC match: {reason}")

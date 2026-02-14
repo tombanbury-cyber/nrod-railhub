@@ -532,3 +532,251 @@ def test_tiploc_index_populated_by_load_schedule():
     finally:
         import os
         os.unlink(temp_path)
+
+
+def test_match_with_toc_filtering_strict():
+    """Test that allowed_tocs filters candidates in strict mode."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+
+    # Setup two VSTP schedules with same headcode but different TOCs
+    vs_sw = VstpSchedule(
+        uid="C12345",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
+    )
+    vs_sw.toc_code = "SW"  # Southeastern
+    
+    vs_gw = VstpSchedule(
+        uid="C67890",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "14:30", "14:31"), ("MARGAT", "15:45", "")]
+    )
+    vs_gw.toc_code = "GW"  # Great Western
+    
+    hv.vstp_by_headcode["2C90"] = [vs_sw, vs_gw]
+
+    # Setup TD state
+    td = TdState(
+        descr="2C90",
+        area_id="EK",
+        to_berth="0152",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
+    )
+    hv.td_by_headcode[("EK", "2C90")] = td
+
+    # Mock SMART lookup to return a STANOX
+    smart.lookup.return_value = {"stanox": "87701", "platform": "3"}
+    
+    # Mock resolver to return station name for STANOX
+    resolver.name_for_stanox.return_value = "Clapham Junction"
+    
+    # Mock tiploc_to_name for TIPLOC index lookup
+    resolver.tiploc_to_name = {
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "Victoria",
+        "MARGAT": "Margate"
+    }
+    
+    # Populate TIPLOC index
+    for stop_idx, loc_tuple in enumerate(vs_sw.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs_sw, stop_idx, planned_hhmm))
+    
+    for stop_idx, loc_tuple in enumerate(vs_gw.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs_gw, stop_idx, planned_hhmm))
+
+    # Test with allowed_tocs filtering for SW only
+    allowed_tocs = {"SW"}
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", allowed_tocs=allowed_tocs)
+    
+    # Should match SW schedule and skip GW
+    assert sched is vs_sw, f"Should match SW schedule, got UID {getattr(sched, 'uid', None)}"
+    assert "TIPLOC index" in reason
+    assert matched_info is not None
+    assert matched_info["matched_tiploc"] == "CLPHMJC"
+
+
+def test_match_with_toc_filtering_relaxed_fallback():
+    """Test relaxed fallback when no candidates match allowed_tocs."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+
+    # Setup VSTP schedule with TOC that's NOT in allowed_tocs
+    vs = VstpSchedule(
+        uid="C12345",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
+    )
+    vs.toc_code = "GW"  # Great Western
+    
+    hv.vstp_by_headcode["2C90"] = [vs]
+
+    # Setup TD state
+    td = TdState(
+        descr="2C90",
+        area_id="EK",
+        to_berth="0152",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
+    )
+    hv.td_by_headcode[("EK", "2C90")] = td
+
+    # Mock SMART and resolver
+    smart.lookup.return_value = {"stanox": "87701", "platform": "3"}
+    resolver.name_for_stanox.return_value = "Clapham Junction"
+    resolver.tiploc_to_name = {
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "Victoria"
+    }
+    
+    # Populate TIPLOC index
+    for stop_idx, loc_tuple in enumerate(vs.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs, stop_idx, planned_hhmm))
+
+    # Test with allowed_tocs that doesn't include GW
+    allowed_tocs = {"SW"}  # Only allow Southeastern
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", allowed_tocs=allowed_tocs)
+    
+    # Should still match via relaxed fallback
+    assert sched is vs, "Should match via relaxed fallback"
+    assert "relaxed: no mapped TOC candidates" in reason
+    assert matched_info is not None
+
+
+def test_match_with_toc_boost():
+    """Test that TOC match gives preference in scoring."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+
+    # Setup two VSTP schedules with different times
+    vs_sw = VstpSchedule(
+        uid="C12345",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:35", "12:36"), ("VICTRIC", "12:45", "")]  # Departs 5 min after TD time
+    )
+    vs_sw.toc_code = "SW"  # Southeastern (in allowed_tocs)
+    
+    vs_gw = VstpSchedule(
+        uid="C67890",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:31", "12:32"), ("MARGAT", "15:45", "")]  # Departs 1 min after TD time (closer)
+    )
+    vs_gw.toc_code = "GW"  # Great Western (not in allowed_tocs)
+    
+    hv.vstp_by_headcode["2C90"] = [vs_sw, vs_gw]
+
+    # Setup TD state at 12:30
+    td = TdState(
+        descr="2C90",
+        area_id="EK",
+        to_berth="0152",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
+    )
+    hv.td_by_headcode[("EK", "2C90")] = td
+
+    # Mock SMART and resolver
+    smart.lookup.return_value = {"stanox": "87701", "platform": "3"}
+    resolver.name_for_stanox.return_value = "Clapham Junction"
+    resolver.tiploc_to_name = {
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "Victoria",
+        "MARGAT": "Margate"
+    }
+    
+    # Populate TIPLOC index for both schedules
+    for stop_idx, loc_tuple in enumerate(vs_sw.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs_sw, stop_idx, planned_hhmm))
+    
+    for stop_idx, loc_tuple in enumerate(vs_gw.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs_gw, stop_idx, planned_hhmm))
+
+    # Test with allowed_tocs giving SW preference
+    # GW is closer by 4 minutes (1 min vs 5 min delta)
+    # But with strict filtering, GW is skipped since it's not in allowed_tocs
+    # So SW wins by default
+    allowed_tocs = {"SW"}
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", allowed_tocs=allowed_tocs)
+    
+    # Should match SW schedule (GW was filtered out in strict mode)
+    assert sched is vs_sw, f"Should match SW schedule, got UID {getattr(sched, 'uid', None)}"
+    assert "TIPLOC index" in reason
+
+
+def test_match_from_td_allowed_tocs_cache():
+    """Test that allowed_tocs can be read from td_allowed_tocs_cache."""
+    resolver = Mock()
+    smart = Mock()
+    hv = HumanView(resolver=resolver, smart=smart)
+
+    # Initialize the cache
+    hv.td_allowed_tocs_cache = {"EK": {"SW", "SE"}}
+
+    # Setup VSTP schedule with TOC
+    vs = VstpSchedule(
+        uid="C12345",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
+    )
+    vs.toc_code = "SW"
+    
+    hv.vstp_by_headcode["2C90"] = [vs]
+
+    # Setup TD state
+    td = TdState(
+        descr="2C90",
+        area_id="EK",
+        to_berth="0152",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0
+    )
+    hv.td_by_headcode[("EK", "2C90")] = td
+
+    # Mock SMART and resolver
+    smart.lookup.return_value = {"stanox": "87701", "platform": "3"}
+    resolver.name_for_stanox.return_value = "Clapham Junction"
+    resolver.tiploc_to_name = {
+        "CLPHMJC": "Clapham Junction",
+        "VICTRIC": "Victoria"
+    }
+    
+    # Populate TIPLOC index
+    for stop_idx, loc_tuple in enumerate(vs.locations):
+        tiploc = loc_tuple[0].strip().upper()
+        planned_hhmm = loc_tuple[2] or loc_tuple[1]
+        if tiploc not in hv.schedules_by_tiploc:
+            hv.schedules_by_tiploc[tiploc] = []
+        hv.schedules_by_tiploc[tiploc].append((vs, stop_idx, planned_hhmm))
+
+    # Test matching without explicit allowed_tocs (should use cache)
+    sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
+    
+    # Should match and use cache
+    assert sched is vs
+    assert "TIPLOC index" in reason
