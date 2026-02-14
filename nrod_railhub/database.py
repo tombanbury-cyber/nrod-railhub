@@ -1819,3 +1819,29 @@ class RailDB:
                 'inserted': total_inserted,
                 'observations_processed': total_observations
             }
+
+
+    def get_tocs_for_td_area(self, td_area: str) -> list[str]:
+        """
+        Return a list of canonical toc_code strings that are mapped to the given td_area.
+    
+        Respects effective_from/effective_to (if present) so temporary mappings can be modelled.
+        """
+        if not td_area:
+            return []
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT toc_code
+                FROM toc_td_areas
+                WHERE td_area=?
+                  AND (effective_from IS NULL OR date(effective_from) <= date('now'))
+                  AND (effective_to IS NULL OR date(effective_to) >= date('now'))
+                ORDER BY toc_code
+                """,
+                (td_area,)
+            )
+            return [row[0] for row in cursor.fetchall()]
+    
+
