@@ -204,7 +204,8 @@ class HumanView:
             if cache and td_area and td_area in cache:
                 allowed_tocs = cache[td_area]
                 if allowed_tocs:
-                    allowed_tocs = set(allowed_tocs) if not isinstance(allowed_tocs, set) else allowed_tocs
+                    # Ensure allowed_tocs is a set (converting a set to set is a no-op)
+                    allowed_tocs = set(allowed_tocs)
         
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
 

@@ -498,7 +498,8 @@ class Listener(stomp.ConnectionListener):
                             pass
 
                 # Populate TOC-TD area cache for this area (used by match_td_to_schedule)
-                if self.db and td.area_id:
+                # Only query DB if area not already cached to avoid repeated queries
+                if self.db and td.area_id and td.area_id not in self.hv.td_allowed_tocs_cache:
                     try:
                         tocs = self.db.get_tocs_for_td_area(td.area_id)
                         if tocs:

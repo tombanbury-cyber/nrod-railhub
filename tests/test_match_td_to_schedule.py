@@ -719,14 +719,13 @@ def test_match_with_toc_boost():
 
     # Test with allowed_tocs giving SW preference
     # GW is closer by 4 minutes (1 min vs 5 min delta)
-    # But SW gets 10% boost: 5 min * 0.90 = 4.5 min effective
-    # So SW should still win
+    # But with strict filtering, GW is skipped since it's not in allowed_tocs
+    # So SW wins by default
     allowed_tocs = {"SW"}
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90", allowed_tocs=allowed_tocs)
     
-    # Should match SW despite being farther in time (due to TOC boost in relaxed mode)
-    # Actually, with strict filtering, GW is skipped initially, so SW wins
-    assert sched is vs_sw, f"Should match SW schedule with TOC boost, got UID {getattr(sched, 'uid', None)}"
+    # Should match SW schedule (GW was filtered out in strict mode)
+    assert sched is vs_sw, f"Should match SW schedule, got UID {getattr(sched, 'uid', None)}"
     assert "TIPLOC index" in reason
 
 
