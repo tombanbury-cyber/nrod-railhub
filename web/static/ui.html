@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NROD RailHub - Schematic Visualization PoC</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        
+        h1 {
+            color: #4CAF50;
+            margin-bottom: 10px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .status {
+            background-color: #2a2a2a;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #666;
+        }
+        
+        .status-indicator.connected {
+            background-color: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
+        }
+        
+        .status-indicator.disconnected {
+            background-color: #f44336;
+        }
+        
+        .controls {
+            background-color: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .controls h2 {
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: #45a049;
+        }
+        
+        button:active {
+            background-color: #3d8b40;
+        }
+        
+        .schematic-container {
+            background-color: #2a2a2a;
+            border-radius: 5px;
+            padding: 20px;
+            overflow-x: auto;
+        }
+        
+        #schematic {
+            border: 1px solid #444;
+            background-color: #1a1a1a;
+        }
+        
+        .legend {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 5px;
+        }
+        
+        .legend h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        
+        .legend-items {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .legend-box {
+            width: 30px;
+            height: 20px;
+            border-radius: 3px;
+        }
+        
+        .legend-box.empty {
+            background-color: #4CAF50;
+            border: 2px solid #2E7D32;
+        }
+        
+        .legend-box.occupied {
+            background-color: #FFC107;
+            border: 2px solid #F57C00;
+        }
+        
+        .legend-circle {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+        }
+        
+        .legend-circle.train {
+            background-color: #FF5722;
+            box-shadow: 0 0 10px #FF5722;
+        }
+        
+        .event-log {
+            margin-top: 20px;
+            background-color: #2a2a2a;
+            border-radius: 5px;
+            padding: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .event-log h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        
+        .event-item {
+            font-size: 12px;
+            padding: 5px;
+            border-bottom: 1px solid #3a3a3a;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .event-item:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚂 NROD RailHub - Schematic Visualization PoC</h1>
+        
+        <div class="status">
+            <div>
+                <span class="status-indicator" id="wsStatus"></span>
+                <span id="wsStatusText">Connecting...</span>
+            </div>
+            <div id="layoutInfo">Loading layout...</div>
+        </div>
+        
+        <div class="controls">
+            <h2>Manual Test Controls</h2>
+            <div class="button-group">
+                <button onclick="sendTestEvent('berth_enter', 'BRTH_1')">Enter BRTH_1</button>
+                <button onclick="sendTestEvent('berth_exit', 'BRTH_1')">Exit BRTH_1</button>
+                <button onclick="sendTestEvent('berth_enter', 'BRTH_2')">Enter BRTH_2</button>
+                <button onclick="sendTestEvent('berth_exit', 'BRTH_2')">Exit BRTH_2</button>
+                <button onclick="sendTestEvent('berth_enter', 'BRTH_3')">Enter BRTH_3</button>
+                <button onclick="runSequence()">Run Full Sequence</button>
+                <button onclick="clearOccupancy()">Clear All</button>
+            </div>
+        </div>
+        
+        <div class="schematic-container">
+            <svg id="schematic" width="700" height="250"></svg>
+        </div>
+        
+        <div class="legend">
+            <h3>Legend</h3>
+            <div class="legend-items">
+                <div class="legend-item">
+                    <div class="legend-box empty"></div>
+                    <span>Empty Berth</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box occupied"></div>
+                    <span>Occupied Berth</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-circle train"></div>
+                    <span>Train Position</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="event-log">
+            <h3>Event Log</h3>
+            <div id="eventLog"></div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = window.location.origin;
+        const WS_URL = `ws://${window.location.hostname}:${window.location.port}/ws`;
+        const LAYOUT_ID = 'demo';
+        
+        let ws = null;
+        let berths = [];
+        let trainPositions = {};  // train_id -> berth_id
+        
+        // Initialize
+        async function init() {
+            await loadLayout();
+            await loadBerths();
+            renderSchematic();
+            connectWebSocket();
+        }
+        
+        async function loadLayout() {
+            try {
+                const response = await fetch(`${API_BASE}/layout/${LAYOUT_ID}`);
+                const layout = await response.json();
+                document.getElementById('layoutInfo').textContent = `Layout: ${layout.name}`;
+            } catch (error) {
+                console.error('Failed to load layout:', error);
+                document.getElementById('layoutInfo').textContent = 'Error loading layout';
+            }
+        }
+        
+        async function loadBerths() {
+            try {
+                const response = await fetch(`${API_BASE}/berths/${LAYOUT_ID}`);
+                berths = await response.json();
+                console.log('Loaded berths:', berths);
+            } catch (error) {
+                console.error('Failed to load berths:', error);
+            }
+        }
+        
+        function renderSchematic() {
+            const svg = document.getElementById('schematic');
+            svg.innerHTML = '';
+            
+            // Add title
+            const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            title.setAttribute('x', '10');
+            title.setAttribute('y', '30');
+            title.setAttribute('fill', '#4CAF50');
+            title.setAttribute('font-size', '18');
+            title.setAttribute('font-weight', 'bold');
+            title.textContent = 'Demo Platform';
+            svg.appendChild(title);
+            
+            // Render berths
+            berths.forEach(berth => {
+                renderBerth(berth);
+            });
+        }
+        
+        function renderBerth(berth) {
+            const svg = document.getElementById('schematic');
+            
+            // Create group for berth
+            const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            group.id = `berth-${berth.id}`;
+            
+            // Berth rectangle
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', berth.x);
+            rect.setAttribute('y', berth.y);
+            rect.setAttribute('width', berth.width);
+            rect.setAttribute('height', berth.height);
+            rect.setAttribute('fill', '#4CAF50');
+            rect.setAttribute('stroke', '#2E7D32');
+            rect.setAttribute('stroke-width', '2');
+            rect.setAttribute('rx', '4');
+            rect.classList.add('berth-rect');
+            
+            // Berth label
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', berth.x + berth.width / 2);
+            text.setAttribute('y', berth.y + berth.height / 2 + 5);
+            text.setAttribute('text-anchor', 'middle');
+            text.setAttribute('fill', 'white');
+            text.setAttribute('font-size', '14');
+            text.setAttribute('font-weight', 'bold');
+            text.textContent = berth.name;
+            
+            group.appendChild(rect);
+            group.appendChild(text);
+            svg.appendChild(group);
+        }
+        
+        function updateBerthOccupancy(berthId, occupied, trainId = null) {
+            const group = document.getElementById(`berth-${berthId}`);
+            if (!group) return;
+            
+            const rect = group.querySelector('rect');
+            
+            if (occupied) {
+                rect.setAttribute('fill', '#FFC107');
+                rect.setAttribute('stroke', '#F57C00');
+                
+                // Add or update train marker
+                if (trainId) {
+                    trainPositions[trainId] = berthId;
+                    updateTrainMarker(trainId, berthId);
+                }
+            } else {
+                rect.setAttribute('fill', '#4CAF50');
+                rect.setAttribute('stroke', '#2E7D32');
+                
+                // Remove train marker if present
+                if (trainId && trainPositions[trainId] === berthId) {
+                    removeTrainMarker(trainId);
+                    delete trainPositions[trainId];
+                }
+            }
+        }
+        
+        function updateTrainMarker(trainId, berthId) {
+            const berth = berths.find(b => b.id === berthId);
+            if (!berth) return;
+            
+            const svg = document.getElementById('schematic');
+            
+            // Remove old marker if exists
+            removeTrainMarker(trainId);
+            
+            // Create new marker
+            const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            marker.id = `train-${trainId}`;
+            marker.setAttribute('cx', berth.x + berth.width / 2);
+            marker.setAttribute('cy', berth.y - 15);
+            marker.setAttribute('r', '8');
+            marker.setAttribute('fill', '#FF5722');
+            marker.setAttribute('stroke', '#D32F2F');
+            marker.setAttribute('stroke-width', '2');
+            marker.style.filter = 'drop-shadow(0 0 5px #FF5722)';
+            
+            svg.appendChild(marker);
+        }
+        
+        function removeTrainMarker(trainId) {
+            const marker = document.getElementById(`train-${trainId}`);
+            if (marker) {
+                marker.remove();
+            }
+        }
+        
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateConnectionStatus(true);
+                
+                // Send periodic ping
+                setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send('ping');
+                    }
+                }, 25000);
+            };
+            
+            ws.onmessage = (event) => {
+                // Handle text responses (like "pong")
+                if (typeof event.data === 'string' && event.data === 'pong') {
+                    return;
+                }
+                
+                try {
+                    const message = JSON.parse(event.data);
+                    handleWebSocketMessage(message);
+                } catch (error) {
+                    console.error('Failed to parse WebSocket message:', error);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                updateConnectionStatus(false);
+                
+                // Reconnect after 5 seconds
+                setTimeout(() => {
+                    console.log('Attempting to reconnect...');
+                    connectWebSocket();
+                }, 5000);
+            };
+        }
+        
+        function handleWebSocketMessage(message) {
+            if (message.type === 'event') {
+                const event = message.data;
+                logEvent(event);
+                
+                if (event.event_type === 'berth_enter') {
+                    updateBerthOccupancy(event.object_id, true, event.train_id);
+                } else if (event.event_type === 'berth_exit') {
+                    updateBerthOccupancy(event.object_id, false, event.train_id);
+                }
+            }
+        }
+        
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById('wsStatus');
+            const text = document.getElementById('wsStatusText');
+            
+            if (connected) {
+                indicator.classList.add('connected');
+                indicator.classList.remove('disconnected');
+                text.textContent = 'Connected';
+            } else {
+                indicator.classList.remove('connected');
+                indicator.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+            }
+        }
+        
+        function logEvent(event) {
+            const log = document.getElementById('eventLog');
+            const item = document.createElement('div');
+            item.className = 'event-item';
+            
+            const time = new Date(event.ts).toLocaleTimeString();
+            item.textContent = `[${time}] ${event.event_type.toUpperCase()} - ${event.object_id} (Train: ${event.train_id || 'N/A'})`;
+            
+            log.insertBefore(item, log.firstChild);
+            
+            // Keep only last 20 events
+            while (log.children.length > 20) {
+                log.removeChild(log.lastChild);
+            }
+        }
+        
+        async function sendTestEvent(eventType, berthId) {
+            const event = {
+                ts: new Date().toISOString(),
+                source: 'manual',
+                train_id: 'T1',
+                event_type: eventType,
+                object_id: berthId,
+                payload: {}
+            };
+            
+            try {
+                const response = await fetch(`${API_BASE}/event`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(event)
+                });
+                
+                if (!response.ok) {
+                    console.error('Failed to send event:', await response.text());
+                }
+            } catch (error) {
+                console.error('Error sending event:', error);
+            }
+        }
+        
+        async function runSequence() {
+            const sequence = [
+                { type: 'berth_enter', berth: 'BRTH_1', delay: 0 },
+                { type: 'berth_exit', berth: 'BRTH_1', delay: 2000 },
+                { type: 'berth_enter', berth: 'BRTH_2', delay: 100 },
+                { type: 'berth_exit', berth: 'BRTH_2', delay: 2000 },
+                { type: 'berth_enter', berth: 'BRTH_3', delay: 100 },
+                { type: 'berth_exit', berth: 'BRTH_3', delay: 2000 },
+                { type: 'berth_enter', berth: 'BRTH_4', delay: 100 },
+                { type: 'berth_exit', berth: 'BRTH_4', delay: 2000 },
+                { type: 'berth_enter', berth: 'BRTH_5', delay: 100 }
+            ];
+            
+            for (const step of sequence) {
+                await new Promise(resolve => setTimeout(resolve, step.delay));
+                await sendTestEvent(step.type, step.berth);
+            }
+        }
+        
+        async function clearOccupancy() {
+            for (const berth of berths) {
+                await sendTestEvent('berth_exit', berth.id);
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+        
+        // Initialize on page load
+        init();
+    </script>
+</body>
+</html>
