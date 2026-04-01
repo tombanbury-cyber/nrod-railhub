@@ -629,14 +629,15 @@ class HumanView:
         sched = root.get("schedule")
         if not isinstance(sched, dict):
             return None
-            
-        #logger.error(f"sched: {sched}")
 
-        # Extract fields from root level of VSTPCIFMsgV1, not from schedule
-        uid = (sched.get("CIF_train_uid") or "").strip()
-        start_date = (sched.get("schedule_start_date") or "").strip()
-        end_date = (sched.get("schedule_end_date") or "").strip()
+        # Fields may live inside the "schedule" sub-dict or at the VSTPCIFMsgV1 root level;
+        # try schedule first, then fall back to root.
+        uid = (sched.get("CIF_train_uid") or root.get("CIF_train_uid") or "").strip()
+        start_date = (sched.get("schedule_start_date") or root.get("schedule_start_date") or "").strip()
+        end_date = (sched.get("schedule_end_date") or root.get("schedule_end_date") or "").strip()
         segments = sched.get("schedule_segment") or []
+        if isinstance(segments, dict):
+            segments = [segments]
         if not isinstance(segments, list) or not segments:
             return None
 
@@ -1183,27 +1184,7 @@ class HumanView:
                 last_seen = loc
 
         if not last_seen:
-            td = self.td_by_headcode.get((td_area, headcode)) if td_area else None
-            if td:
-                # Try SMART (TD+berth -> STANOX/platform), then resolve via CORPUS.
-                if self.smart:
-                    berth = td.to_berth or td.from_berth
-                    hit = self.smart.lookup(td.area_id, berth) if (td.area_id and berth) else None
-                    if hit and hit.get("stanox"):
-                        stx = hit["stanox"]
-                        nm = self.resolver.name_for_stanox(stx) if self.resolver else ""
-                        plat = hit.get("platform") or ""
-                        if nm:
-                            last_seen = f"{nm} ({stx})" + (f" plat {plat}" if plat else "")
-                        else:
-                            last_seen = stx + (f" plat {plat}" if plat else "")
-
-                # Fallback: show the raw TD area/berth.
-                if not last_seen:
-                    if td.area_id and td.to_berth:
-                        last_seen = f"{td.area_id}:{td.to_berth}"
-                    elif td.area_id:
-                        last_seen = td.area_id
+            pass  # No TD area available in this method; TD fallback omitted.
 
         # --- Compose lines ---
         t = local_hhmm()

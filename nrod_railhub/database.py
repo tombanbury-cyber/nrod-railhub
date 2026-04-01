@@ -829,24 +829,20 @@ class RailDB:
 
         Expects the original STOMP-parsed message containing "VSTPCIFMsgV1" at top-level.
         """
-        
+
         from .logging_config import get_logger
         logger = get_logger("database")
-        
-        #logger.error(f"insert_vstp_schedule {vstp_msg}")
-        
+
         if not isinstance(vstp_msg, dict):
-            logger.error(f"not dict 1")
+            logger.error("insert_vstp_schedule: vstp_msg is not a dict")
             return
 
         v = vstp_msg.get("VSTPCIFMsgV1") or vstp_msg.get("VSTPCIFMsgV1".upper()) or vstp_msg
         if not isinstance(v, dict):
-            logger.error(f"not dict 2")
+            logger.error("insert_vstp_schedule: VSTPCIFMsgV1 value is not a dict")
             return
-            
-        #logger.error(f"vstp_msg {v}")
 
-        # Top-level schedule metadata
+        # Top-level schedule metadata — fields may be at VSTPCIFMsgV1 root or inside "schedule"
         schedule_start_date = (v.get("schedule_start_date") or "").strip()
         schedule_end_date = (v.get("schedule_end_date") or "").strip()
         transaction_type = (v.get("transaction_type") or "").strip() or None
@@ -855,10 +851,6 @@ class RailDB:
         applicable_timetable = (v.get("applicable_timetable") or "").strip() or None
         CIF_train_uid = (v.get("CIF_train_uid") or "").strip() or None
         CIF_stp_indicator = (v.get("CIF_stp_indicator") or "").strip() or None
-        
-        
-        #logger.error(f"CIF_train_uid {CIF_train_uid}")
-        
 
         # Sender organisation if present
         sender_org = None
@@ -866,7 +858,7 @@ class RailDB:
         if isinstance(sender, dict):
             sender_org = (sender.get("organisation") or "").strip() or None
 
-        # There may be one or more schedule_segment entries
+        # There may be one or more schedule_segment entries inside "schedule"
         schedule = v.get("schedule") or {}
         segments = []
         if isinstance(schedule, dict):
@@ -875,32 +867,31 @@ class RailDB:
                 segments = segs
             elif isinstance(segs, dict):
                 segments = [segs]
-                
-        # the following are found in the schedule entry
 
-        uid = CIF_train_uid or (schedule.get("CIF_train_uid") or v.get("CIF_train_uid") or "").strip() or None
-        
-        if CIF_stp_indicator == "":
-          CIF_stp_indicator = schedule.get("CIF_stp_indicator")
-        
-        if schedule_start_date == "":
-          schedule_start_date = schedule.get("schedule_start_date")
-          
-        if schedule_end_date == "":
-          schedule_end_date = schedule.get("schedule_end_date")
-          
-        if transaction_type == "":
-          transaction_type = schedule.get("transaction_type")
+        # Fields may also be nested inside "schedule" — fall back to those values when
+        # not found at the root of VSTPCIFMsgV1.
+        uid = CIF_train_uid or (schedule.get("CIF_train_uid") or "").strip() or None
 
-        if train_status == "":
-          train_status = schedule.get("train_status")
-          
-        if schedule_days_runs == "":
-          schedule_days_runs = schedule.get("schedule_days_runs")
-          
-        if applicable_timetable == "":
-          applicable_timetable = schedule.get("applicable_timetable")
-          
+        if not CIF_stp_indicator:
+            CIF_stp_indicator = (schedule.get("CIF_stp_indicator") or "").strip() or None
+
+        if not schedule_start_date:
+            schedule_start_date = (schedule.get("schedule_start_date") or "").strip()
+
+        if not schedule_end_date:
+            schedule_end_date = (schedule.get("schedule_end_date") or "").strip()
+
+        if not transaction_type:
+            transaction_type = (schedule.get("transaction_type") or "").strip() or None
+
+        if not train_status:
+            train_status = (schedule.get("train_status") or "").strip() or None
+
+        if not schedule_days_runs:
+            schedule_days_runs = (schedule.get("schedule_days_runs") or "").strip() or None
+
+        if not applicable_timetable:
+            applicable_timetable = (schedule.get("applicable_timetable") or "").strip() or None
 
         # Pull common fields that may appear at segment-level (we'll store the first segment's signalling_id / codes)
         signalling_id = None
@@ -913,8 +904,6 @@ class RailDB:
             CIF_train_service_code = (first_seg.get("CIF_train_service_code") or "").strip() or None
             CIF_train_category = (first_seg.get("CIF_train_category") or "").strip() or None
             CIF_power_type = (first_seg.get("CIF_power_type") or "").strip() or None
-            
-        #logger.error(f"CIF_power_type {CIF_power_type}")
 
         raw_compact = json.dumps(vstp_msg, separators=(',',':')) if self.save_raw_json else None
 
@@ -923,13 +912,7 @@ class RailDB:
             cur = self._conn.cursor()
             try:
                 # Upsert schedule header (use INSERT OR REPLACE to update)
-                
-                #logger.error(f"uid {uid}")
-                #logger.error(f"schedule_start_date {schedule_start_date}")
-                
                 if uid and schedule_start_date:
-                    #logger.error(f"execute INSERT OR REPLACE INTO vstp_schedules {uid}")
-                    
                     cur.execute(
                         """
                         INSERT OR REPLACE INTO vstp_schedules (
