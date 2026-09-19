@@ -25,6 +25,7 @@ from typing import List, Dict, Any, Optional
 from flask import Flask, request, redirect
 
 from .logging_config import get_logger
+from .interesting import classify_interesting_train, format_location
 
 logger = get_logger("web")
 
@@ -80,6 +81,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             "<div class='brand'><a href='/' class='brand-link'>NR RailHub</a></div>"
             "<div class='links'>"
             f"<a href='/' class='navlink {'active' if active=='home' else ''}'>Home</a>"
+            f"<a href='/interesting' class='navlink {'active' if active=='interesting' else ''}'>Interesting</a>"
             f"<a href='/events' class='navlink {'active' if active=='events' else ''}'>Events</a>"
             f"<a href='/raw-events' class='navlink {'active' if active=='raw' else ''}'>Raw Events</a>"
             f"<a href='/signals' class='navlink {'active' if active=='signals' else ''}'>Signals</a>"
@@ -277,6 +279,159 @@ filterInput.addEventListener('input', updateFilter);
         except Exception:
             refresh_sec = 0
         return render_page("Home - NR RailHub", body, active="home", auto_refresh=refresh_sec)
+
+    def _extract_schedule_meta(raw_json: str) -> tuple[str, str]:
+        if not raw_json:
+            return "", ""
+        try:
+            payload = json.loads(raw_json)
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+        except Exception:
+            return "", ""
+        if not isinstance(payload, dict):
+            return "", ""
+
+        root = (
+            payload.get("VSTPCIFMsgV1")
+            or payload.get("VSTPCIFMsgV1_1")
+            or payload.get("VSTPCIFMsgV1_0")
+            or payload.get("JsonScheduleV1")
+            or payload
+        )
+        if not isinstance(root, dict):
+            return "", ""
+
+        schedule = root.get("schedule") if isinstance(root.get("schedule"), dict) else root
+        segments = schedule.get("schedule_segment") or root.get("schedule_segment") or []
+        if isinstance(segments, dict):
+            segments = [segments]
+        if not isinstance(segments, list) or not segments:
+            return "", ""
+        first = segments[0] if isinstance(segments[0], dict) else {}
+        train_category = (first.get("CIF_train_category") or root.get("CIF_train_category") or "").strip()
+        power_type = (first.get("CIF_power_type") or root.get("CIF_power_type") or "").strip()
+        return train_category, power_type
+
+    @app.get("/interesting")
+    def interesting():
+        """Show a grouped list of interesting trains and their current locations."""
+        td_rows = q(
+            """
+            SELECT td_area, headcode, last_time_ms, last_time_iso, from_berth, to_berth,
+                   stanox, location_name, platform, sched_dep, sched_arr, origin_name,
+                   dest_name, uid
+            FROM td_state
+            ORDER BY last_time_ms DESC
+            LIMIT 500
+            """
+        )
+
+        schedule_meta: Dict[str, tuple[str, str]] = {}
+        try:
+            for row in q("SELECT uid, CIF_headcode, CIF_train_category, CIF_power_type FROM cif_schedules ORDER BY created_at_ts DESC"):
+                meta = ((row["CIF_train_category"] or "").strip(), (row["CIF_power_type"] or "").strip())
+                if row["uid"] and row["uid"] not in schedule_meta:
+                    schedule_meta[row["uid"]] = meta
+                if row["CIF_headcode"] and row["CIF_headcode"] not in schedule_meta:
+                    schedule_meta[row["CIF_headcode"]] = meta
+        except Exception:
+            pass
+        try:
+            for row in q("SELECT uid, headcode, raw_json FROM vstp_schedules ORDER BY created_at_ts DESC"):
+                meta = _extract_schedule_meta(row["raw_json"] or "")
+                if row["uid"] and row["uid"] not in schedule_meta:
+                    schedule_meta[row["uid"]] = meta
+                if row["headcode"] and row["headcode"] not in schedule_meta:
+                    schedule_meta[row["headcode"]] = meta
+        except Exception:
+            pass
+
+        trust_by_headcode: Dict[str, sqlite3.Row] = {}
+        try:
+            for row in q("SELECT headcode, last_location, last_event_time FROM trust_state WHERE headcode IS NOT NULL AND headcode <> ''"):
+                trust_by_headcode[row["headcode"]] = row
+        except Exception:
+            pass
+
+        categories = ["Steam", "Track Equipment", "ECS", "Specials", "Diesel"]
+        grouped: Dict[str, list[Dict[str, Any]]] = {category: [] for category in categories}
+
+        for row in td_rows:
+            headcode = (row["headcode"] or "").strip()
+            uid = (row["uid"] or "").strip()
+            category, power_type = schedule_meta.get(uid) or schedule_meta.get(headcode) or ("", "")
+            interesting_type = classify_interesting_train(
+                headcode=headcode,
+                train_category=category,
+                power_type=power_type,
+                description=" ".join(
+                    part for part in (
+                        row["location_name"] or "",
+                        row["origin_name"] or "",
+                        row["dest_name"] or "",
+                        power_type or "",
+                        category or "",
+                    )
+                    if part
+                ),
+            )
+            if not interesting_type:
+                continue
+
+            trust_row = trust_by_headcode.get(headcode)
+            current_location = format_location(
+                row["location_name"] or (trust_row["last_location"] if trust_row else "") or "",
+                row["stanox"] or "",
+                row["platform"] or "",
+            )
+            if current_location == "N/A" and trust_row and trust_row["last_location"]:
+                current_location = trust_row["last_location"]
+
+            grouped[interesting_type].append(
+                {
+                    "headcode": headcode,
+                    "td_area": row["td_area"] or "",
+                    "location": current_location,
+                    "route": (
+                        f"{row['origin_name'] or ''} → {row['dest_name'] or ''}".strip(" →")
+                        if row["origin_name"] or row["dest_name"]
+                        else f"{row['sched_dep'] or ''} → {row['sched_arr'] or ''}".strip(" →")
+                    ),
+                    "last_time": row["last_time_iso"] or "",
+                    "uid": uid,
+                    "category": category or "",
+                    "power_type": power_type or "",
+                }
+            )
+
+        body = ["<h2>Interesting Trains</h2>", "<p class='dim'>Diesels, ECS, specials, steam, and track equipment currently visible in the database.</p>"]
+        total = sum(len(rows) for rows in grouped.values())
+        body.append(f"<p class='dim'>Showing {total} train(s).</p>")
+
+        for category in categories:
+            rows = grouped[category]
+            if not rows:
+                continue
+            body.append(f"<h3>{category} ({len(rows)})</h3>")
+            body.append("<table>")
+            body.append("<tr><th>Headcode</th><th>Current Location</th><th>Route</th><th>Last Seen</th><th>TD Area</th></tr>")
+            for row in rows:
+                body.append(
+                    "<tr>"
+                    f"<td><a href='/train?area={html.escape(row['td_area'])}&hc={html.escape(row['headcode'])}'><b>{html.escape(row['headcode'])}</b></a></td>"
+                    f"<td>{html.escape(row['location'])}</td>"
+                    f"<td>{html.escape(row['route'])}</td>"
+                    f"<td class='mono dim'>{html.escape(row['last_time'])}</td>"
+                    f"<td>{html.escape(row['td_area'])}</td>"
+                    "</tr>"
+                )
+            body.append("</table>")
+
+        if total == 0:
+            body.append("<p><i>No interesting trains identified right now.</i></p>")
+
+        return render_page("Interesting Trains - NR RailHub", body, active="interesting")
 
     @app.get("/train")
     def train():

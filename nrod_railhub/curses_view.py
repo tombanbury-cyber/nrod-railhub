@@ -17,6 +17,7 @@ from typing import Optional, Deque, List, Tuple
 
 from .views import HumanView
 from .listener import Listener
+from .interesting import classify_interesting_train, format_location
 
 
 # Color pair constants
@@ -81,7 +82,7 @@ class InteractiveDashboardState:
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     
     # Page navigation
-    current_page: int = 0  # 0=TD, 1=TRUST, 2=VSTP, 3=Error, 4=DB, 5=HTTP
+    current_page: int = 0  # 0=TD, 1=TRUST, 2=VSTP, 3=Error, 4=DB, 5=HTTP, 6=Interesting
     
     paused: bool = False
     
@@ -210,7 +211,7 @@ def _render_header(stdscr, state: InteractiveDashboardState, header_h: int, w: i
     header.noutrefresh()
 
 
-def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: int, w: int) -> None:
+def _render_console(stdscr, state: InteractiveDashboardState, listener: Optional[Listener], y0: int, body_h: int, w: int) -> None:
     """Render the console output section based on current page."""
     console = stdscr.derwin(body_h, w, y0, 0)
     
@@ -221,21 +222,24 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
         "VSTP Messages",
         "Error Log",
         "Database Inserts",
-        "HTTP Requests"
+        "HTTP Requests",
+        "Interesting Trains",
     ]
+    interesting_lines = _collect_interesting_lines(listener)
     page_lines = [
         state.console_lines,
         state.trust_lines,
         state.vstp_lines,
         state.error_lines,
         state.db_lines,
-        state.http_lines
+        state.http_lines,
+        interesting_lines,
     ]
     
     current_page_name = page_names[state.current_page]
     current_lines = page_lines[state.current_page]
     
-    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/6) ", _cattr(CP_TITLE, curses.A_BOLD))
+    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/7) ", _cattr(CP_TITLE, curses.A_BOLD))
     
     # Show recent lines
     max_lines = max(0, body_h - 2)
@@ -253,11 +257,74 @@ def _render_console(stdscr, state: InteractiveDashboardState, y0: int, body_h: i
 def _render_footer(stdscr, h: int, w: int) -> None:
     """Render the footer with key bindings."""
     footer_y = h - 1
-    help_text = "q=quit  p=pause  c=clear  Tab/1-6=pages"
+    help_text = "q=quit  p=pause  c=clear  Tab/1-7=pages"
     try:
         stdscr.addnstr(footer_y, 2, help_text, w - 4, _cattr(CP_DIM))
     except curses.error:
         pass
+
+
+def _collect_interesting_lines(listener: Optional[Listener]) -> List[str]:
+    """Build a text summary of interesting trains from live listener state."""
+    hv = getattr(listener, "hv", None) if listener else None
+    if not hv:
+        return ["No interesting trains identified right now."]
+
+    categories = ["Steam", "Track Equipment", "ECS", "Specials", "Diesel"]
+    grouped = {category: [] for category in categories}
+
+    for (td_area, headcode), td in sorted(hv.td_by_headcode.items(), key=lambda item: item[1].last_time_ms or 0, reverse=True):
+        timetable = hv.get_timetable_fields(headcode)
+        interesting_type = classify_interesting_train(
+            headcode=headcode,
+            train_category=timetable.get("category", ""),
+            power_type=timetable.get("power_type", ""),
+            description=" ".join(
+                part for part in (
+                    timetable.get("origin", ""),
+                    timetable.get("dest", ""),
+                    timetable.get("category", ""),
+                    timetable.get("power_type", ""),
+                )
+                if part
+            ),
+        )
+        if not interesting_type:
+            continue
+
+        loc = hv.decode_last_location(td_area, headcode)
+        location = format_location(
+            loc.get("name") or "",
+            loc.get("stanox") or "",
+            loc.get("platform") or "",
+        )
+        if location == "N/A" and (td.from_berth or td.to_berth):
+            location = f"{td_area}:{td.from_berth or td.to_berth}"
+
+        route = " → ".join(
+            part for part in (timetable.get("origin", ""), timetable.get("dest", ""))
+            if part
+        )
+        if not route:
+            route = "N/A"
+
+        grouped[interesting_type].append(
+            f"{td_area} {headcode:<4}  {location}  |  {route}"
+        )
+
+    lines: List[str] = []
+    for category in categories:
+        items = grouped[category]
+        if not items:
+            continue
+        lines.append(f"[{category}] {len(items)} train(s)")
+        lines.extend(f"  {item}" for item in items[:40])
+        lines.append("")
+
+    if not lines:
+        lines.append("No interesting trains identified right now.")
+
+    return lines
 
 
 def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, queues: dict, stop_event: threading.Event) -> None:
@@ -296,9 +363,9 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                 if 0 <= state.current_page < len(page_buffers):
                     page_buffers[state.current_page].clear()
             elif ch == ord("\t") or ch == 9:  # Tab key
-                state.current_page = (state.current_page + 1) % 6
-            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
-                # Number keys 1-6 for direct page access
+                state.current_page = (state.current_page + 1) % 7
+            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
+                # Number keys 1-7 for direct page access
                 state.current_page = ch - ord("1")
         
         # Update state from listener
@@ -346,7 +413,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
         body_h = max(0, h - header_h - footer_h)
         
         _render_header(stdscr, state, header_h, w)
-        _render_console(stdscr, state, header_h, body_h, w)
+        _render_console(stdscr, state, listener, header_h, body_h, w)
         _render_footer(stdscr, h, w)
         
         stdscr.noutrefresh()

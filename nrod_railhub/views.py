@@ -582,9 +582,13 @@ class HumanView:
 
                 stp = (rec.get("CIF_stp_indicator") or "").strip()
                 days = (rec.get("schedule_days_runs") or "").strip()
+                train_category = (seg.get("CIF_train_category") or rec.get("CIF_train_category") or "").strip()
+                power_type = (seg.get("CIF_power_type") or rec.get("CIF_power_type") or "").strip()
                 itps = ItpsSchedule(
                     uid=uid,
                     signalling_id=signalling_id,
+                    train_category=train_category,
+                    power_type=power_type,
                     start_date=(rec.get("schedule_start_date") or "").strip(),
                     end_date=(rec.get("schedule_end_date") or "").strip(),
                     days_run=days,
@@ -642,11 +646,15 @@ class HumanView:
             return None
 
         signalling_id = ""
+        train_category = ""
+        power_type = ""
         locations: List[Tuple[str, str, str]] = []
         for seg in segments:
             if not isinstance(seg, dict):
                 continue
             signalling_id = signalling_id or (seg.get("signalling_id") or "").strip()
+            train_category = train_category or (seg.get("CIF_train_category") or "").strip()
+            power_type = power_type or (seg.get("CIF_power_type") or "").strip()
             locs = seg.get("schedule_location") or []
             if not isinstance(locs, list):
                 continue
@@ -673,6 +681,8 @@ class HumanView:
         vs = VstpSchedule(
             uid=uid,
             signalling_id=signalling_id,
+            train_category=train_category,
+            power_type=power_type,
             start_date=start_date,
             end_date=end_date,
             locations=locations,
@@ -1032,10 +1042,11 @@ class HumanView:
           - uid: train uid if known
           - dep, arr: planned hh:mm strings (may be "")
           - origin, dest: resolved names if possible, else TIPLOC codes (may be "")
+          - category, power_type: train classification metadata if available
         """
         headcode = (headcode or "").strip()
         if not headcode:
-            return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
+            return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "", "category": "", "power_type": ""}
 
         vs_list = self.vstp_by_headcode.get(headcode, [])
         vs = vs_list[0] if vs_list else None
@@ -1053,6 +1064,8 @@ class HumanView:
                 "arr": arr or "",
                 "origin": origin or "",
                 "dest": dest or "",
+                "category": vs.train_category or "",
+                "power_type": vs.power_type or "",
             }
 
         itps_list = self.sched_by_headcode.get(headcode, [])
@@ -1087,9 +1100,11 @@ class HumanView:
                 "arr": arr or "",
                 "origin": origin or "",
                 "dest": dest or "",
+                "category": itps.train_category or "",
+                "power_type": itps.power_type or "",
             }
 
-        return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": ""}
+        return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "", "category": "", "power_type": ""}
 
     def render_for_uid(self, uid: str) -> str:
         parts: List[str] = [f"[{utc_now_iso()}] uid={uid}"]
@@ -1217,5 +1232,3 @@ class HumanView:
             line2 = clip(f"      Last: {last_seen}", width)
 
         return line1 if not line2 else f"{line1}\n{line2}"
-
-
