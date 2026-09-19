@@ -122,6 +122,47 @@ def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thr
     return t
 
 
+def start_connection_watchdog(
+    conn: stomp.Connection11,
+    listener: Listener,
+    max_silence: int,
+    check_interval: int = 10,
+) -> threading.Thread:
+    """
+    Monitor the STOMP connection and alert/force reconnect if messages stop flowing.
+
+    stomp.py already performs automatic reconnects, but the watchdog gives the user
+    visible feedback and a last-resort kick if the receiver thread appears stuck.
+    """
+    def loop():
+        while True:
+            time.sleep(check_interval)
+            now = time.time()
+            last_msg = listener.last_message_at
+            if not last_msg:
+                continue
+            try:
+                last_ts = datetime.fromisoformat(last_msg).timestamp()
+            except Exception:
+                continue
+            silent_for = int(now - last_ts)
+            if silent_for >= max_silence:
+                logger.error(
+                    f"WATCHDOG: no message received for {silent_for}s (threshold {max_silence}s). "
+                    "Forcing reconnect..."
+                )
+                try:
+                    if conn.is_connected():
+                        conn.disconnect()
+                except Exception as e:
+                    logger.debug(f"Watchdog disconnect error: {e}")
+                # Transport will reconnect automatically if reconnect_attempts_max allows.
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
+
+
 def connect_and_run(args: argparse.Namespace) -> None:
 
     # Get db_path early so we can pass it to resolvers for persistence
@@ -295,11 +336,12 @@ def connect_and_run(args: argparse.Namespace) -> None:
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
     _emit_startup_feedback("Startup: connecting to broker...")
 
+    reconnect_attempts = getattr(args, "reconnect_attempts", -1)
     conn = stomp.Connection11(
         host_and_ports=[(args.host, args.port)],
         keepalive=True,
         heartbeats=(10000, 10000),
-        reconnect_attempts_max=5,
+        reconnect_attempts_max=reconnect_attempts,
         vhost=args.vhost,
     )
 
@@ -353,8 +395,8 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
     
     
-    listener = Listener(hv, args, db=db, output_callback=output_callback, 
-                       trust_callback=trust_callback, vstp_callback=vstp_callback, 
+    listener = Listener(hv, args, db=db, output_callback=output_callback,
+                       trust_callback=trust_callback, vstp_callback=vstp_callback,
                        db_callback=db_callback)
     if args.web_port and db_path:
         # Pass config path to web dashboard for configuration editing
@@ -390,13 +432,17 @@ def connect_and_run(args: argparse.Namespace) -> None:
         logger.error(f"CONNECT FAILED 2: {type(e).__name__}: {e!r}")
         return
 
-    logger.info("Subscribing to topics...")
-    conn.subscribe(destination=TOPIC_VSTP, id="vstp", ack="auto")
-    logger.info(f"  subscribed {TOPIC_VSTP}")
-    conn.subscribe(destination=TOPIC_TRUST, id="trust", ack="auto")
-    logger.info(f"  subscribed {TOPIC_TRUST}")
-    conn.subscribe(destination=TOPIC_TD, id="td", ack="auto")
-    logger.info(f"  subscribed {TOPIC_TD}")
+    def _subscribe_topics() -> None:
+        logger.info("Subscribing to topics...")
+        conn.subscribe(destination=TOPIC_VSTP, id="vstp", ack="auto")
+        logger.info(f"  subscribed {TOPIC_VSTP}")
+        conn.subscribe(destination=TOPIC_TRUST, id="trust", ack="auto")
+        logger.info(f"  subscribed {TOPIC_TRUST}")
+        conn.subscribe(destination=TOPIC_TD, id="td", ack="auto")
+        logger.info(f"  subscribed {TOPIC_TD}")
+
+    listener.subscribe_callback = _subscribe_topics
+    _subscribe_topics()
 
     if args.headcode:
         logger.info(f"Filter: headcode={args.headcode}")
@@ -404,6 +450,8 @@ def connect_and_run(args: argparse.Namespace) -> None:
         logger.info(f"Filter: uid={args.uid}")
 
     start_status_ticker(listener, interval=args.status_every)
+    max_silence = getattr(args, "max_silence", 120)
+    start_connection_watchdog(conn, listener, max_silence=max_silence)
 
     # Run in interactive curses mode if requested
     if args.interactive:
@@ -478,6 +526,10 @@ def parse_args() -> argparse.Namespace:
                    help="Enable raw STOMP message preview (also sets log-level to verbose if not specified)")
     p.add_argument("--status-every", dest="status_every", type=int, default=15,
                    help="Print status line every N seconds (default 15)")             
+    p.add_argument("--reconnect-attempts", dest="reconnect_attempts", type=int, default=-1,
+                   help="Maximum STOMP reconnect attempts (-1 for infinite, default -1)")
+    p.add_argument("--max-silence", dest="max_silence", type=int, default=120,
+                   help="Alert if no message received for N seconds (default 120)")
 
     p.add_argument(
         "--corpus-cache",
