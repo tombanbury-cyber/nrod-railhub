@@ -214,7 +214,7 @@ python3 nrod_railhub.py --user USER --password PASS --interactive --db-path rail
 
 | Option | Description |
 |--------|-------------|
-| `--db-path PATH` | SQLite database file path |
+| `--db-path PATH` | SQLite database file path (required) |
 | `--web-port PORT` | Start web dashboard on this port (requires --db-path) |
 
 ### Data Sources

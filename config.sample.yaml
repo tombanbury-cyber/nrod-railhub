@@ -103,9 +103,9 @@ use_schedule: true  # Enable/disable timetable enrichment
 # ============================================================================
 # Persistent storage and web interface options
 
-# SQLite database path for state/event storage
-# Set to null to disable database persistence
-db_path: ~/.cache/openraildata/railhub.db
+# SQLite database path for state/event storage (required)
+# Use a single shared DB file for runtime + reference imports
+db_path: /path/to/railhub.db
 
 # Web dashboard port (requires db_path to be set)
 # Set to null to disable web dashboard

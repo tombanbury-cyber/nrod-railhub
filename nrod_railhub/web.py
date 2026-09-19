@@ -723,7 +723,7 @@ filterInput.addEventListener('input', updateFilter);
         # Database & Web Section
         body.append("<fieldset style='border:1px solid #ddd;padding:15px;margin:15px 0;border-radius:6px'>")
         body.append("<legend style='font-weight:600;padding:0 8px'>Database & Web Dashboard</legend>")
-        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Database Path:</label><input type='text' name='db_path' value=\"{config_data.get('db_path', '~/.cache/openraildata/railhub.db')}\" style='width:400px;padding:6px'></div>")
+        body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Database Path:</label><input type='text' name='db_path' value=\"{config_data.get('db_path', '')}\" style='width:400px;padding:6px'></div>")
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Web Port:</label><input type='number' name='web_port' value=\"{config_data.get('web_port', 8088) or ''}\" style='width:100px;padding:6px'><span class='dim' style='margin-left:8px'>Leave empty to disable</span></div>")
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Enable Mapper:</label><input type='checkbox' name='enable_mapper' {'checked' if config_data.get('enable_mapper', True) else ''}></div>")
         body.append(f"<div style='margin-bottom:10px'><label style='display:inline-block;width:180px'>Save Raw JSON:</label><input type='checkbox' name='save_raw_json' {'checked' if config_data.get('save_raw_json', True) else ''}><span class='dim' style='margin-left:8px'>Disabling reduces database size</span></div>")
@@ -2777,4 +2777,3 @@ filterInput.addEventListener('input', updateFilter);
     else:
         logger.info(f"Starting web dashboard on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
