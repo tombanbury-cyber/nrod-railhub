@@ -10,6 +10,7 @@ from nrod_railhub.curses_view import (
     _init_colors,
     _cattr,
     QueueHandler,
+    _collect_interesting_lines,
 )
 
 
@@ -163,12 +164,56 @@ def test_dashboard_state_page_navigation():
     state.current_page = 1
     assert state.current_page == 1
     
-    state.current_page = 5
-    assert state.current_page == 5
+    state.current_page = 6
+    assert state.current_page == 6
     
-    # Test wraparound (now 6 pages instead of 5)
-    state.current_page = (state.current_page + 1) % 6
+    # Test wraparound (now 7 pages instead of 6)
+    state.current_page = (state.current_page + 1) % 7
     assert state.current_page == 0
+
+
+def test_collect_interesting_lines_groups_by_type():
+    """Test that interesting trains are grouped and formatted."""
+    from types import SimpleNamespace
+
+    class FakeHV:
+        def __init__(self):
+            self.td_by_headcode = {
+                ("EK", "2C90"): SimpleNamespace(last_time_ms=200, from_berth="A", to_berth="B"),
+                ("EK", "5Z50"): SimpleNamespace(last_time_ms=100, from_berth="C", to_berth="D"),
+                ("EK", "1S01"): SimpleNamespace(last_time_ms=50, from_berth="E", to_berth="F"),
+                ("EK", "1Z99"): SimpleNamespace(last_time_ms=25, from_berth="G", to_berth="H"),
+            }
+
+        def get_timetable_fields(self, headcode):
+            if headcode == "2C90":
+                return {"category": "DD", "power_type": "D", "origin": "Woking", "dest": "Waterloo"}
+            if headcode == "1S01":
+                return {"category": "SS", "power_type": "S", "origin": "York", "dest": "Scarborough"}
+            if headcode == "1Z99":
+                return {"category": "", "power_type": "", "origin": "Oxford", "dest": "Hereford"}
+            return {"category": "", "power_type": "", "origin": "", "dest": ""}
+
+        def decode_last_location(self, td_area, headcode):
+            if headcode == "2C90":
+                return {"name": "Clapham Junction", "stanox": "87701", "platform": "13"}
+            if headcode == "1S01":
+                return {"name": "Northallerton", "stanox": "98765", "platform": "1"}
+            if headcode == "1Z99":
+                return {"name": "Didcot Parkway", "stanox": "12345", "platform": "4"}
+            return {"name": "", "stanox": None, "platform": None}
+
+    fake_listener = SimpleNamespace(hv=FakeHV())
+    lines = _collect_interesting_lines(fake_listener)
+
+    assert any(line.startswith("[Diesel]") for line in lines)
+    assert any("2C90" in line for line in lines)
+    assert any(line.startswith("[ECS]") for line in lines)
+    assert any("5Z50" in line for line in lines)
+    assert any(line.startswith("[Steam]") for line in lines)
+    assert any("1S01" in line for line in lines)
+    assert any(line.startswith("[Specials]") for line in lines)
+    assert any("1Z99" in line for line in lines)
 
 
 def test_cattr_function():
@@ -213,4 +258,3 @@ def test_queue_handler():
     
     msg2 = log_queue.get_nowait()
     assert "WARNING: Test warning message" in msg2
-

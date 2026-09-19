@@ -231,3 +231,88 @@ def test_table_headers_clickable():
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+
+
+def test_interesting_trains_page_groups_trains_by_type():
+    """Test that the interesting trains page groups special services."""
+    from flask import Flask
+    from nrod_railhub import web
+
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE td_state (
+                td_area TEXT, headcode TEXT, last_time_ms INTEGER,
+                last_time_iso TEXT, from_berth TEXT, to_berth TEXT,
+                stanox TEXT, location_name TEXT, platform TEXT,
+                sched_dep TEXT, sched_arr TEXT, origin_name TEXT, dest_name TEXT,
+                uid TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE trust_state (
+                headcode TEXT, last_location TEXT, last_event_time TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE cif_schedules (
+                uid TEXT, CIF_headcode TEXT, CIF_train_category TEXT,
+                CIF_power_type TEXT, created_at_ts INTEGER
+            )
+        """)
+        conn.execute("""
+            INSERT INTO td_state VALUES
+            ('EK', '2C90', 1234567890, '2024-01-01T12:00:00', 'A123', 'B456',
+             '87701', 'Clapham Junction', '2', '12:00', '12:30', 'London', 'Brighton', 'UID-D'),
+            ('EK', '5Z50', 1234567891, '2024-01-01T12:01:00', 'C123', 'D456',
+             '87701', 'Clapham Junction', '2', '', '', '', '', ''),
+            ('EK', '1S01', 1234567892, '2024-01-01T12:02:00', 'E123', 'F456',
+             '87701', 'Clapham Junction', '2', '', '', '', '', ''),
+            ('EK', '1Z99', 1234567893, '2024-01-01T12:03:00', 'G123', 'H456',
+             '87701', 'Clapham Junction', '2', '', '', '', '', '')
+        """)
+        conn.execute("INSERT INTO cif_schedules VALUES ('UID-D', '2C90', 'DD', 'D', 1)")
+        conn.execute("INSERT INTO cif_schedules VALUES ('UID-S', '1S01', 'SS', 'S', 2)")
+        conn.commit()
+        conn.close()
+
+        app_holder = {}
+
+        def start_app():
+            original_flask_init = Flask.__init__
+
+            def patched_init(self, *args, **kwargs):
+                original_flask_init(self, *args, **kwargs)
+                app_holder['app'] = self
+
+            Flask.__init__ = patched_init
+            web.start_web_dashboard(db_path, 8088, None, None)
+            Flask.__init__ = original_flask_init
+
+        import unittest.mock as mock
+        with mock.patch('flask.Flask.run'):
+            start_app()
+
+        app = app_holder['app']
+        client = app.test_client()
+
+        response = client.get('/interesting')
+        result = response.data.decode('utf-8')
+
+        assert "Interesting Trains" in result
+        assert "Diesel" in result
+        assert "ECS" in result
+        assert "Steam" in result
+        assert "Specials" in result
+        assert "2C90" in result
+        assert "5Z50" in result
+        assert "1S01" in result
+        assert "1Z99" in result
+        assert "Clapham Junction" in result
+
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
