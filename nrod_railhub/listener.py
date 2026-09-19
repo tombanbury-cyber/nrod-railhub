@@ -59,7 +59,8 @@ class Listener(stomp.ConnectionListener):
                  output_callback: Optional[callable] = None,
                  trust_callback: Optional[callable] = None,
                  vstp_callback: Optional[callable] = None,
-                 db_callback: Optional[callable] = None) -> None:
+                 db_callback: Optional[callable] = None,
+                 subscribe_callback: Optional[callable] = None) -> None:
         self.hv = hv
         self.args = args
         
@@ -75,6 +76,7 @@ class Listener(stomp.ConnectionListener):
         self.trust_callback = trust_callback  # Optional callback for TRUST messages
         self.vstp_callback = vstp_callback  # Optional callback for VSTP messages
         self.db_callback = db_callback  # Optional callback for database operations
+        self.subscribe_callback = subscribe_callback  # Optional callback invoked on (re)connect to subscribe to topics
 
         # Initialize TOC-TD area cache on HumanView for filtering candidates
         self.hv.td_allowed_tocs_cache = {}
@@ -87,6 +89,8 @@ class Listener(stomp.ConnectionListener):
         self._last_output: Dict[tuple[str,str], str] = {}
         self._last_output_ts: Dict[tuple[str,str], float] = {}
         self._print_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._reconnect_count = 0
 
 
 
@@ -149,7 +153,9 @@ class Listener(stomp.ConnectionListener):
         logger.info(f"Connecting TCP to {h}:{p} ...")
 
     def on_connected(self, frame) -> None:
-        self.connected_at = utc_now_iso()
+        with self._lifecycle_lock:
+            self.connected_at = utc_now_iso()
+            self._reconnect_count += 1
 
         # Defensive header extraction: frame or headers may be None
         headers = getattr(frame, "headers", {}) or {}
@@ -157,10 +163,24 @@ class Listener(stomp.ConnectionListener):
         server = headers.get("server", "?")
         version = headers.get("version", "?")
 
-        logger.info(f"CONNECTED. version={version} session={session} server={server}")
+        logger.info(f"CONNECTED. version={version} session={session} server={server} reconnect_count={self._reconnect_count}")
+
+        # Re-subscribe after a reconnect so the broker resumes delivery.
+        if self.subscribe_callback:
+            try:
+                self.subscribe_callback()
+                logger.info("Re-subscribed to topics after reconnect")
+            except Exception as e:
+                logger.error(f"Failed to re-subscribe after reconnect: {type(e).__name__}: {e}")
 
     def on_disconnected(self) -> None:
-        logger.error("Disconnected.")
+        logger.error("Disconnected. Attempting to reconnect...")
+
+    def on_heartbeat_timeout(self) -> None:
+        logger.error("Heartbeat timeout detected. Connection may be frozen; waiting for reconnect...")
+
+    def on_receiver_loop_completed(self, frame) -> None:
+        logger.warning("STOMP receiver loop ended. Connection lost if not already reconnecting.")
 
     def on_error(self, frame) -> None:
         body = getattr(frame, "body", "")
