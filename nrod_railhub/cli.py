@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import pathlib
 import sys
@@ -24,6 +25,14 @@ from .web import start_web_dashboard
 from .logging_config import setup_logger, get_logger
 
 logger = get_logger("cli")
+
+
+def _emit_startup_feedback(message: str) -> None:
+    """Show startup progress even when the default log level is quiet."""
+    if logger.getEffectiveLevel() <= logging.INFO:
+        logger.info(message)
+    else:
+        print(message, flush=True)
 
 
 def load_config_file(config_path: str) -> Dict[str, Any]:
@@ -118,6 +127,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
     # Get db_path early so we can pass it to resolvers for persistence
     db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
 
+    _emit_startup_feedback("Startup: loading CORPUS reference data...")
     resolver = LocationResolver(db_path=db_path)
     resolver.load_or_download(
         username=args.user,
@@ -126,7 +136,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.corpus_refresh,
         quiet=False,
     )
+    _emit_startup_feedback("Startup: CORPUS reference data ready.")
 
+    _emit_startup_feedback("Startup: loading SMART reference data...")
     smart = SmartResolver(db_path=db_path)
     smart.load_or_download(
         username=args.user,
@@ -135,10 +147,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.smart_refresh,
         quiet=False,
     )
+    _emit_startup_feedback("Startup: SMART reference data ready.")
     
     # Initialize TOC resolver
+    _emit_startup_feedback("Startup: loading TOC reference data...")
     toc_resolver = TOCResolver()
     logger.info(f"TOC: loaded {len(toc_resolver.TOC_DATA)} TOC codes")
+    _emit_startup_feedback("Startup: TOC reference data ready.")
     
     hv = HumanView(resolver=resolver, smart=smart, toc_resolver=toc_resolver)
 
@@ -154,6 +169,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
         def _schedule_worker() -> None:
             try:
+                _emit_startup_feedback("Startup: loading timetable enrichment...")
                 # Check if toc_filter is configured
                 toc_filter = getattr(args, 'toc_filter', None)
                 
@@ -174,6 +190,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                         update_mode=False,  # Use FULL_DAILY
                         day="toc-full",
                         quiet=False,
+                        progress_callback=_emit_startup_feedback,
                     )
                     
                     if not downloaded_files:
@@ -276,6 +293,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         threading.Thread(target=_schedule_worker, daemon=True).start()
     logger.info(f"Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
+    _emit_startup_feedback("Startup: connecting to broker...")
 
     conn = stomp.Connection11(
         host_and_ports=[(args.host, args.port)],
