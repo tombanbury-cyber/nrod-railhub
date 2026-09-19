@@ -266,6 +266,39 @@ def test_download_multiple_toc_schedules():
             assert mock_download.call_count == 2
 
 
+def test_download_multiple_toc_schedules_reports_progress():
+    """Test that TOC schedule downloads report progress callbacks."""
+    resolver = ScheduleResolver()
+    toc_resolver = TOCResolver()
+    progress_messages = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with patch.object(resolver, 'download_toc_schedule') as mock_download:
+            def side_effect(*args, **kwargs):
+                out_gz = kwargs.get('out_gz')
+                with gzip.open(out_gz, 'wt') as f:
+                    f.write('{}')
+
+            mock_download.side_effect = side_effect
+
+            downloaded = resolver.download_multiple_toc_schedules(
+                username='test',
+                password='test',
+                toc_filter=['SE', 'SW'],
+                toc_resolver=toc_resolver,
+                cache_dir=tmpdir,
+                update_mode=False,
+                quiet=True,
+                progress_callback=progress_messages.append,
+            )
+
+            assert len(downloaded) == 2
+            assert progress_messages[0].startswith('Startup: downloading schedule 1/2 for SE')
+            assert progress_messages[1].startswith('Startup: downloaded schedule 1/2 for SE')
+            assert progress_messages[2].startswith('Startup: downloading schedule 2/2 for SW')
+            assert progress_messages[3].startswith('Startup: downloaded schedule 2/2 for SW')
+
+
 def test_download_multiple_toc_schedules_skips_invalid():
     """Test that download_multiple_toc_schedules skips TOCs without business codes."""
     resolver = ScheduleResolver()

@@ -12,7 +12,7 @@ import pathlib
 import urllib.request
 import urllib.parse
 from urllib.error import URLError, HTTPError
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .models import CORPUS_URL, SMART_URL, utc_now_iso, hhmmss_to_hhmm
 from .logging_config import get_logger
@@ -975,6 +975,7 @@ class ScheduleResolver:
         update_mode: bool = False,
         day: str = "toc-full",
         quiet: bool = False,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> List[Tuple[str, str]]:
         """Download schedules for multiple TOCs based on filter.
         
@@ -992,8 +993,9 @@ class ScheduleResolver:
             List of (toc_code, file_path) tuples for successfully downloaded files
         """
         downloaded_files = []
+        total = len(toc_filter)
         
-        for toc_code in toc_filter:
+        for index, toc_code in enumerate(toc_filter, start=1):
             # Get business code for this TOC
             toc_data = toc_resolver.TOC_DATA.get(toc_code.upper())
             if not toc_data:
@@ -1012,6 +1014,15 @@ class ScheduleResolver:
             out_gz = os.path.join(cache_dir, f"schedule_{toc_code.upper()}{mode_suffix}.json.gz")
             
             try:
+                progress_message = (
+                    f"Startup: downloading schedule {index}/{total} "
+                    f"for {toc_code.upper()} ({toc_data.get('name', toc_code.upper())})"
+                )
+                if progress_callback:
+                    progress_callback(progress_message)
+                elif not quiet:
+                    logger.info(progress_message)
+
                 self.download_toc_schedule(
                     username=username,
                     password=password,
@@ -1023,6 +1034,12 @@ class ScheduleResolver:
                     quiet=quiet,
                 )
                 downloaded_files.append((toc_code.upper(), out_gz))
+
+                progress_message = f"Startup: downloaded schedule {index}/{total} for {toc_code.upper()}"
+                if progress_callback:
+                    progress_callback(progress_message)
+                elif not quiet:
+                    logger.info(progress_message)
                 
                 if not quiet:
                     file_size = os.path.getsize(out_gz) / (1024 * 1024)  # MB

@@ -383,6 +383,7 @@ def test_connect_and_run_passes_default_vstp_callback(monkeypatch):
         use_schedule=False,
         user="test@example.com",
         password=None,
+        corpus_cache="~/.cache/openraildata/CORPUSExtract.json",
         corpus_refresh=False,
         smart_cache="~/.cache/openraildata/SMART.json",
         smart_refresh=False,
@@ -409,3 +410,94 @@ def test_connect_and_run_passes_default_vstp_callback(monkeypatch):
         connect_and_run(args)
 
     assert captured["vstp_callback"] is None
+
+
+def test_connect_and_run_emits_startup_progress(monkeypatch, capsys):
+    """Test that CLI startup emits visible progress feedback."""
+    captured = {}
+
+    class DummyResolver:
+        def load_or_download(self, **kwargs):
+            return None
+
+    class DummySmartResolver:
+        def load_or_download(self, **kwargs):
+            return None
+
+    class DummyTOCResolver:
+        TOC_DATA = {}
+
+        def populate_database(self, *args, **kwargs):
+            return None
+
+    class DummyHumanView:
+        def __init__(self, *args, **kwargs):
+            return None
+
+    class StopAfterListener(Exception):
+        pass
+
+    def fake_listener(*args, **kwargs):
+        captured.update(kwargs)
+        raise StopAfterListener
+
+    class DummyConnection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_listener(self, *args, **kwargs):
+            return None
+
+        def connect(self, *args, **kwargs):
+            return None
+
+        def subscribe(self, *args, **kwargs):
+            return None
+
+        def disconnect(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr("nrod_railhub.cli.LocationResolver", lambda *args, **kwargs: DummyResolver())
+    monkeypatch.setattr("nrod_railhub.cli.SmartResolver", lambda *args, **kwargs: DummySmartResolver())
+    monkeypatch.setattr("nrod_railhub.cli.TOCResolver", lambda *args, **kwargs: DummyTOCResolver())
+    monkeypatch.setattr("nrod_railhub.cli.HumanView", lambda *args, **kwargs: DummyHumanView())
+    monkeypatch.setattr("nrod_railhub.cli.Listener", fake_listener)
+    monkeypatch.setattr("nrod_railhub.cli.stomp.Connection11", DummyConnection)
+
+    args = argparse.Namespace(
+        db_path=None,
+        interactive=False,
+        use_schedule=False,
+        user="test@example.com",
+        password="testpass",
+        corpus_cache="~/.cache/openraildata/CORPUSExtract.json",
+        corpus_refresh=False,
+        smart_cache="~/.cache/openraildata/SMART.json",
+        smart_refresh=False,
+        schedule_cache="~/.cache/openraildata/SCHEDULE_toc-full.json.gz",
+        enable_mapper=False,
+        retain_trust_days=None,
+        retain_vstp_days=None,
+        retain_cif_days=None,
+        retention_interval=3600,
+        retention_batch_size=1000,
+        save_raw_json=True,
+        host="example.com",
+        port=61618,
+        vhost="example.com",
+        web_port=None,
+        config=None,
+        headcode=None,
+        uid=None,
+        status_every=15,
+        td_area=[],
+    )
+
+    with pytest.raises(StopAfterListener):
+        connect_and_run(args)
+
+    output = capsys.readouterr().out
+    assert "Startup: loading CORPUS reference data..." in output
+    assert "Startup: CORPUS reference data ready." in output
+    assert "Startup: loading SMART reference data..." in output
+    assert "Startup: SMART reference data ready." in output
