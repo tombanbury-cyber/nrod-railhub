@@ -336,11 +336,12 @@ def connect_and_run(args: argparse.Namespace) -> None:
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
     _emit_startup_feedback("Startup: connecting to broker...")
 
+    reconnect_attempts = getattr(args, "reconnect_attempts", -1)
     conn = stomp.Connection11(
         host_and_ports=[(args.host, args.port)],
         keepalive=True,
         heartbeats=(10000, 10000),
-        reconnect_attempts_max=args.reconnect_attempts,
+        reconnect_attempts_max=reconnect_attempts,
         vhost=args.vhost,
     )
 
@@ -394,9 +395,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
     
     
-    listener = Listener(hv, args, db=db, output_callback=output_callback, 
-                       trust_callback=trust_callback, vstp_callback=vstp_callback, 
-                       db_callback=db_callback, subscribe_callback=_subscribe_topics)
+    listener = Listener(hv, args, db=db, output_callback=output_callback,
+                       trust_callback=trust_callback, vstp_callback=vstp_callback,
+                       db_callback=db_callback)
     if args.web_port and db_path:
         # Pass config path to web dashboard for configuration editing
         config_file_path = args.config if args.config else None
@@ -440,6 +441,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         conn.subscribe(destination=TOPIC_TD, id="td", ack="auto")
         logger.info(f"  subscribed {TOPIC_TD}")
 
+    listener.subscribe_callback = _subscribe_topics
     _subscribe_topics()
 
     if args.headcode:
@@ -448,7 +450,8 @@ def connect_and_run(args: argparse.Namespace) -> None:
         logger.info(f"Filter: uid={args.uid}")
 
     start_status_ticker(listener, interval=args.status_every)
-    start_connection_watchdog(conn, listener, max_silence=args.max_silence)
+    max_silence = getattr(args, "max_silence", 120)
+    start_connection_watchdog(conn, listener, max_silence=max_silence)
 
     # Run in interactive curses mode if requested
     if args.interactive:
