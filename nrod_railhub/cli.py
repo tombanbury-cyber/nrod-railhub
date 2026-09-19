@@ -306,6 +306,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
     # Create listener with optional output callbacks for interactive mode
     output_callback = None
     trust_callback = None
+    vstp_callback = None
     db_callback = None
     
     if args.interactive:
@@ -579,5 +580,4 @@ def parse_args() -> argparse.Namespace:
         p.error("--password is required (either via command-line or config file)")
     
     return args
-
 
