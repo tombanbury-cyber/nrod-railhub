@@ -525,10 +525,10 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--trace-headcode", action="store_true",
                help="Extra debug: show when VSTP/TRUST/TD mention the filtered headcode/uid")
-    p.add_argument("--db-path", default="~/.cache/openraildata/railhub.db",
-                   help="SQLite database path for state/event storage (enables DB output)")
+    p.add_argument("--db-path", default=None,
+                   help="SQLite database path for state/event storage (required)")
     p.add_argument("--web-port", type=int, default=8088,
-                   help="If set and --db-path is provided, start tiny web dashboard on this port")
+                   help="Start tiny web dashboard on this port (requires --db-path)")
     p.add_argument("--disable-mapper", dest="enable_mapper", action="store_false", default=True,
                    help="Disable berth-to-signal correlation mapper (enabled by default)")
     
@@ -578,6 +578,7 @@ def parse_args() -> argparse.Namespace:
         p.error("--user is required (either via command-line or config file)")
     if not args.password:
         p.error("--password is required (either via command-line or config file)")
+    if not args.db_path:
+        p.error("--db-path is required (either via command-line or config file)")
     
     return args
-
