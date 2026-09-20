@@ -197,3 +197,46 @@ def test_rebuild_route_patterns_splits_shared_train_history_by_payload_headcode(
     finally:
         conn.close()
         Path(db_path).unlink()
+
+
+def test_infer_train_chain_uses_payload_headcode_for_reused_train_ids():
+    """Test inference uses the active event payload headcode for reused train records."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            INSERT INTO train (id, headcode, description, toc) VALUES
+                ('HNEW', '1A01', 'Historic New Route', 'GW'),
+                ('HNEW2', '1A01', 'Historic New Route Two', 'GW'),
+                ('SHARED', '2C90', 'Shared Record', 'GW');
+
+            INSERT INTO event (ts, source, train_id, event_type, object_id, payload) VALUES
+                ('2026-02-14T09:00:00Z', 'td', 'HNEW', 'berth_enter', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:01:00Z', 'td', 'HNEW', 'berth_exit', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:01:01Z', 'td', 'HNEW', 'berth_enter', 'BRTH_6', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:02:00Z', 'td', 'HNEW', 'berth_exit', 'BRTH_6', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:02:01Z', 'td', 'HNEW', 'berth_enter', 'BRTH_4', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:30:00Z', 'td', 'HNEW2', 'berth_enter', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:31:00Z', 'td', 'HNEW2', 'berth_exit', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:31:01Z', 'td', 'HNEW2', 'berth_enter', 'BRTH_6', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:32:00Z', 'td', 'HNEW2', 'berth_exit', 'BRTH_6', '{"headcode":"1A01"}'),
+                ('2026-02-14T09:32:01Z', 'td', 'HNEW2', 'berth_enter', 'BRTH_4', '{"headcode":"1A01"}'),
+                ('2026-02-14T10:00:00Z', 'td', 'SHARED', 'berth_enter', 'BRTH_1', '{"headcode":"2C90"}'),
+                ('2026-02-14T10:01:00Z', 'td', 'SHARED', 'berth_exit', 'BRTH_1', '{"headcode":"2C90"}'),
+                ('2026-02-14T10:01:01Z', 'td', 'SHARED', 'berth_enter', 'BRTH_2', '{"headcode":"2C90"}'),
+                ('2026-02-14T11:00:00Z', 'td', 'SHARED', 'berth_enter', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T11:01:00Z', 'td', 'SHARED', 'berth_exit', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T11:02:00Z', 'td', 'SHARED', 'berth_enter', 'BRTH_4', '{"headcode":"1A01"}');
+            """
+        )
+
+        rebuild_route_patterns(conn)
+        chain = infer_train_chain(conn, "SHARED")
+
+        assert [item["berth_id"] for item in chain["chain"]] == ["BRTH_8", "BRTH_6", "BRTH_4"]
+        assert chain["chain"][1]["inferred"] is True
+        assert chain["chain"][1]["source"] == "historical_route_pattern"
+    finally:
+        conn.close()
+        Path(db_path).unlink()

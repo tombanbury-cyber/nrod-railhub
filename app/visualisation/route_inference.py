@@ -349,13 +349,26 @@ def infer_train_chain(conn: sqlite3.Connection, train_id: str) -> dict[str, Any]
     """Build a berth chain with historical gap inference when evidence exists."""
     event_rows = conn.execute(
         """
-        SELECT id, ts, event_type, object_id
+        SELECT id, ts, event_type, object_id, payload
         FROM event
         WHERE train_id = ? AND event_type IN ('berth_enter', 'berth_exit')
         ORDER BY ts, id
         """,
         (train_id,),
     ).fetchall()
+    headcode_row = conn.execute(
+        "SELECT headcode FROM train WHERE id = ?",
+        (train_id,),
+    ).fetchone()
+    fallback_headcode = headcode_row[0] if headcode_row and headcode_row[0] else None
+
+    payload_headcodes = [_headcode_from_payload(row[4]) for row in event_rows]
+    active_headcode = next((headcode for headcode in reversed(payload_headcodes) if headcode), fallback_headcode)
+    if any(payload_headcodes) and active_headcode:
+        filtered_rows = [row for row, headcode in zip(event_rows, payload_headcodes) if headcode == active_headcode]
+    else:
+        filtered_rows = list(event_rows)
+
     rows = [
         {
             "id": row[0],
@@ -363,17 +376,13 @@ def infer_train_chain(conn: sqlite3.Connection, train_id: str) -> dict[str, Any]
             "event_type": row[2],
             "object_id": row[3],
         }
-        for row in event_rows
+        for row in filtered_rows
     ]
     observed_chain = build_observed_chain(rows)
     if not observed_chain:
         return {"train_id": train_id, "chain": []}
 
-    headcode_row = conn.execute(
-        "SELECT headcode FROM train WHERE id = ?",
-        (train_id,),
-    ).fetchone()
-    headcode = headcode_row[0] if headcode_row and headcode_row[0] else None
+    headcode = active_headcode
     if not headcode:
         return {"train_id": train_id, "chain": observed_chain}
 
