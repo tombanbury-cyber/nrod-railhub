@@ -317,12 +317,13 @@ def _infer_gap_items(
                         "support": min(edge_counts),
                         "confidence": min(edge_confidences) if edge_confidences else pattern["confidence"],
                         "last_seen_ts": max(last_seen_values) if last_seen_values else pattern["updated_at"],
+                        "last_seen_at": _parse_ts(max(last_seen_values) if last_seen_values else pattern["updated_at"]),
                         "observations": pattern["observations"],
                     }
                     if (
                         best_candidate is None
-                        or (candidate["support"], candidate["last_seen_ts"], candidate["observations"], -len(candidate["intermediates"]))
-                        > (best_candidate["support"], best_candidate["last_seen_ts"], best_candidate["observations"], -len(best_candidate["intermediates"]))
+                        or (candidate["support"], candidate["last_seen_at"], candidate["observations"], -len(candidate["intermediates"]))
+                        > (best_candidate["support"], best_candidate["last_seen_at"], best_candidate["observations"], -len(best_candidate["intermediates"]))
                     ):
                         best_candidate = candidate
 
@@ -365,7 +366,11 @@ def infer_train_chain(conn: sqlite3.Connection, train_id: str) -> dict[str, Any]
     payload_headcodes = [_headcode_from_payload(row[4]) for row in event_rows]
     active_headcode = next((headcode for headcode in reversed(payload_headcodes) if headcode), fallback_headcode)
     if any(payload_headcodes) and active_headcode:
-        filtered_rows = [row for row, headcode in zip(event_rows, payload_headcodes) if headcode == active_headcode]
+        filtered_rows = [
+            row
+            for row, headcode in zip(event_rows, payload_headcodes)
+            if headcode in (None, active_headcode)
+        ]
     else:
         filtered_rows = list(event_rows)
 

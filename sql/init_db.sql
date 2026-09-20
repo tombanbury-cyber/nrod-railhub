@@ -102,12 +102,12 @@ CREATE TABLE IF NOT EXISTS route_inference_runs (
 );
 
 -- Insert sample layout
-INSERT INTO layout (id, name, description, data) VALUES 
+INSERT OR IGNORE INTO layout (id, name, description, data) VALUES 
     ('demo', 'Demo Station', 'Simple demonstration layout with one platform', '{"version": "1.0", "type": "station"}');
 
 -- Insert sample berths for the demo layout
 -- Layout: Platform with 8 berths arranged horizontally
-INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type) VALUES
+INSERT OR IGNORE INTO berth (id, layout_id, name, x, y, width, height, berth_type) VALUES
     ('BRTH_1', 'demo', 'A1', 50, 100, 60, 30, 'platform'),
     ('BRTH_2', 'demo', 'A2', 120, 100, 60, 30, 'platform'),
     ('BRTH_3', 'demo', 'A3', 190, 100, 60, 30, 'platform'),
@@ -118,12 +118,12 @@ INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type) VALUES
     ('BRTH_8', 'demo', 'A8', 540, 100, 60, 30, 'platform');
 
 -- Insert sample signals
-INSERT INTO signal (id, layout_id, name, x, y, signal_type) VALUES
+INSERT OR IGNORE INTO signal (id, layout_id, name, x, y, signal_type) VALUES
     ('SIG_1', 'demo', 'S1', 30, 100, 'auto'),
     ('SIG_2', 'demo', 'S2', 560, 100, 'auto');
 
 -- Insert sample train
-INSERT INTO train (id, headcode, description, toc) VALUES
+INSERT OR IGNORE INTO train (id, headcode, description, toc) VALUES
     ('T1', '2C90', 'Demo Train Service', 'GW');
 
 -- Insert sample events showing a train journey
