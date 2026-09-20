@@ -45,6 +45,8 @@ def build_observed_chain(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> list[d
         ts = row["ts"]
 
         if event_type == "berth_enter":
+            if berth_id in berth_states:
+                chain.append(berth_states.pop(berth_id))
             berth_states[berth_id] = {
                 "berth_id": berth_id,
                 "enter_time": ts,
@@ -120,6 +122,9 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
                 continue
 
             chain = build_observed_chain(group["rows"])
+            if not chain or chain[-1]["exit_time"] is None:
+                continue
+
             sequence = [item["berth_id"] for item in chain]
             if not sequence:
                 continue
