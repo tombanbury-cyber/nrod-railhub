@@ -7,7 +7,6 @@ train visualization on schematic layouts.
 import json
 import sqlite3
 import asyncio
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from contextlib import contextmanager
@@ -16,6 +15,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from .route_inference import infer_train_chain
 
 
 # Database path (relative to project root)
@@ -211,50 +212,10 @@ async def get_train_chain(train_id: str):
     """Build train journey chain from events.
     
     Returns a list of berth occupancy periods ordered by time.
-    Each chain item contains: berth_id, enter_time, exit_time (if exited).
+    Each chain item contains direct observations plus inference metadata.
     """
     with get_conn() as conn:
-        # Get all events for this train, ordered by time
-        rows = conn.execute(
-            """
-            SELECT * FROM event 
-            WHERE train_id = ? AND event_type IN ('berth_enter', 'berth_exit')
-            ORDER BY ts
-            """,
-            (train_id,)
-        ).fetchall()
-        
-        # Build chain by pairing enter/exit events
-        chain = []
-        berth_states = {}  # berth_id -> enter_event
-        
-        for row in rows:
-            event_type = row["event_type"]
-            berth_id = row["object_id"]
-            ts = row["ts"]
-            
-            if event_type == "berth_enter":
-                # Start tracking this berth
-                berth_states[berth_id] = {
-                    "berth_id": berth_id,
-                    "enter_time": ts,
-                    "exit_time": None
-                }
-            elif event_type == "berth_exit":
-                # Complete the berth occupancy
-                if berth_id in berth_states:
-                    berth_states[berth_id]["exit_time"] = ts
-                    chain.append(berth_states[berth_id])
-                    del berth_states[berth_id]
-        
-        # Add any berths still occupied (no exit event yet)
-        for state in berth_states.values():
-            chain.append(state)
-        
-        return {
-            "train_id": train_id,
-            "chain": chain
-        }
+        return infer_train_chain(conn, train_id)
 
 
 @app.post("/event")

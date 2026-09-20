@@ -63,6 +63,44 @@ CREATE INDEX IF NOT EXISTS idx_event_train ON event(train_id);
 CREATE INDEX IF NOT EXISTS idx_event_object ON event(object_id);
 CREATE INDEX IF NOT EXISTS idx_event_type ON event(event_type);
 
+-- Historical berth transition evidence derived from observed train chains
+CREATE TABLE IF NOT EXISTS berth_transition_counts (
+    headcode TEXT NOT NULL,
+    from_berth TEXT NOT NULL,
+    to_berth TEXT NOT NULL,
+    transition_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_ts TEXT NOT NULL,
+    last_seen_ts TEXT NOT NULL,
+    PRIMARY KEY (headcode, from_berth, to_berth)
+);
+
+CREATE INDEX IF NOT EXISTS idx_berth_transition_headcode_from
+    ON berth_transition_counts(headcode, from_berth);
+CREATE INDEX IF NOT EXISTS idx_berth_transition_headcode_last_seen
+    ON berth_transition_counts(headcode, last_seen_ts);
+
+-- Historical headcode route patterns for gap-filling and auditability
+CREATE TABLE IF NOT EXISTS headcode_route_patterns (
+    headcode TEXT NOT NULL,
+    route_key TEXT NOT NULL,
+    berth_sequence_json TEXT NOT NULL,
+    observations INTEGER NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (headcode, route_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_headcode_route_patterns_headcode
+    ON headcode_route_patterns(headcode, observations DESC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS route_inference_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    algorithm_version TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    summary_json TEXT NOT NULL
+);
+
 -- Insert sample layout
 INSERT INTO layout (id, name, description, data) VALUES 
     ('demo', 'Demo Station', 'Simple demonstration layout with one platform', '{"version": "1.0", "type": "station"}');
