@@ -23,6 +23,17 @@ def _parse_ts(value: str | None) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _headcode_from_payload(payload: str | None) -> str | None:
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    headcode = data.get("headcode")
+    return headcode if isinstance(headcode, str) and headcode else None
+
+
 def build_observed_chain(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> list[dict[str, Any]]:
     """Build direct berth occupancy periods from enter/exit events."""
     chain: list[dict[str, Any]] = []
@@ -59,7 +70,7 @@ def build_observed_chain(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> list[d
 def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
     """Rebuild transition counts and route patterns from historical events."""
     started_at = _utc_now()
-    grouped_rows: dict[str, dict[str, Any]] = {}
+    grouped_rows: dict[tuple[str, str], dict[str, Any]] = {}
 
     rows = conn.execute(
         """
@@ -69,7 +80,8 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
             e.id,
             e.ts,
             e.event_type,
-            e.object_id
+            e.object_id,
+            e.payload
         FROM event e
         LEFT JOIN train t ON t.id = e.train_id
         WHERE e.train_id IS NOT NULL
@@ -80,9 +92,11 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
 
     for row in rows:
         train_id = row[0]
+        headcode = _headcode_from_payload(row[6]) or row[1]
+        group_key = (train_id, headcode)
         group = grouped_rows.setdefault(
-            train_id,
-            {"headcode": row[1], "rows": []},
+            group_key,
+            {"headcode": headcode, "rows": []},
         )
         group["rows"].append(
             {
@@ -122,9 +136,9 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
                 )
                 evidence_ts = right["enter_time"] or left["exit_time"] or left["enter_time"]
                 stats["transition_count"] += 1
-                if evidence_ts < stats["first_seen_ts"]:
+                if _parse_ts(evidence_ts) < _parse_ts(stats["first_seen_ts"]):
                     stats["first_seen_ts"] = evidence_ts
-                if evidence_ts > stats["last_seen_ts"]:
+                if _parse_ts(evidence_ts) > _parse_ts(stats["last_seen_ts"]):
                     stats["last_seen_ts"] = evidence_ts
 
             pattern_key = (headcode, tuple(sequence))
@@ -137,7 +151,7 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
             )
             pattern["observations"] += 1
             updated_at = chain[-1]["exit_time"] or chain[-1]["enter_time"]
-            if updated_at > pattern["updated_at"]:
+            if _parse_ts(updated_at) > _parse_ts(pattern["updated_at"]):
                 pattern["updated_at"] = updated_at
 
         for (headcode, from_berth, to_berth), stats in sorted(transition_counts.items()):
@@ -374,15 +388,19 @@ def infer_train_chain(conn: sqlite3.Connection, train_id: str) -> dict[str, Any]
         if index == len(observed_chain) - 1:
             continue
         next_item = observed_chain[index + 1]
-        chain.extend(
-            _infer_gap_items(
-                item["berth_id"],
-                next_item["berth_id"],
-                headcode,
-                patterns,
-                transition_stats,
-                totals_by_from,
-            )
+        inferred_items = _infer_gap_items(
+            item["berth_id"],
+            next_item["berth_id"],
+            headcode,
+            patterns,
+            transition_stats,
+            totals_by_from,
         )
+        for inferred_item in inferred_items:
+            if inferred_item["berth_id"] == next_item["berth_id"]:
+                continue
+            if chain and chain[-1]["berth_id"] == inferred_item["berth_id"]:
+                continue
+            chain.append(inferred_item)
 
     return {"train_id": train_id, "chain": chain}

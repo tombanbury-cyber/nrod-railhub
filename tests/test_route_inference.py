@@ -123,3 +123,77 @@ def test_infer_train_chain_falls_back_to_raw_order_without_history():
     finally:
         conn.close()
         Path(db_path).unlink()
+
+
+def test_infer_train_chain_does_not_duplicate_observed_intermediate_berths():
+    """Test observed intermediate berths are not duplicated by inferred items."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            INSERT INTO train (id, headcode, description, toc) VALUES
+                ('H1', '2C90', 'Historic One', 'GW'),
+                ('T2', '2C90', 'Current Train', 'GW');
+
+            INSERT INTO event (ts, source, train_id, event_type, object_id, payload) VALUES
+                ('2026-02-14T10:00:00Z', 'td', 'H1', 'berth_enter', 'BRTH_1', '{}'),
+                ('2026-02-14T10:01:00Z', 'td', 'H1', 'berth_exit', 'BRTH_1', '{}'),
+                ('2026-02-14T10:01:01Z', 'td', 'H1', 'berth_enter', 'BRTH_4', '{}'),
+                ('2026-02-14T10:02:00Z', 'td', 'H1', 'berth_exit', 'BRTH_4', '{}'),
+                ('2026-02-14T10:02:01Z', 'td', 'H1', 'berth_enter', 'BRTH_7', '{}'),
+                ('2026-02-14T12:00:00Z', 'td', 'T2', 'berth_enter', 'BRTH_1', '{}'),
+                ('2026-02-14T12:01:00Z', 'td', 'T2', 'berth_exit', 'BRTH_1', '{}'),
+                ('2026-02-14T12:01:01Z', 'td', 'T2', 'berth_enter', 'BRTH_4', '{}'),
+                ('2026-02-14T12:02:00Z', 'td', 'T2', 'berth_exit', 'BRTH_4', '{}'),
+                ('2026-02-14T12:02:01Z', 'td', 'T2', 'berth_enter', 'BRTH_7', '{}');
+            """
+        )
+
+        rebuild_route_patterns(conn)
+        chain = infer_train_chain(conn, "T2")
+
+        assert [item["berth_id"] for item in chain["chain"]] == ["BRTH_1", "BRTH_4", "BRTH_7"]
+        assert sum(1 for item in chain["chain"] if item["berth_id"] == "BRTH_4") == 1
+        assert all(item["inferred"] is False for item in chain["chain"])
+    finally:
+        conn.close()
+        Path(db_path).unlink()
+
+
+def test_rebuild_route_patterns_splits_shared_train_history_by_payload_headcode():
+    """Test rebuild attributes transitions to payload headcodes when train IDs are reused."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            INSERT INTO train (id, headcode, description, toc) VALUES
+                ('SHARED', '2C90', 'Shared Record', 'GW');
+
+            INSERT INTO event (ts, source, train_id, event_type, object_id, payload) VALUES
+                ('2026-02-14T10:00:00Z', 'td', 'SHARED', 'berth_enter', 'BRTH_1', '{"headcode":"2C90"}'),
+                ('2026-02-14T10:01:00Z', 'td', 'SHARED', 'berth_exit', 'BRTH_1', '{"headcode":"2C90"}'),
+                ('2026-02-14T10:01:01Z', 'td', 'SHARED', 'berth_enter', 'BRTH_2', '{"headcode":"2C90"}'),
+                ('2026-02-14T11:00:00Z', 'td', 'SHARED', 'berth_enter', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T11:01:00Z', 'td', 'SHARED', 'berth_exit', 'BRTH_8', '{"headcode":"1A01"}'),
+                ('2026-02-14T11:01:01Z', 'td', 'SHARED', 'berth_enter', 'BRTH_6', '{"headcode":"1A01"}');
+            """
+        )
+
+        rebuild_route_patterns(conn)
+        rows = conn.execute(
+            """
+            SELECT headcode, from_berth, to_berth, transition_count
+            FROM berth_transition_counts
+            ORDER BY headcode, from_berth, to_berth
+            """
+        ).fetchall()
+
+        assert rows == [
+            ("1A01", "BRTH_8", "BRTH_6", 1),
+            ("2C90", "BRTH_1", "BRTH_2", 1),
+        ]
+    finally:
+        conn.close()
+        Path(db_path).unlink()
