@@ -143,7 +143,9 @@ curl http://127.0.0.1:8000/trains
 ```
 
 #### `GET /train/{train_id}/chain`
-Build a journey chain for a train from event records.
+Build a journey chain for a train from event records. Direct berth enter/exit
+observations are returned when available, and historical route inference may
+insert additional chain items when a headcode has a stronger known berth path.
 
 **Example:**
 ```bash
@@ -158,12 +160,29 @@ curl http://127.0.0.1:8000/train/T1/chain
     {
       "berth_id": "BRTH_1",
       "enter_time": "2026-02-14T10:00:00Z",
-      "exit_time": "2026-02-14T10:01:00Z"
+      "exit_time": "2026-02-14T10:01:00Z",
+      "inferred": false,
+      "confidence": 1.0,
+      "source": "observed",
+      "reason": "Observed berth enter/exit events"
     },
     {
       "berth_id": "BRTH_2",
+      "enter_time": null,
+      "exit_time": null,
+      "inferred": true,
+      "confidence": 0.92,
+      "source": "historical_route_pattern",
+      "reason": "Inferred between BRTH_1 and BRTH_3 using historical headcode 2C90 transitions"
+    },
+    {
+      "berth_id": "BRTH_3",
       "enter_time": "2026-02-14T10:01:01Z",
-      "exit_time": null
+      "exit_time": null,
+      "inferred": false,
+      "confidence": 1.0,
+      "source": "observed",
+      "reason": "Observed berth enter event"
     }
   ]
 }

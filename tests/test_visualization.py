@@ -12,23 +12,29 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.visualisation.route_inference import rebuild_route_patterns
+
+
+def _create_visualisation_db() -> str:
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    init_sql_path = Path(__file__).parent.parent / "sql" / "init_db.sql"
+    with open(init_sql_path, "r", encoding="utf-8") as f:
+        init_sql = f.read()
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(init_sql)
+    conn.close()
+    return db_path
+
 
 def test_database_schema():
     """Test that the database schema is created correctly."""
-    # Create a temporary database
-    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
-        db_path = f.name
-    
+    db_path = _create_visualisation_db()
+
     try:
-        # Run the init script
-        init_sql_path = Path(__file__).parent.parent / 'sql' / 'init_db.sql'
-        with open(init_sql_path, 'r') as f:
-            init_sql = f.read()
-        
         conn = sqlite3.connect(db_path)
-        conn.executescript(init_sql)
-        
-        # Verify tables exist
         cursor = conn.cursor()
         tables = cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -40,8 +46,10 @@ def test_database_schema():
         assert 'signal' in table_names
         assert 'train' in table_names
         assert 'event' in table_names
+        assert 'berth_transition_counts' in table_names
+        assert 'headcode_route_patterns' in table_names
+        assert 'route_inference_runs' in table_names
         
-        # Verify sample data
         layout_count = cursor.execute("SELECT COUNT(*) FROM layout").fetchone()[0]
         assert layout_count == 1
         
@@ -83,6 +91,58 @@ def test_event_model():
     assert event.ts == "2026-02-14T10:00:00Z"
     assert event.train_id == "T1"
     assert event.event_type == "berth_enter"
+
+
+def test_train_chain_endpoint_returns_inference_metadata(monkeypatch):
+    """Test chain endpoint exposes inferred route items with metadata."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            INSERT INTO train (id, headcode, description, toc) VALUES
+                ('H1', '2C90', 'Historic One', 'GW'),
+                ('H2', '2C90', 'Historic Two', 'GW'),
+                ('T2', '2C90', 'Current Train', 'GW');
+
+            INSERT INTO event (ts, source, train_id, event_type, object_id, payload) VALUES
+                ('2026-02-14T10:00:00Z', 'td', 'H1', 'berth_enter', 'BRTH_1', '{}'),
+                ('2026-02-14T10:01:00Z', 'td', 'H1', 'berth_exit', 'BRTH_1', '{}'),
+                ('2026-02-14T10:01:01Z', 'td', 'H1', 'berth_enter', 'BRTH_4', '{}'),
+                ('2026-02-14T10:02:00Z', 'td', 'H1', 'berth_exit', 'BRTH_4', '{}'),
+                ('2026-02-14T10:02:01Z', 'td', 'H1', 'berth_enter', 'BRTH_7', '{}'),
+                ('2026-02-14T10:03:00Z', 'td', 'H1', 'berth_exit', 'BRTH_7', '{}'),
+                ('2026-02-14T11:00:00Z', 'td', 'H2', 'berth_enter', 'BRTH_1', '{}'),
+                ('2026-02-14T11:01:00Z', 'td', 'H2', 'berth_exit', 'BRTH_1', '{}'),
+                ('2026-02-14T11:01:01Z', 'td', 'H2', 'berth_enter', 'BRTH_4', '{}'),
+                ('2026-02-14T11:02:00Z', 'td', 'H2', 'berth_exit', 'BRTH_4', '{}'),
+                ('2026-02-14T11:02:01Z', 'td', 'H2', 'berth_enter', 'BRTH_7', '{}'),
+                ('2026-02-14T11:03:00Z', 'td', 'H2', 'berth_exit', 'BRTH_7', '{}'),
+                ('2026-02-14T12:00:00Z', 'td', 'T2', 'berth_enter', 'BRTH_1', '{}'),
+                ('2026-02-14T12:01:00Z', 'td', 'T2', 'berth_exit', 'BRTH_1', '{}'),
+                ('2026-02-14T12:02:00Z', 'td', 'T2', 'berth_enter', 'BRTH_7', '{}');
+            """
+        )
+        rebuild_route_patterns(conn)
+        conn.close()
+
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        response = client.get("/train/T2/chain")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["train_id"] == "T2"
+        assert [item["berth_id"] for item in data["chain"]] == ["BRTH_1", "BRTH_4", "BRTH_7"]
+        assert data["chain"][0]["inferred"] is False
+        assert data["chain"][1]["inferred"] is True
+        assert data["chain"][1]["confidence"] > 0
+        assert data["chain"][1]["source"] == "historical_route_pattern"
+        assert "historical headcode 2C90" in data["chain"][1]["reason"]
+    finally:
+        Path(db_path).unlink()
 
 
 if __name__ == '__main__':
