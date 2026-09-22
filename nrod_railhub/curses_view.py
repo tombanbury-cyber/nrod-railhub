@@ -225,7 +225,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, listener: Optional
         "HTTP Requests",
         "Interesting Trains",
     ]
-    interesting_lines = _collect_interesting_lines(listener)
+    interesting_lines = _collect_interesting_lines(listener, state.td_area_filter)
     page_lines = [
         state.console_lines,
         state.trust_lines,
@@ -264,16 +264,26 @@ def _render_footer(stdscr, h: int, w: int) -> None:
         pass
 
 
-def _collect_interesting_lines(listener: Optional[Listener]) -> List[str]:
+def _collect_interesting_lines(listener: Optional[Listener], td_area_filter: Optional[List[str]] = None) -> List[str]:
     """Build a text summary of interesting trains from live listener state."""
     hv = getattr(listener, "hv", None) if listener else None
     if not hv:
         return ["No interesting trains identified right now."]
 
+    allowed_areas = {
+        area.strip().upper()
+        for area in (td_area_filter or [])
+        if area and area.strip()
+    }
+    if not allowed_areas:
+        allowed_areas = None
+
     categories = ["Steam", "Track Equipment", "ECS", "Specials", "Diesel"]
     grouped = {category: [] for category in categories}
 
     for (td_area, headcode), td in sorted(hv.td_by_headcode.items(), key=lambda item: item[1].last_time_ms or 0, reverse=True):
+        if allowed_areas and (td_area or "").strip().upper() not in allowed_areas:
+            continue
         timetable = hv.get_timetable_fields(headcode)
         interesting_type = classify_interesting_train(
             headcode=headcode,
