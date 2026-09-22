@@ -1628,7 +1628,14 @@ class RailDB:
                     # Store raw JSON if available
                     raw_json = json.dumps(row) if self.save_raw_json else None
                 except Exception as exc:
-                    logger.warning(f"Skipping malformed CORPUS row during persistence: {exc}")
+                    row_identity = ", ".join(
+                        f"{key}={row.get(key)!r}"
+                        for key in ("TIPLOC", "STANOX", "3ALPHA", "NLC")
+                        if row.get(key) not in (None, "")
+                    ) or "no identifiers"
+                    logger.warning(
+                        f"Skipping malformed CORPUS row during persistence ({row_identity}): {exc}"
+                    )
                     continue
                 
                 # Skip records without a name
