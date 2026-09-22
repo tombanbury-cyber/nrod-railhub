@@ -76,7 +76,7 @@ def test_smart_schema_creation():
 
 
 def test_corpus_data_persistence():
-    """Test that CORPUS data can be inserted and queried."""
+    """Test that CORPUS data can be inserted and queried with numeric fields."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
         db_path = tmp_db.name
     
@@ -89,7 +89,7 @@ def test_corpus_data_persistence():
                 "TIPLOC": "CLPHMJC",
                 "STANOX": "87701",
                 "3ALPHA": "CLJ",
-                "NLC": "1234",
+                "NLC": 1234,
                 "NLCDESC": "CLAPHAM JUNCTION"
             },
             {
@@ -116,6 +116,7 @@ def test_corpus_data_persistence():
         assert result["tiploc"] == "CLPHMJC"
         assert result["stanox"] == "87701"
         assert result["crs"] == "CLJ"
+        assert result["nlc"] == "1234"
         assert result["name"] == "CLAPHAM JUNCTION"
         
         # Query by STANOX
@@ -134,6 +135,56 @@ def test_corpus_data_persistence():
         assert result is None
         
         print("✓ CORPUS data persistence and retrieval works correctly")
+        
+    finally:
+        os.unlink(db_path)
+
+
+def test_corpus_data_persistence_skips_malformed_row():
+    """Test that one malformed CORPUS row does not abort the whole import."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
+        db_path = tmp_db.name
+    
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        
+        corpus_data = [
+            {
+                "TIPLOC": "CLPHMJC",
+                "STANOX": "87701",
+                "3ALPHA": "CLJ",
+                "NLC": 1234,
+                "NLCDESC": "CLAPHAM JUNCTION"
+            },
+            {
+                "TIPLOC": "BADJSON",
+                "STANOX": "99999",
+                "NLCDESC": "BROKEN ROW",
+                "EXTRA": object(),
+            },
+            {
+                "TIPLOC": "VICTRIC",
+                "STANOX": "87700",
+                "3ALPHA": "VIC",
+                "NLCDESC": "LONDON VICTORIA"
+            },
+        ]
+        
+        count = db.populate_corpus_data(corpus_data)
+        assert count == 2, f"Expected 2 persisted rows after skipping malformed row, got {count}"
+        
+        result = db.get_corpus_location(tiploc="CLPHMJC")
+        assert result is not None
+        assert result["nlc"] == "1234"
+        
+        result = db.get_corpus_location(tiploc="VICTRIC")
+        assert result is not None
+        assert result["name"] == "LONDON VICTORIA"
+        
+        result = db.get_corpus_location(tiploc="BADJSON")
+        assert result is None
+        
+        print("✓ Malformed CORPUS row is skipped without aborting the batch")
         
     finally:
         os.unlink(db_path)
@@ -298,6 +349,7 @@ def test_resolver_corpus_integration():
                     "TIPLOC": "CLPHMJC",
                     "STANOX": "87701",
                     "3ALPHA": "CLJ",
+                    "NLC": 1234,
                     "NLCDESC": "CLAPHAM JUNCTION"
                 },
                 {
@@ -324,6 +376,7 @@ def test_resolver_corpus_integration():
         db = RailDB(db_path, enable_mapper=False)
         result = db.get_corpus_location(tiploc="CLPHMJC")
         assert result is not None
+        assert result["nlc"] == "1234"
         assert result["name"] == "CLAPHAM JUNCTION"
         
         result = db.get_corpus_location(crs="VIC")

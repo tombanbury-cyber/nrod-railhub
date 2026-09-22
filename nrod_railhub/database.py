@@ -1599,18 +1599,37 @@ class RailDB:
         Returns:
             Number of records inserted/updated
         """
+        from .logging_config import get_logger
+
+        logger = get_logger("database")
+
+        def _normalize(value: Any, *, upper: bool = False) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            return text.upper() if upper else text
+
         count = 0
         with self._lock, self._conn:
             for row in corpus_data:
                 if not isinstance(row, dict):
                     continue
                 
-                # Extract fields from CORPUS format
-                tiploc = (row.get("TIPLOC") or "").strip().upper() or None
-                stanox = (row.get("STANOX") or "").strip() or None
-                crs = (row.get("3ALPHA") or "").strip().upper() or None
-                nlc = (row.get("NLC") or "").strip() or None
-                name = (row.get("NLCDESC") or row.get("NLCDESC16") or "").strip()
+                try:
+                    # Extract fields from CORPUS format
+                    tiploc = _normalize(row.get("TIPLOC"), upper=True)
+                    stanox = _normalize(row.get("STANOX"))
+                    crs = _normalize(row.get("3ALPHA"), upper=True)
+                    nlc = _normalize(row.get("NLC"))
+                    name = _normalize(row.get("NLCDESC")) or _normalize(row.get("NLCDESC16")) or ""
+                    
+                    # Store raw JSON if available
+                    raw_json = json.dumps(row) if self.save_raw_json else None
+                except Exception as exc:
+                    logger.warning(f"Skipping malformed CORPUS row during persistence: {exc}")
+                    continue
                 
                 # Skip records without a name
                 if not name:
@@ -1619,9 +1638,6 @@ class RailDB:
                 # Skip records without any identifying code
                 if not any([tiploc, stanox, crs]):
                     continue
-                
-                # Store raw JSON if available
-                raw_json = json.dumps(row) if self.save_raw_json else None
                 
                 # Use COALESCE to handle NULLs in PRIMARY KEY
                 self._conn.execute(
@@ -1827,4 +1843,3 @@ class RailDB:
             )
             return [row[0] for row in cursor.fetchall()]
     
-
