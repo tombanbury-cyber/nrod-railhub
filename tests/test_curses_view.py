@@ -216,6 +216,32 @@ def test_collect_interesting_lines_groups_by_type():
     assert any("1Z99" in line for line in lines)
 
 
+def test_collect_interesting_lines_respects_td_area_filter():
+    """Test that interesting trains are limited to the selected TD area."""
+    from types import SimpleNamespace
+
+    class FakeHV:
+        def __init__(self):
+            self.td_by_headcode = {
+                ("EK", "2C90"): SimpleNamespace(last_time_ms=200, from_berth="A", to_berth="B"),
+                ("AD", "1S01"): SimpleNamespace(last_time_ms=100, from_berth="C", to_berth="D"),
+            }
+
+        def get_timetable_fields(self, headcode):
+            if headcode == "2C90":
+                return {"category": "DD", "power_type": "D", "origin": "Woking", "dest": "Waterloo"}
+            return {"category": "", "power_type": "S", "origin": "York", "dest": "Scarborough"}
+
+        def decode_last_location(self, td_area, headcode):
+            return {"name": f"{td_area} Location", "stanox": "12345", "platform": "1"}
+
+    fake_listener = SimpleNamespace(hv=FakeHV())
+    lines = _collect_interesting_lines(fake_listener, td_area_filter=["EK"])
+
+    assert any("2C90" in line for line in lines)
+    assert not any("1S01" in line for line in lines)
+
+
 def test_cattr_function():
     """Test color attribute function (basic functionality)."""
     # Should not crash even if curses isn't initialized
