@@ -128,6 +128,35 @@ class RailDB:
                 CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
 
+                CREATE TABLE IF NOT EXISTS td_sclass_state (
+                    td_area TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    msg_type TEXT NOT NULL,
+                    last_seen_ts INTEGER NOT NULL,
+                    last_seen_iso TEXT NOT NULL,
+                    raw_data TEXT NOT NULL,
+                    byte_length INTEGER NOT NULL,
+                    PRIMARY KEY (td_area, address)
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_state_area_ts ON td_sclass_state(td_area, last_seen_ts);
+
+                CREATE TABLE IF NOT EXISTS td_sclass_changes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    td_area TEXT NOT NULL,
+                    msg_type TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    byte_offset INTEGER NOT NULL DEFAULT 0,
+                    bit INTEGER NOT NULL,
+                    old_state INTEGER NOT NULL,
+                    new_state INTEGER NOT NULL,
+                    raw_old TEXT NOT NULL,
+                    raw_new TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_ts ON td_sclass_changes(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_addr_ts ON td_sclass_changes(td_area, address, ts_ms);
+
                 CREATE TABLE IF NOT EXISTS trust_state (
                     train_id TEXT PRIMARY KEY,
                     headcode TEXT,
@@ -384,7 +413,101 @@ class RailDB:
         if self._retention_thread and self._retention_thread.is_alive():
             self._retention_stop_event.set()
             self._retention_thread.join(timeout=5.0)
-    
+
+    @staticmethod
+    def _normalize_sclass_bytes(data: Any) -> Optional[bytes]:
+        """Convert S-class payload data to raw bytes when possible."""
+        if data is None:
+            return None
+        if isinstance(data, bytes):
+            return data
+        if isinstance(data, bytearray):
+            return bytes(data)
+
+        text = str(data).strip()
+        if not text:
+            return None
+
+        cleaned = text.replace(" ", "").replace("\t", "").replace("\n", "").replace("\r", "")
+        cleaned = cleaned.replace(":", "").replace("-", "").replace("_", "").replace(",", "")
+        if cleaned.lower().startswith("0x"):
+            cleaned = cleaned[2:]
+        if len(cleaned) % 2 != 0:
+            return None
+        try:
+            return bytes.fromhex(cleaned)
+        except ValueError:
+            return None
+
+    def _persist_td_sclass_state(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str) -> None:
+        """Persist S-class snapshot state and derived bit transitions."""
+        payload = self._normalize_sclass_bytes(data)
+        if not payload:
+            return
+
+        raw_new = payload.hex().upper()
+        byte_length = len(payload)
+
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT raw_data, byte_length FROM td_sclass_state WHERE td_area=? AND address=?",
+                (area, address),
+            )
+            previous = cursor.fetchone()
+            prev_payload = self._normalize_sclass_bytes(previous[0]) if previous else None
+
+            cursor.execute(
+                """
+                INSERT INTO td_sclass_state(td_area, address, msg_type, last_seen_ts, last_seen_iso, raw_data, byte_length)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(td_area, address) DO UPDATE SET
+                    msg_type=excluded.msg_type,
+                    last_seen_ts=excluded.last_seen_ts,
+                    last_seen_iso=excluded.last_seen_iso,
+                    raw_data=excluded.raw_data,
+                    byte_length=excluded.byte_length
+                """,
+                (area, address, msg_type, ts_ms, ts_iso, raw_new, byte_length),
+            )
+
+            if not prev_payload or len(prev_payload) != len(payload):
+                return
+
+            for byte_offset, (old_byte, new_byte) in enumerate(zip(prev_payload, payload)):
+                if old_byte == new_byte:
+                    continue
+                changed_bits = old_byte ^ new_byte
+                if not changed_bits:
+                    continue
+                raw_old = f"{old_byte:02X}"
+                raw_new_byte = f"{new_byte:02X}"
+                for bit in range(7, -1, -1):
+                    mask = 1 << bit
+                    if not (changed_bits & mask):
+                        continue
+                    cursor.execute(
+                        """
+                        INSERT INTO td_sclass_changes(
+                            ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit,
+                            old_state, new_state, raw_old, raw_new
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            ts_ms,
+                            ts_iso,
+                            area,
+                            msg_type,
+                            address,
+                            byte_offset,
+                            bit,
+                            1 if (old_byte & mask) else 0,
+                            1 if (new_byte & mask) else 0,
+                            raw_old,
+                            raw_new_byte,
+                        ),
+                    )
+
     def purge_old_data(self) -> dict:
         """
         Purge old trust_messages, vstp_schedules, and cif_schedules based on retention settings.
@@ -596,6 +719,12 @@ class RailDB:
                 "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, msg_type, address, data or ""),
             )
+
+        if msg_type in ("SF", "SG", "SH"):
+            try:
+                self._persist_td_sclass_state(ts_ms, ts_iso, area, msg_type, address, data or "")
+            except Exception as e:
+                logger.error(f"insert_td_signal_event: S-class state decode failed: {type(e).__name__}: {e}")
         
         # Add to mapper batch if enabled
         if self.enable_mapper:

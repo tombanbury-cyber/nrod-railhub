@@ -960,6 +960,29 @@ filterInput.addEventListener('input', updateFilter);
         for r in rows:
             body.append(f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['td_area']}</td><td>{r['msg_type']}</td><td>{r['address']}</td><td>{r['data'] if r['data'] else ''}</td></tr>")
         body.append("</table>")
+
+        body.append("<h3 style='margin-top:28px'>Decoded S-Class Bit Changes</h3>")
+        try:
+            change_rows = q(
+                """
+                SELECT ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit, old_state, new_state, raw_old, raw_new
+                FROM td_sclass_changes
+                ORDER BY ts_ms DESC, id DESC
+                LIMIT 500
+                """
+            )
+        except Exception:
+            change_rows = []
+
+        body.append("<table><tr><th>Time</th><th>Area</th><th>Type</th><th>Bit</th><th>Change</th><th>Raw</th></tr>")
+        for r in change_rows:
+            bit_label = f"{r['address']}.{r['bit']}" if int(r["byte_offset"] or 0) == 0 else f"{r['address']}+{r['byte_offset']}.{r['bit']}"
+            change_label = f"{'ON' if r['old_state'] else 'OFF'} → {'ON' if r['new_state'] else 'OFF'}"
+            body.append(
+                f"<tr><td class='mono'>{r['ts_iso']}</td><td>{r['td_area']}</td><td>{r['msg_type']}</td>"
+                f"<td class='mono'>{bit_label}</td><td>{change_label}</td><td class='mono'>{r['raw_old']} → {r['raw_new']}</td></tr>"
+            )
+        body.append("</table>")
         return render_page("Signals - NR RailHub", body, active="signals")
 
     @app.get("/trust")

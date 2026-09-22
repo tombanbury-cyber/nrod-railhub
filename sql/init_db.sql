@@ -63,6 +63,42 @@ CREATE INDEX IF NOT EXISTS idx_event_train ON event(train_id);
 CREATE INDEX IF NOT EXISTS idx_event_object ON event(object_id);
 CREATE INDEX IF NOT EXISTS idx_event_type ON event(event_type);
 
+-- Current S-Class state by TD area/address
+CREATE TABLE IF NOT EXISTS td_sclass_state (
+    td_area TEXT NOT NULL,
+    address TEXT NOT NULL,
+    msg_type TEXT NOT NULL,
+    last_seen_ts INTEGER NOT NULL,
+    last_seen_iso TEXT NOT NULL,
+    raw_data TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    PRIMARY KEY (td_area, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_td_sclass_state_area_ts
+    ON td_sclass_state(td_area, last_seen_ts);
+
+-- Derived S-Class bit transitions
+CREATE TABLE IF NOT EXISTS td_sclass_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms INTEGER NOT NULL,
+    ts_iso TEXT NOT NULL,
+    td_area TEXT NOT NULL,
+    msg_type TEXT NOT NULL,
+    address TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    bit INTEGER NOT NULL,
+    old_state INTEGER NOT NULL,
+    new_state INTEGER NOT NULL,
+    raw_old TEXT NOT NULL,
+    raw_new TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_ts
+    ON td_sclass_changes(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_addr_ts
+    ON td_sclass_changes(td_area, address, ts_ms);
+
 -- Historical berth transition evidence derived from observed train chains
 CREATE TABLE IF NOT EXISTS berth_transition_counts (
     headcode TEXT NOT NULL,
