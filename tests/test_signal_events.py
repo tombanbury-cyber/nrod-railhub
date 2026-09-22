@@ -152,7 +152,93 @@ def test_berth_events_still_work():
             os.unlink(db_path)
 
 
+def test_sclass_bit_changes_are_decoded_and_persisted():
+    """Test that S-class snapshots and bit transitions are stored."""
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        hv = HumanView()
+        args = argparse.Namespace(
+            verbose=False,
+            width=96,
+            headcode=None,
+            uid=None,
+            td_area=None,
+            trace_headcode=False,
+            only_changes=True,
+            repeat_after=300
+        )
+        listener = Listener(hv, args, db)
+
+        class MockFrame:
+            def __init__(self, body):
+                self.body = body
+                self.headers = {"destination": "/topic/TD_ALL_SIG_AREA"}
+
+        snapshot_payload = [
+            {
+                "SG_MSG": {
+                    "msg_type": "SG",
+                    "area_id": "EK",
+                    "address": "D0",
+                    "data": "3F",
+                    "time": "1675354321000"
+                }
+            }
+        ]
+        change_payload = [
+            {
+                "SF_MSG": {
+                    "msg_type": "SF",
+                    "area_id": "EK",
+                    "address": "D0",
+                    "data": "BF",
+                    "time": "1675354322000"
+                }
+            }
+        ]
+
+        listener.on_message(MockFrame(json.dumps(snapshot_payload)))
+        listener.on_message(MockFrame(json.dumps(change_payload)))
+
+        with db._conn:
+            cursor = db._conn.execute(
+                "SELECT msg_type, raw_data FROM td_sclass_state WHERE td_area='EK' AND address='D0'"
+            )
+            state_row = cursor.fetchone()
+            assert state_row is not None
+            assert state_row[0] == "SF"
+            assert state_row[1] == "BF"
+
+            cursor = db._conn.execute(
+                """
+                SELECT ts_ms, td_area, address, byte_offset, bit, old_state, new_state, raw_old, raw_new
+                FROM td_sclass_changes
+                WHERE td_area='EK' AND address='D0'
+                ORDER BY ts_ms
+                """
+            )
+            changes = cursor.fetchall()
+
+        assert len(changes) == 1
+        change = changes[0]
+        assert change[3] == 0
+        assert change[4] == 7
+        assert change[5] == 0
+        assert change[6] == 1
+        assert change[7] == "3F"
+        assert change[8] == "BF"
+
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_signal_event_capture()
     test_berth_events_still_work()
+    test_sclass_bit_changes_are_decoded_and_persisted()
     print("\nAll tests passed! ✓")
