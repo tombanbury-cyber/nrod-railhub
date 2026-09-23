@@ -14,7 +14,7 @@ def main():
         args.log_level = "verbose"
     
     # Setup logging based on command-line argument
-    setup_logger(args.log_level)
+    setup_logger(args.log_level, console=not args.interactive)
     
     if not args.pretty and not args.raw:
         args.pretty = True

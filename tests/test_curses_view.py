@@ -10,6 +10,8 @@ from nrod_railhub.curses_view import (
     _init_colors,
     _cattr,
     QueueHandler,
+    _advance_startup_page,
+    _seed_startup_page,
     _collect_interesting_lines,
 )
 
@@ -33,7 +35,7 @@ def test_interactive_dashboard_state_creation():
     assert len(state.error_lines) == 0
     assert len(state.db_lines) == 0
     assert len(state.http_lines) == 0
-    assert state.current_page == 0
+    assert state.current_page == 3
 
 
 def test_dashboard_state_note_message():
@@ -158,7 +160,7 @@ def test_dashboard_state_page_navigation():
     """Test page navigation in dashboard state."""
     state = InteractiveDashboardState()
     
-    assert state.current_page == 0
+    assert state.current_page == 3
     
     # Simulate page changes
     state.current_page = 1
@@ -170,6 +172,46 @@ def test_dashboard_state_page_navigation():
     # Test wraparound (now 7 pages instead of 6)
     state.current_page = (state.current_page + 1) % 7
     assert state.current_page == 0
+
+
+def test_startup_page_advances_to_td_page_after_delay():
+    """Test that the startup page automatically returns to TD after the hold time."""
+    state = InteractiveDashboardState()
+    _seed_startup_page(state, "Startup complete", hold_seconds=0.01)
+
+    assert state.current_page == 3
+    assert list(state.error_lines)[-1] == "Startup complete"
+
+    _advance_startup_page(state, now=state.startup_page_until + 0.01)
+
+    assert state.current_page == 0
+    assert state.startup_page_until is None
+
+
+def test_run_interactive_dashboard_seeds_startup_page(monkeypatch):
+    """Test that the interactive dashboard starts on the startup/error page."""
+    from types import SimpleNamespace
+    from nrod_railhub.curses_view import run_interactive_dashboard
+
+    captured = {}
+
+    def fake_wrapper(func, **kwargs):
+        captured["state"] = kwargs["state"]
+        return None
+
+    monkeypatch.setattr("nrod_railhub.curses_view.curses.wrapper", fake_wrapper)
+
+    run_interactive_dashboard(
+        listener=SimpleNamespace(),
+        output_queue=queue.Queue(),
+        startup_message="Startup ready",
+        startup_hold_seconds=1.0,
+    )
+
+    state = captured["state"]
+    assert state.current_page == 3
+    assert list(state.error_lines)[-1] == "Startup ready"
+    assert state.startup_page_until is not None
 
 
 def test_collect_interesting_lines_groups_by_type():
@@ -270,17 +312,21 @@ def test_queue_handler():
     # Create a test logger
     test_logger = logging.getLogger('test_queue_handler')
     test_logger.addHandler(handler)
-    test_logger.setLevel(logging.INFO)
+    test_logger.setLevel(logging.DEBUG)
     
     # Log some messages
     test_logger.info("Test info message")
     test_logger.warning("Test warning message")
+    test_logger.debug("Test debug message")
     
     # Check that messages were added to queue
-    assert log_queue.qsize() == 2
+    assert log_queue.qsize() == 3
     
     msg1 = log_queue.get_nowait()
     assert "INFO: Test info message" in msg1
     
     msg2 = log_queue.get_nowait()
     assert "WARNING: Test warning message" in msg2
+
+    msg3 = log_queue.get_nowait()
+    assert "DEBUG: Test debug message" in msg3
