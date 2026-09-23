@@ -34,9 +34,15 @@ The visualization PoC consists of:
 
 ### 1. Initialize the Database
 
-By default, the visualisation API uses the project-root `railhub.db`.
-To run it against your main NROD RailHub SQLite database, point the API at
-that file with `NROD_RAILHUB_DB`.
+By default, the visualisation API uses the project-root `railhub.db`:
+
+```bash
+cd /path/to/nrod-railhub
+sqlite3 railhub.db < sql/init_db.sql
+```
+
+To run it against your main NROD RailHub SQLite database instead, point the
+API at that file with `NROD_RAILHUB_DB`.
 
 Before applying the PoC schema to an existing main database, make a backup:
 
@@ -44,7 +50,7 @@ Before applying the PoC schema to an existing main database, make a backup:
 cp /path/to/main.sqlite /path/to/main.sqlite.backup
 ```
 
-Then apply the schema:
+Then apply the schema to that existing main database:
 
 ```bash
 cd /path/to/nrod-railhub
