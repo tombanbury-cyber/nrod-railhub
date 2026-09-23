@@ -72,6 +72,7 @@ class RailDB:
             self.ensure_mapper_schema()
             # Initialize batch processing for mapper
             self._event_batch: list = []
+            self._mapper_tail_events: list = []
             self._batch_lock = threading.Lock()
             self._batch_size = 100  # Process when we hit this many events
             self._start_batch_processor()
@@ -741,7 +742,7 @@ class RailDB:
                 'descr': None
             })
 
-    def insert_observation(self, obs_row: tuple) -> None:
+    def insert_observation(self, obs_row: tuple) -> bool:
         """Insert a berth-signal observation from mapper.
         
         Args:
@@ -750,7 +751,7 @@ class RailDB:
                      data, dt_ms, weight)
         """
         with self._lock, self._conn:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 """
                 INSERT INTO berth_signal_observations (
                     td_area, step_event_id, step_timestamp, from_berth, to_berth, descr,
@@ -760,6 +761,7 @@ class RailDB:
                 """,
                 obs_row
             )
+            return cursor.rowcount == 1
     
     def insert_score(self, score_row: tuple) -> None:
         """Insert or update a berth-signal correlation score from mapper.
@@ -1567,7 +1569,7 @@ class RailDB:
     
     def _process_mapper_batch(self) -> None:
         """Process accumulated events through the mapper."""
-        if not self._event_batch:
+        if not self._event_batch and not getattr(self, "_mapper_tail_events", None):
             return
         
         from .mapper import process_batch_for_mapper
@@ -1580,10 +1582,14 @@ class RailDB:
         post_ms = config.get('post_ms', 5000)
         tau_ms = config.get('tau_ms', 2500)
         
-        # Copy and clear batch
-        events_to_process = self._event_batch[:]
+        # Combine the retained overlap window with the newly queued batch.
+        events_to_process = list(getattr(self, "_mapper_tail_events", [])) + self._event_batch[:]
         self._event_batch = []
-        
+        if not events_to_process:
+            return
+
+        events_to_process.sort(key=lambda event: int(event.get("msg_ts", 0) or 0))
+
         try:
             obs_rows, score_rows = process_batch_for_mapper(
                 events_to_process,
@@ -1593,23 +1599,29 @@ class RailDB:
             )
             
             # Insert observations
-            for obs_row in obs_rows:
+            for obs_row, score_row in zip(obs_rows, score_rows):
                 try:
-                    self.insert_observation(obs_row)
+                    inserted = self.insert_observation(obs_row)
+                    if inserted:
+                        try:
+                            self.insert_score(score_row)
+                        except Exception as e:
+                            logger.error(f"Failed to insert score: {e}")
                 except Exception as e:
                     logger.error(f"Failed to insert observation: {e}")
             
-            # Insert scores
-            for score_row in score_rows:
-                try:
-                    self.insert_score(score_row)
-                except Exception as e:
-                    logger.error(f"Failed to insert score: {e}")
-            
             if obs_rows or score_rows:
                 logger.debug(f"Mapper: processed {len(events_to_process)} events -> {len(obs_rows)} observations, {len(score_rows)} scores")
+            overlap_ms = max(pre_ms, post_ms)
+            latest_ts = max(int(event.get("msg_ts", 0) or 0) for event in events_to_process)
+            cutoff_ts = latest_ts - overlap_ms
+            self._mapper_tail_events = [
+                event for event in events_to_process
+                if int(event.get("msg_ts", 0) or 0) >= cutoff_ts
+            ]
         except Exception as e:
             logger.error(f"Mapper batch processing failed: {e}")
+            self._mapper_tail_events = events_to_process
     
     def _start_batch_processor(self) -> None:
         """Start a background thread to periodically process mapper batches."""

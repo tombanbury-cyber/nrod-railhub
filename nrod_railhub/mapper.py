@@ -46,6 +46,10 @@ def exp_weight(dt_ms: int, tau_ms: int = 2500) -> float:
     """Exponential weighting function for scoring signal correlations."""
     return math.exp(-abs(dt_ms) / float(tau_ms))
 
+
+def _normalise_area(value: Any) -> str:
+    return (value or "").strip().upper()
+
 def process_batch_for_mapper(
     evs: List[Dict[str, Any]],
     *,
@@ -65,18 +69,20 @@ def process_batch_for_mapper(
     logger.debug(f"Mapper: Processing batch of {len(evs)} events (pre={pre_ms}ms, post={post_ms}ms, tau={tau_ms}ms)")
     
     # Filter and sort signals
-    signals = [e for e in evs 
-               if e.get("msg_type") in SIG_TYPES 
-               and e.get("address") 
+    signals = [e for e in evs
+               if e.get("msg_type") in SIG_TYPES
+               and e.get("address")
+               and _normalise_area(e.get("td_area"))
                and int(e.get("msg_ts", 0)) > 0]
     signals.sort(key=lambda e: int(e["msg_ts"]))
     sig_times = [int(e["msg_ts"]) for e in signals]
     
     # Filter and sort steps
-    steps = [e for e in evs 
-             if e.get("msg_type") in STEP_TYPES 
-             and e.get("from_berth") 
-             and e.get("to_berth") 
+    steps = [e for e in evs
+             if e.get("msg_type") in STEP_TYPES
+             and e.get("from_berth")
+             and e.get("to_berth")
+             and _normalise_area(e.get("td_area"))
              and int(e.get("msg_ts", 0)) > 0]
     steps.sort(key=lambda e: int(e["msg_ts"]))
     
@@ -95,11 +101,14 @@ def process_batch_for_mapper(
     
     for st in steps:
         st_ts = int(st["msg_ts"])
+        st_area = _normalise_area(st.get("td_area"))
         # Binary search for signals in time window
         lo = bisect_left(sig_times, st_ts - pre_ms)
         hi = bisect_right(sig_times, st_ts + post_ms)
-        
+
         for s in signals[lo:hi]:
+            if _normalise_area(s.get("td_area")) != st_area:
+                continue
             s_ts = int(s["msg_ts"])
             dt = s_ts - st_ts
             w = exp_weight(dt, tau_ms)
@@ -115,7 +124,7 @@ def process_batch_for_mapper(
                 s_ts,
                 str(s.get("address")),
                 s.get("data"),
-                abs(int(dt)),
+                dt,
                 float(w),
             ))
             

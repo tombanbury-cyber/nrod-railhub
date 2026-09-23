@@ -130,7 +130,7 @@ def test_full_mapper_integration():
             )
             score_data = cursor.fetchone()
             assert score_data is not None
-            assert score_data[1] == 2, f"Expected obs_count=2, got {score_data[1]}"
+            assert score_data[1] == 4, f"Expected obs_count=4, got {score_data[1]}"
             assert score_data[0] > 0, "Score should be positive"
         
         db.close()

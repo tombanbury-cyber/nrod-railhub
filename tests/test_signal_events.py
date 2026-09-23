@@ -237,8 +237,96 @@ def test_sclass_bit_changes_are_decoded_and_persisted():
             os.unlink(db_path)
 
 
+def test_mapper_requires_matching_areas_and_preserves_signed_dt():
+    """Test that correlations stay area-scoped and keep signed time deltas."""
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=True)
+
+        db.insert_td_berth_event(2000, '2024-01-01T00:00:02.000Z', 'EK', '2C90', 'CA', '0001', '0002', '2C90')
+        db.insert_td_signal_event(1500, '2024-01-01T00:00:01.500Z', 'EK', 'SF', 'EK123', '01')
+        db.insert_td_signal_event(1800, '2024-01-01T00:00:01.800Z', 'WK', 'SF', 'WK999', '02')
+
+        with db._batch_lock:
+            db._process_mapper_batch()
+
+        with db._conn:
+            cursor = db._conn.execute("SELECT COUNT(*) FROM berth_signal_observations")
+            obs_count = cursor.fetchone()[0]
+            cursor = db._conn.execute("SELECT COUNT(*) FROM berth_signal_scores")
+            score_count = cursor.fetchone()[0]
+            cursor = db._conn.execute(
+                """
+                SELECT td_area, address, dt_ms
+                FROM berth_signal_observations
+                WHERE td_area='EK' AND address='EK123'
+                """
+            )
+            row = cursor.fetchone()
+
+        assert obs_count == 1
+        assert score_count == 1
+        assert row is not None
+        assert row[0] == 'EK'
+        assert row[1] == 'EK123'
+        assert row[2] == -500
+
+        db.close()
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+def test_mapper_rebuilds_across_batch_boundaries():
+    """Test that retained batch overlap allows cross-batch correlations."""
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=True)
+
+        db.insert_td_berth_event(1000, '2024-01-01T00:00:01.000Z', 'EK', '2C90', 'CA', '0001', '0002', '2C90')
+        with db._batch_lock:
+            db._process_mapper_batch()
+
+        with db._conn:
+            cursor = db._conn.execute("SELECT COUNT(*) FROM berth_signal_observations")
+            assert cursor.fetchone()[0] == 0
+
+        db.insert_td_signal_event(1200, '2024-01-01T00:00:01.200Z', 'EK', 'SF', 'EK123', '01')
+        with db._batch_lock:
+            db._process_mapper_batch()
+
+        with db._conn:
+            cursor = db._conn.execute("SELECT COUNT(*) FROM berth_signal_observations")
+            assert cursor.fetchone()[0] == 1
+            cursor = db._conn.execute(
+                "SELECT dt_ms FROM berth_signal_observations WHERE td_area='EK' AND address='EK123'"
+            )
+            assert cursor.fetchone()[0] == 200
+            cursor = db._conn.execute(
+                "SELECT score, obs_count FROM berth_signal_scores WHERE td_area='EK' AND address='EK123'"
+            )
+            score_row = cursor.fetchone()
+
+        assert score_row is not None
+        assert score_row[1] == 1
+        assert score_row[0] > 0
+
+        db.close()
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_signal_event_capture()
     test_berth_events_still_work()
     test_sclass_bit_changes_are_decoded_and_persisted()
+    test_mapper_requires_matching_areas_and_preserves_signed_dt()
+    test_mapper_rebuilds_across_batch_boundaries()
     print("\nAll tests passed! ✓")
