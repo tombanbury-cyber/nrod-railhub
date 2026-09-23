@@ -222,6 +222,20 @@ curl http://127.0.0.1:8000/train/T1/chain
 }
 ```
 
+#### `GET /state`
+Return the current schematic snapshot. The API reads `td_state` first, then
+falls back to `td_berth_events`, and finally the PoC `event` table if needed.
+This is the endpoint the demo UI polls to rebuild the current view after a
+page reload.
+
+**Example:**
+```bash
+curl http://127.0.0.1:8000/state?area=EK
+```
+
+#### `GET /td/{td_area}/{headcode}/chain`
+Return a TD-backed movement chain for one train in one TD area.
+
 #### `POST /event`
 Create a new event and broadcast to WebSocket clients.
 
@@ -434,13 +448,13 @@ If you are using the main NROD RailHub database, also make sure
 ## Shared Main Database Limitations
 
 Using `NROD_RAILHUB_DB` lets the visualisation API share the same SQLite file
-as the main application, but it does **not** yet convert the main
-`td_berth_events` and `td_state` tables into the PoC `event` and `train`
-display model.
+as the main application. The visualisation now reads live TD state from
+`td_state` and `td_berth_events`, while still supporting the PoC `event`
+table for demo/manual injection.
 
-At present, the visualisation API still reads the PoC tables (`layout`,
-`berth`, `signal`, `train`, and `event`). This change is limited to safe
-shared-database configuration and documentation.
+The schematic UI still uses the PoC layout tables (`layout`, `berth`, `signal`,
+`train`) for the demo geometry, but the live movement data comes from the main
+RailHub TD tables when they are available.
 
 ## Contributing
 

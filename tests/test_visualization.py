@@ -30,6 +30,61 @@ def _create_visualisation_db() -> str:
     return db_path
 
 
+def _create_td_visualisation_db(
+    state_rows: list[tuple] | None = None,
+    event_rows: list[tuple] | None = None,
+) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE td_state (
+            td_area TEXT,
+            headcode TEXT,
+            last_time_ms INTEGER,
+            last_time_iso TEXT,
+            from_berth TEXT,
+            to_berth TEXT,
+            stanox TEXT,
+            location_name TEXT,
+            platform TEXT,
+            uid TEXT
+        );
+
+        CREATE TABLE td_berth_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER,
+            ts_iso TEXT,
+            td_area TEXT,
+            headcode TEXT,
+            msg_type TEXT,
+            from_berth TEXT,
+            to_berth TEXT,
+            descr TEXT
+        );
+        """
+    )
+    if state_rows:
+        conn.executemany(
+            "INSERT INTO td_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            state_rows,
+        )
+    if event_rows:
+        conn.executemany(
+            """
+            INSERT INTO td_berth_events (
+                ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            event_rows,
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
 @pytest.fixture
 def visualisation_db_path() -> Iterator[str]:
     """Create and clean up a temporary visualisation database."""
@@ -233,6 +288,77 @@ def test_train_chain_endpoint_returns_inference_metadata(monkeypatch):
         assert "historical headcode 2C90" in data["chain"][1]["reason"]
     finally:
         Path(db_path).unlink()
+
+
+def test_state_endpoint_reads_td_state_and_scopes_by_area(monkeypatch):
+    """Test the live snapshot endpoint uses td_state and area filters."""
+    db_path = _create_td_visualisation_db(
+        state_rows=[
+            ("EK", "2C90", 200, "2026-02-14T12:00:00Z", "BRTH_1", "BRTH_2", "87701", "Clapham Junction", "2", None),
+            ("WK", "5Z50", 300, "2026-02-14T12:05:00Z", "BRTH_9", "BRTH_10", "12345", "Waterloo", "1", None),
+        ],
+        event_rows=[
+            (150, "2026-02-14T11:59:00Z", "EK", "2C90", "CB", "BRTH_1", "BRTH_2", "EK move"),
+            (250, "2026-02-14T12:04:00Z", "WK", "5Z50", "CA", "BRTH_9", "BRTH_10", "WK move"),
+        ],
+    )
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.get("/state?area=EK")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["source"] == "td_state"
+        assert data["train_count"] == 1
+        assert data["event_count"] == 1
+        assert data["trains"][0]["td_area"] == "EK"
+        assert data["trains"][0]["headcode"] == "2C90"
+        assert data["trains"][0]["current_berth"] == "BRTH_2"
+        assert data["events"][0]["td_area"] == "EK"
+        assert data["events"][0]["headcode"] == "2C90"
+    finally:
+        Path(db_path).unlink()
+
+
+def test_state_endpoint_handles_empty_td_data(monkeypatch):
+    """Test the live snapshot endpoint returns an empty snapshot safely."""
+    db_path = _create_td_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.get("/state")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["source"] == "empty"
+        assert data["train_count"] == 0
+        assert data["event_count"] == 0
+        assert data["trains"] == []
+        assert data["events"] == []
+    finally:
+        Path(db_path).unlink()
+
+
+def test_state_endpoint_returns_503_for_database_errors(monkeypatch):
+    """Test the live snapshot endpoint reports read failures clearly."""
+    import app.visualisation.app as app_module
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app_module, "_fetch_td_snapshot", boom)
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+
+    response = client.get("/state")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database unavailable: database is locked"
 
 
 if __name__ == '__main__':
