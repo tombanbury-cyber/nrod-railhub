@@ -5,6 +5,7 @@ train visualization on schematic layouts.
 """
 
 import asyncio
+import html
 import json
 import os
 import sqlite3
@@ -13,9 +14,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .route_inference import infer_train_chain
 
@@ -35,6 +37,36 @@ class EventCreate(BaseModel):
     event_type: str
     object_id: str
     payload: dict = {}
+
+
+class LayoutPayload(BaseModel):
+    """Model for layout CRUD operations."""
+    id: str
+    name: str
+    description: Optional[str] = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class BerthPayload(BaseModel):
+    """Model for berth CRUD operations."""
+    id: str
+    layout_id: str
+    name: str
+    x: int
+    y: int
+    width: int = 60
+    height: int = 30
+    berth_type: str = "normal"
+
+
+class SignalPayload(BaseModel):
+    """Model for signal CRUD operations."""
+    id: str
+    layout_id: str
+    name: str
+    x: int
+    y: int
+    signal_type: str = "auto"
 
 
 class ConnectionManager:
@@ -104,6 +136,361 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _require_visualisation_schema(conn: sqlite3.Connection) -> None:
+    missing = [name for name in ("layout", "berth", "signal") if not _table_exists(conn, name)]
+    if missing:
+        raise HTTPException(status_code=503, detail=f"missing visualisation tables: {', '.join(missing)}")
+
+
+def _json_or_empty(value: Optional[str]) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _model_dump(model: BaseModel) -> dict[str, Any]:
+    """Return a plain dict across Pydantic v1/v2."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.Row], signal_rows: list[sqlite3.Row]) -> str:
+    def esc(value: Any) -> str:
+        return html.escape("" if value is None else str(value), quote=True)
+
+    def json_text(value: Any) -> str:
+        return esc(json.dumps(value if value is not None else {}, indent=2, sort_keys=True))
+
+    def layout_options(selected: Optional[str] = None) -> str:
+        return "".join(
+            f"<option value='{esc(row['id'])}'{' selected' if row['id'] == selected else ''}>{esc(row['id'])} — {esc(row['name'])}</option>"
+            for row in layout_rows
+        )
+
+    def layout_rows_html() -> str:
+        rows = []
+        for idx, row in enumerate(layout_rows):
+            row_key = f"layout-row-{idx}"
+            rows.append(
+                """
+                <tr>
+                  <td><input id="{row_key}-id" value="{id}" /></td>
+                  <td><input id="{row_key}-name" value="{name}" /></td>
+                  <td><input id="{row_key}-description" value="{description}" /></td>
+                  <td><textarea id="{row_key}-data" rows="3">{data}</textarea></td>
+                  <td class="actions">
+                    <input id="{row_key}-original" type="hidden" value="{id}" />
+                    <button type="button" onclick="saveLayout('{row_key}')">Save</button>
+                    <button type="button" onclick="deleteLayout('{row_key}')">Delete</button>
+                  </td>
+                </tr>
+                """.format(
+                    row_key=row_key,
+                    id=esc(row["id"]),
+                    name=esc(row["name"]),
+                    description=esc(row["description"]),
+                    data=json_text(_json_or_empty(row["data"])),
+                )
+            )
+        return "".join(rows)
+
+    def berth_rows_html() -> str:
+        rows = []
+        for idx, row in enumerate(berth_rows):
+            row_key = f"berth-row-{idx}"
+            rows.append(
+                """
+                <tr>
+                  <td><input id="{row_key}-id" value="{id}" /></td>
+                  <td><select id="{row_key}-layout_id">{layout_opts}</select></td>
+                  <td><input id="{row_key}-name" value="{name}" /></td>
+                  <td><input id="{row_key}-x" type="number" value="{x}" /></td>
+                  <td><input id="{row_key}-y" type="number" value="{y}" /></td>
+                  <td><input id="{row_key}-width" type="number" value="{width}" /></td>
+                  <td><input id="{row_key}-height" type="number" value="{height}" /></td>
+                  <td><input id="{row_key}-berth_type" value="{berth_type}" /></td>
+                  <td class="actions">
+                    <input id="{row_key}-original" type="hidden" value="{id}" />
+                    <button type="button" onclick="saveBerth('{row_key}')">Save</button>
+                    <button type="button" onclick="deleteBerth('{row_key}')">Delete</button>
+                  </td>
+                </tr>
+                """.format(
+                    row_key=row_key,
+                    id=esc(row["id"]),
+                    layout_opts=layout_options(row["layout_id"]),
+                    name=esc(row["name"]),
+                    x=esc(row["x"]),
+                    y=esc(row["y"]),
+                    width=esc(row["width"]),
+                    height=esc(row["height"]),
+                    berth_type=esc(row["berth_type"]),
+                )
+            )
+        return "".join(rows)
+
+    def signal_rows_html() -> str:
+        rows = []
+        for idx, row in enumerate(signal_rows):
+            row_key = f"signal-row-{idx}"
+            rows.append(
+                """
+                <tr>
+                  <td><input id="{row_key}-id" value="{id}" /></td>
+                  <td><select id="{row_key}-layout_id">{layout_opts}</select></td>
+                  <td><input id="{row_key}-name" value="{name}" /></td>
+                  <td><input id="{row_key}-x" type="number" value="{x}" /></td>
+                  <td><input id="{row_key}-y" type="number" value="{y}" /></td>
+                  <td><input id="{row_key}-signal_type" value="{signal_type}" /></td>
+                  <td class="actions">
+                    <input id="{row_key}-original" type="hidden" value="{id}" />
+                    <button type="button" onclick="saveSignal('{row_key}')">Save</button>
+                    <button type="button" onclick="deleteSignal('{row_key}')">Delete</button>
+                  </td>
+                </tr>
+                """.format(
+                    row_key=row_key,
+                    id=esc(row["id"]),
+                    layout_opts=layout_options(row["layout_id"]),
+                    name=esc(row["name"]),
+                    x=esc(row["x"]),
+                    y=esc(row["y"]),
+                    signal_type=esc(row["signal_type"]),
+                )
+            )
+        return "".join(rows)
+
+    return f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Visualisation admin</title>
+  <style>
+    body{{font-family:system-ui,Arial,sans-serif;margin:0;background:#f6f8fb;color:#1f2937}}
+    main{{max-width:1400px;margin:0 auto;padding:24px}}
+    h1,h2{{margin:0 0 12px}}
+    section{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 20px;box-shadow:0 1px 2px rgba(0,0,0,.04)}}
+    .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}}
+    label{{display:flex;flex-direction:column;gap:4px;font-size:14px}}
+    input,textarea,select,button{{font:inherit;padding:8px;border:1px solid #cbd5e1;border-radius:8px}}
+    textarea{{min-height:92px}}
+    button{{cursor:pointer;background:#2563eb;color:#fff;border-color:#2563eb}}
+    button.delete{{background:#dc2626;border-color:#dc2626}}
+    table{{width:100%;border-collapse:collapse;margin-top:12px}}
+    th,td{{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;text-align:left}}
+    th{{background:#f8fafc}}
+    td.actions{{white-space:nowrap}}
+    .hint{{color:#6b7280;font-size:13px;margin-top:4px}}
+    .section-head{{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;flex-wrap:wrap}}
+    .layout-editor, .berth-editor, .signal-editor{{margin-top:14px}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Visualisation admin</h1>
+  <p class="hint">Edit layout, berth, and signal rows in the SQLite database.</p>
+  <section>
+    <div class="section-head">
+      <div>
+        <h2>Layout editor</h2>
+        <div class="hint">Create a layout, then edit its ID/name/description/JSON metadata inline.</div>
+      </div>
+    </div>
+    <div class="layout-editor grid">
+      <label>ID <input id="new-layout-id" /></label>
+      <label>Name <input id="new-layout-name" /></label>
+      <label>Description <input id="new-layout-description" /></label>
+      <label>Data <textarea id="new-layout-data">{{}}</textarea></label>
+    </div>
+    <p><button type="button" onclick="createLayout()">Create layout</button></p>
+    <table>
+      <thead><tr><th>ID</th><th>Name</th><th>Description</th><th>Data</th><th>Actions</th></tr></thead>
+      <tbody>{layout_rows_html()}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <div>
+        <h2>Berth editor</h2>
+        <div class="hint">Berths belong to a layout and can be moved or renamed inline.</div>
+      </div>
+    </div>
+    <div class="berth-editor grid">
+      <label>ID <input id="new-berth-id" /></label>
+      <label>Layout <select id="new-berth-layout_id">{layout_options()}</select></label>
+      <label>Name <input id="new-berth-name" /></label>
+      <label>X <input id="new-berth-x" type="number" value="0" /></label>
+      <label>Y <input id="new-berth-y" type="number" value="0" /></label>
+      <label>Width <input id="new-berth-width" type="number" value="60" /></label>
+      <label>Height <input id="new-berth-height" type="number" value="30" /></label>
+      <label>Type <input id="new-berth-berth_type" value="normal" /></label>
+    </div>
+    <p><button type="button" onclick="createBerth()">Create berth</button></p>
+    <table>
+      <thead><tr><th>ID</th><th>Layout</th><th>Name</th><th>X</th><th>Y</th><th>Width</th><th>Height</th><th>Type</th><th>Actions</th></tr></thead>
+      <tbody>{berth_rows_html()}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <div>
+        <h2>Signal editor</h2>
+        <div class="hint">Signals can be created, moved, renamed, or deleted from the browser.</div>
+      </div>
+    </div>
+    <div class="signal-editor grid">
+      <label>ID <input id="new-signal-id" /></label>
+      <label>Layout <select id="new-signal-layout_id">{layout_options()}</select></label>
+      <label>Name <input id="new-signal-name" /></label>
+      <label>X <input id="new-signal-x" type="number" value="0" /></label>
+      <label>Y <input id="new-signal-y" type="number" value="0" /></label>
+      <label>Type <input id="new-signal-signal_type" value="auto" /></label>
+    </div>
+    <p><button type="button" onclick="createSignal()">Create signal</button></p>
+    <table>
+      <thead><tr><th>ID</th><th>Layout</th><th>Name</th><th>X</th><th>Y</th><th>Type</th><th>Actions</th></tr></thead>
+      <tbody>{signal_rows_html()}</tbody>
+    </table>
+  </section>
+</main>
+<script>
+function rowValue(rowKey, field) {{
+  const el = document.getElementById(`${{rowKey}}-${{field}}`);
+  return el ? el.value.trim() : "";
+}}
+
+function rowNumber(rowKey, field) {{
+  return Number(rowValue(rowKey, field));
+}}
+
+async function submitJson(url, method, payload) {{
+  const response = await fetch(url, {{
+    method,
+    headers: {{ "Content-Type": "application/json" }},
+    body: JSON.stringify(payload),
+  }});
+  const text = await response.text();
+  if (!response.ok) {{
+    throw new Error(text || response.statusText);
+  }}
+  return text ? JSON.parse(text) : {{}};
+}}
+
+function parseLayoutData(inputId) {{
+  const raw = document.getElementById(inputId).value.trim() || "{{}}";
+  return JSON.parse(raw);
+}}
+
+async function createLayout() {{
+  await submitJson("/api/layouts", "POST", {{
+    id: rowValue("new-layout", "id"),
+    name: rowValue("new-layout", "name"),
+    description: rowValue("new-layout", "description") || null,
+    data: parseLayoutData("new-layout-data"),
+  }});
+  window.location.reload();
+}}
+
+async function saveLayout(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  await submitJson(`/api/layouts/${{encodeURIComponent(originalId)}}`, "PUT", {{
+    id: rowValue(rowKey, "id"),
+    name: rowValue(rowKey, "name"),
+    description: rowValue(rowKey, "description") || null,
+    data: parseLayoutData(`${{rowKey}}-data`),
+  }});
+  window.location.reload();
+}}
+
+async function deleteLayout(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  if (!confirm(`Delete layout ${{originalId}}?`)) return;
+  await submitJson(`/api/layouts/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
+  window.location.reload();
+}}
+
+async function createBerth() {{
+  await submitJson("/api/berths", "POST", {{
+    id: rowValue("new-berth", "id"),
+    layout_id: rowValue("new-berth", "layout_id"),
+    name: rowValue("new-berth", "name"),
+    x: rowNumber("new-berth", "x"),
+    y: rowNumber("new-berth", "y"),
+    width: rowNumber("new-berth", "width"),
+    height: rowNumber("new-berth", "height"),
+    berth_type: rowValue("new-berth", "berth_type"),
+  }});
+  window.location.reload();
+}}
+
+async function saveBerth(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  await submitJson(`/api/berths/${{encodeURIComponent(originalId)}}`, "PUT", {{
+    id: rowValue(rowKey, "id"),
+    layout_id: rowValue(rowKey, "layout_id"),
+    name: rowValue(rowKey, "name"),
+    x: rowNumber(rowKey, "x"),
+    y: rowNumber(rowKey, "y"),
+    width: rowNumber(rowKey, "width"),
+    height: rowNumber(rowKey, "height"),
+    berth_type: rowValue(rowKey, "berth_type"),
+  }});
+  window.location.reload();
+}}
+
+async function deleteBerth(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  if (!confirm(`Delete berth ${{originalId}}?`)) return;
+  await submitJson(`/api/berths/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
+  window.location.reload();
+}}
+
+async function createSignal() {{
+  await submitJson("/api/signals", "POST", {{
+    id: rowValue("new-signal", "id"),
+    layout_id: rowValue("new-signal", "layout_id"),
+    name: rowValue("new-signal", "name"),
+    x: rowNumber("new-signal", "x"),
+    y: rowNumber("new-signal", "y"),
+    signal_type: rowValue("new-signal", "signal_type"),
+  }});
+  window.location.reload();
+}}
+
+async function saveSignal(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  await submitJson(`/api/signals/${{encodeURIComponent(originalId)}}`, "PUT", {{
+    id: rowValue(rowKey, "id"),
+    layout_id: rowValue(rowKey, "layout_id"),
+    name: rowValue(rowKey, "name"),
+    x: rowNumber(rowKey, "x"),
+    y: rowNumber(rowKey, "y"),
+    signal_type: rowValue(rowKey, "signal_type"),
+  }});
+  window.location.reload();
+}}
+
+async function deleteSignal(rowKey) {{
+  const originalId = rowValue(rowKey, "original");
+  if (!confirm(`Delete signal ${{originalId}}?`)) return;
+  await submitJson(`/api/signals/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
+  window.location.reload();
+}}
+</script>
+</body>
+</html>
+"""
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -362,6 +749,226 @@ def _fetch_td_chain(
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
+@app.get("/admin", response_class=HTMLResponse)
+async def admin():
+    """Render a lightweight browser CRUD UI for layout, berth, and signal tables."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        layout_rows = conn.execute("SELECT * FROM layout ORDER BY id").fetchall()
+        berth_rows = conn.execute("SELECT * FROM berth ORDER BY layout_id, name").fetchall()
+        signal_rows = conn.execute("SELECT * FROM signal ORDER BY layout_id, name").fetchall()
+        return _render_admin_page(layout_rows, berth_rows, signal_rows)
+
+
+@app.post("/api/layouts")
+async def create_layout(payload: LayoutPayload):
+    """Create a layout row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO layout (id, name, description, data)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        payload.id,
+                        payload.name,
+                        payload.description,
+                        json.dumps(payload.data),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "rowid": cursor.lastrowid, "layout": _model_dump(payload)}
+
+
+@app.put("/api/layouts/{layout_id}")
+async def update_layout(layout_id: str, payload: LayoutPayload):
+    """Update a layout row and keep child berth/signal rows in sync when renaming."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                existing = conn.execute("SELECT id FROM layout WHERE id = ?", (layout_id,)).fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Layout not found")
+                if payload.id != layout_id:
+                    conn.execute("UPDATE berth SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
+                    conn.execute("UPDATE signal SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
+                conn.execute(
+                    """
+                    UPDATE layout
+                    SET id = ?, name = ?, description = ?, data = ?
+                    WHERE id = ?
+                    """,
+                    (payload.id, payload.name, payload.description, json.dumps(payload.data), layout_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "layout": _model_dump(payload)}
+
+
+@app.delete("/api/layouts/{layout_id}")
+async def delete_layout(layout_id: str):
+    """Delete a layout and its berths/signals."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            existing = conn.execute("SELECT id FROM layout WHERE id = ?", (layout_id,)).fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Layout not found")
+            conn.execute("DELETE FROM berth WHERE layout_id = ?", (layout_id,))
+            conn.execute("DELETE FROM signal WHERE layout_id = ?", (layout_id,))
+            conn.execute("DELETE FROM layout WHERE id = ?", (layout_id,))
+        return {"status": "deleted", "id": layout_id}
+
+
+@app.post("/api/berths")
+async def create_berth(payload: BerthPayload):
+    """Create a berth row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.width,
+                        payload.height,
+                        payload.berth_type,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "id": payload.id, "berth": _model_dump(payload)}
+
+
+@app.put("/api/berths/{berth_id}")
+async def update_berth(berth_id: str, payload: BerthPayload):
+    """Update a berth row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                existing = conn.execute("SELECT id FROM berth WHERE id = ?", (berth_id,)).fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Berth not found")
+                conn.execute(
+                    """
+                    UPDATE berth
+                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, width = ?, height = ?, berth_type = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.width,
+                        payload.height,
+                        payload.berth_type,
+                        berth_id,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "berth": _model_dump(payload)}
+
+
+@app.delete("/api/berths/{berth_id}")
+async def delete_berth(berth_id: str):
+    """Delete a berth row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            existing = conn.execute("SELECT id FROM berth WHERE id = ?", (berth_id,)).fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Berth not found")
+            conn.execute("DELETE FROM berth WHERE id = ?", (berth_id,))
+        return {"status": "deleted", "id": berth_id}
+
+
+@app.post("/api/signals")
+async def create_signal(payload: SignalPayload):
+    """Create a signal row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO signal (id, layout_id, name, x, y, signal_type)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.signal_type,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "id": payload.id, "signal": _model_dump(payload)}
+
+
+@app.put("/api/signals/{signal_id}")
+async def update_signal(signal_id: str, payload: SignalPayload):
+    """Update a signal row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                existing = conn.execute("SELECT id FROM signal WHERE id = ?", (signal_id,)).fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Signal not found")
+                conn.execute(
+                    """
+                    UPDATE signal
+                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, signal_type = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.signal_type,
+                        signal_id,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "signal": _model_dump(payload)}
+
+
+@app.delete("/api/signals/{signal_id}")
+async def delete_signal(signal_id: str):
+    """Delete a signal row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            existing = conn.execute("SELECT id FROM signal WHERE id = ?", (signal_id,)).fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Signal not found")
+            conn.execute("DELETE FROM signal WHERE id = ?", (signal_id,))
+        return {"status": "deleted", "id": signal_id}
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -371,6 +978,7 @@ async def root():
             "layout": "/layout/{layout_id}",
             "berths": "/berths/{layout_id}",
             "trains": "/trains",
+            "admin": "/admin",
             "train_chain": "/train/{train_id}/chain",
             "state": "/state",
             "td_chain": "/td/{td_area}/{headcode}/chain",

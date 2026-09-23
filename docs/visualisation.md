@@ -155,6 +155,21 @@ curl http://127.0.0.1:8000/berths/demo
 ]
 ```
 
+#### `GET /admin`
+Open the browser-based CRUD interface for layout, berth, and signal rows.
+
+#### `POST /api/layouts`
+Create a layout. `PUT /api/layouts/{layout_id}` updates it, and
+`DELETE /api/layouts/{layout_id}` removes the layout plus its berths/signals.
+
+#### `POST /api/berths`
+Create a berth. `PUT /api/berths/{berth_id}` updates it and
+`DELETE /api/berths/{berth_id}` removes it.
+
+#### `POST /api/signals`
+Create a signal. `PUT /api/signals/{signal_id}` updates it and
+`DELETE /api/signals/{signal_id}` removes it.
+
 #### `GET /trains`
 Get all trains.
 
@@ -418,7 +433,7 @@ This is a minimal PoC. Potential improvements:
 5. **Integration**: Connect to live TD/TRUST data from NROD feeds
 6. **Performance**: Optimize for large layouts with many berths
 7. **Styling**: Enhanced visual design with CSS animations
-8. **Configuration**: UI for creating/editing layouts
+8. **Configuration**: Browser CRUD interface for creating/editing layouts, berths, and signals
 9. **Authentication**: Secure access to the API
 
 ## Troubleshooting

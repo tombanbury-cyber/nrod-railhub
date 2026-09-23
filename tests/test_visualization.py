@@ -361,5 +361,145 @@ def test_state_endpoint_returns_503_for_database_errors(monkeypatch):
     assert response.json()["detail"] == "database unavailable: database is locked"
 
 
+def test_admin_page_renders_editors(monkeypatch):
+    """Test the browser CRUD page renders the expected editing sections."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.get("/admin")
+        assert response.status_code == 200
+        page = response.text
+        assert "Visualisation admin" in page
+        assert "Layout editor" in page
+        assert "Berth editor" in page
+        assert "Signal editor" in page
+        assert "Demo Station" in page
+    finally:
+        Path(db_path).unlink()
+
+
+def test_admin_crud_endpoints_manage_layout_berth_and_signal(monkeypatch):
+    """Test the CRUD endpoints can create, update, rename, and delete rows."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        create_layout = client.post(
+            "/api/layouts",
+            json={
+                "id": "north",
+                "name": "North Layout",
+                "description": "Original layout",
+                "data": {"version": "1.0"},
+            },
+        )
+        assert create_layout.status_code == 200
+
+        update_layout = client.put(
+            "/api/layouts/north",
+            json={
+                "id": "north-main",
+                "name": "North Layout v2",
+                "description": "Updated layout",
+                "data": {"version": "2.0", "tracks": 4},
+            },
+        )
+        assert update_layout.status_code == 200
+
+        layout_response = client.get("/layout/north-main")
+        assert layout_response.status_code == 200
+        layout = layout_response.json()
+        assert layout["id"] == "north-main"
+        assert layout["name"] == "North Layout v2"
+        assert layout["data"]["tracks"] == 4
+
+        create_berth = client.post(
+            "/api/berths",
+            json={
+                "id": "N-B1",
+                "layout_id": "north-main",
+                "name": "B1",
+                "x": 10,
+                "y": 20,
+                "width": 70,
+                "height": 35,
+                "berth_type": "platform",
+            },
+        )
+        assert create_berth.status_code == 200
+
+        create_signal = client.post(
+            "/api/signals",
+            json={
+                "id": "N-S1",
+                "layout_id": "north-main",
+                "name": "S1",
+                "x": 30,
+                "y": 40,
+                "signal_type": "controlled",
+            },
+        )
+        assert create_signal.status_code == 200
+
+        update_berth = client.put(
+            "/api/berths/N-B1",
+            json={
+                "id": "N-B1A",
+                "layout_id": "north-main",
+                "name": "B1A",
+                "x": 15,
+                "y": 25,
+                "width": 80,
+                "height": 40,
+                "berth_type": "siding",
+            },
+        )
+        assert update_berth.status_code == 200
+
+        update_signal = client.put(
+            "/api/signals/N-S1",
+            json={
+                "id": "N-S1A",
+                "layout_id": "north-main",
+                "name": "S1A",
+                "x": 35,
+                "y": 45,
+                "signal_type": "shunt",
+            },
+        )
+        assert update_signal.status_code == 200
+
+        berths_response = client.get("/berths/north-main")
+        assert berths_response.status_code == 200
+        berths = berths_response.json()
+        assert any(row["id"] == "N-B1A" and row["name"] == "B1A" for row in berths)
+
+        signals_response = client.get("/signals/north-main")
+        assert signals_response.status_code == 200
+        signals = signals_response.json()
+        assert any(row["id"] == "N-S1A" and row["signal_type"] == "shunt" for row in signals)
+
+        assert client.delete("/api/signals/N-S1A").status_code == 200
+        assert client.delete("/api/berths/N-B1A").status_code == 200
+        assert client.delete("/api/layouts/north-main").status_code == 200
+
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM layout WHERE id = 'north-main'").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM berth WHERE layout_id = 'north-main'").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM signal WHERE layout_id = 'north-main'").fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        Path(db_path).unlink()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
