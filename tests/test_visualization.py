@@ -155,6 +155,23 @@ def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
     assert layout["name"] == "Demo Station"
 
 
+def test_api_returns_500_when_env_var_db_lacks_visualisation_schema(monkeypatch):
+    """Test API failure path when env-selected DB does not have the PoC schema."""
+    import app.visualisation.app as app_module
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        monkeypatch.setenv("NROD_RAILHUB_DB", db_path)
+        client = TestClient(app_module.app, raise_server_exceptions=False)
+        response = client.get("/trains")
+
+        assert response.status_code == 500
+    finally:
+        Path(db_path).unlink()
+
+
 def test_train_chain_endpoint_returns_inference_metadata(monkeypatch):
     """Test chain endpoint exposes inferred route items with metadata."""
     db_path = _create_visualisation_db()
