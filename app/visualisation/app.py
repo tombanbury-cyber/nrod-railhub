@@ -88,7 +88,7 @@ manager = ConnectionManager()
 @contextmanager
 def get_conn():
     """Get database connection with row factory."""
-    db_path = Path(os.environ.get("NROD_RAILHUB_DB", DB_PATH))
+    db_path = Path(os.environ.get("NROD_RAILHUB_DB", str(DB_PATH)))
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
