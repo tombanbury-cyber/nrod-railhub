@@ -111,16 +111,22 @@ def test_api_uses_default_db_path_when_env_unset(monkeypatch, visualisation_db_p
     monkeypatch.delenv("NROD_RAILHUB_DB", raising=False)
     monkeypatch.setattr(app_module, "DB_PATH", Path(visualisation_db_path))
     client = TestClient(app_module.app)
-    response = client.get("/trains")
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 1
-    assert data[0]["id"] == "T1"
-    assert data[0]["headcode"] == "2C90"
-    assert data[0]["description"] == "Demo Train Service"
-    assert data[0]["toc"] == "GW"
-    assert isinstance(data[0]["created_at"], str)
-    assert data[0]["created_at"]
+    trains_response = client.get("/trains")
+    assert trains_response.status_code == 200
+    trains = trains_response.json()
+    assert len(trains) == 1
+    assert trains[0]["id"] == "T1"
+    assert trains[0]["headcode"] == "2C90"
+    assert trains[0]["description"] == "Demo Train Service"
+    assert trains[0]["toc"] == "GW"
+    assert isinstance(trains[0]["created_at"], str)
+    assert trains[0]["created_at"]
+
+    layout_response = client.get("/layout/demo")
+    assert layout_response.status_code == 200
+    layout = layout_response.json()
+    assert layout["id"] == "demo"
+    assert layout["name"] == "Demo Station"
 
 
 def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
@@ -131,17 +137,22 @@ def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
     monkeypatch.setattr(app_module, "DB_PATH", Path("/does/not/exist.db"))
 
     client = TestClient(app_module.app)
-    response = client.get("/trains")
+    trains_response = client.get("/trains")
+    assert trains_response.status_code == 200
+    trains = trains_response.json()
+    assert len(trains) == 1
+    assert trains[0]["id"] == "T1"
+    assert trains[0]["headcode"] == "2C90"
+    assert trains[0]["description"] == "Demo Train Service"
+    assert trains[0]["toc"] == "GW"
+    assert isinstance(trains[0]["created_at"], str)
+    assert trains[0]["created_at"]
 
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 1
-    assert data[0]["id"] == "T1"
-    assert data[0]["headcode"] == "2C90"
-    assert data[0]["description"] == "Demo Train Service"
-    assert data[0]["toc"] == "GW"
-    assert isinstance(data[0]["created_at"], str)
-    assert data[0]["created_at"]
+    layout_response = client.get("/layout/demo")
+    assert layout_response.status_code == 200
+    layout = layout_response.json()
+    assert layout["id"] == "demo"
+    assert layout["name"] == "Demo Station"
 
 
 def test_train_chain_endpoint_returns_inference_metadata(monkeypatch):
