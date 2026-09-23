@@ -4,12 +4,13 @@ This module provides a minimal REST API and WebSocket server for real-time
 train visualization on schematic layouts.
 """
 
-import json
-import sqlite3
 import asyncio
+import json
+import os
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
-from contextlib import contextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -87,7 +88,8 @@ manager = ConnectionManager()
 @contextmanager
 def get_conn():
     """Get database connection with row factory."""
-    conn = sqlite3.connect(str(DB_PATH))
+    db_path = Path(os.environ.get("NROD_RAILHUB_DB", DB_PATH))
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         yield conn

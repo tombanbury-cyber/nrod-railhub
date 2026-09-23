@@ -8,6 +8,7 @@ import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,6 +30,16 @@ def _create_visualisation_db() -> str:
     return db_path
 
 
+@pytest.fixture
+def visualisation_db_path() -> Iterator[str]:
+    """Create and clean up a temporary visualisation database."""
+    db_path = _create_visualisation_db()
+    try:
+        yield db_path
+    finally:
+        Path(db_path).unlink()
+
+
 def test_database_schema():
     """Test that the database schema is created correctly."""
     db_path = _create_visualisation_db()
@@ -40,7 +51,7 @@ def test_database_schema():
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         table_names = [t[0] for t in tables]
-        
+
         assert 'layout' in table_names
         assert 'berth' in table_names
         assert 'signal' in table_names
@@ -49,16 +60,16 @@ def test_database_schema():
         assert 'berth_transition_counts' in table_names
         assert 'headcode_route_patterns' in table_names
         assert 'route_inference_runs' in table_names
-        
+
         layout_count = cursor.execute("SELECT COUNT(*) FROM layout").fetchone()[0]
         assert layout_count == 1
-        
+
         berth_count = cursor.execute("SELECT COUNT(*) FROM berth").fetchone()[0]
         assert berth_count == 8
-        
+
         train_count = cursor.execute("SELECT COUNT(*) FROM train").fetchone()[0]
         assert train_count == 1
-        
+
         conn.close()
     finally:
         Path(db_path).unlink()
@@ -91,6 +102,46 @@ def test_event_model():
     assert event.ts == "2026-02-14T10:00:00Z"
     assert event.train_id == "T1"
     assert event.event_type == "berth_enter"
+
+
+def test_api_uses_default_db_path_when_env_unset(monkeypatch, visualisation_db_path):
+    """Test API falls back to the default DB_PATH when env var is unset."""
+    import app.visualisation.app as app_module
+
+    monkeypatch.delenv("NROD_RAILHUB_DB", raising=False)
+    monkeypatch.setattr(app_module, "DB_PATH", Path(visualisation_db_path))
+    client = TestClient(app_module.app)
+    response = client.get("/trains")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["id"] == "T1"
+    assert data[0]["headcode"] == "2C90"
+    assert data[0]["description"] == "Demo Train Service"
+    assert data[0]["toc"] == "GW"
+    assert isinstance(data[0]["created_at"], str)
+    assert data[0]["created_at"]
+
+
+def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
+    """Test API uses NROD_RAILHUB_DB when it is set."""
+    import app.visualisation.app as app_module
+
+    monkeypatch.setenv("NROD_RAILHUB_DB", visualisation_db_path)
+    monkeypatch.setattr(app_module, "DB_PATH", Path("/does/not/exist.db"))
+
+    client = TestClient(app_module.app)
+    response = client.get("/trains")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["id"] == "T1"
+    assert data[0]["headcode"] == "2C90"
+    assert data[0]["description"] == "Demo Train Service"
+    assert data[0]["toc"] == "GW"
+    assert isinstance(data[0]["created_at"], str)
+    assert data[0]["created_at"]
 
 
 def test_train_chain_endpoint_returns_inference_metadata(monkeypatch):

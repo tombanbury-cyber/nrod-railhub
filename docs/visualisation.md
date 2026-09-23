@@ -34,12 +34,29 @@ The visualization PoC consists of:
 
 ### 1. Initialize the Database
 
+By default, the visualisation API uses the project-root `railhub.db`.
+To run it against your main NROD RailHub SQLite database, point the API at
+that file with `NROD_RAILHUB_DB`.
+
+Before applying the PoC schema to an existing main database, make a backup:
+
 ```bash
-cd /path/to/nrod-railhub
-sqlite3 railhub.db < sql/init_db.sql
+cp /path/to/main.sqlite /path/to/main.sqlite.backup
 ```
 
-This creates the schema and inserts a demo layout with 8 berths and one train.
+Then apply the schema:
+
+```bash
+cd /path/to/nrod-railhub
+sqlite3 /path/to/main.sqlite < sql/init_db.sql
+```
+
+`sql/init_db.sql` uses `CREATE TABLE IF NOT EXISTS`, so it can add the PoC
+tables to an existing main database without replacing the existing NROD
+RailHub tables.
+
+It also inserts a demo layout with 8 berths and one train if they do not
+already exist.
 
 ### 2. Install Dependencies
 
@@ -56,7 +73,14 @@ pip install -r requirements.txt
 ### 3. Run the Server
 
 ```bash
-# From project root
+# From project root, using the default project-root railhub.db
+python3 -m uvicorn app.visualisation.app:app --reload --host 127.0.0.1 --port 8000
+```
+
+To run against the main NROD RailHub SQLite database instead:
+
+```bash
+NROD_RAILHUB_DB=/path/to/main.sqlite \
 python3 -m uvicorn app.visualisation.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -65,6 +89,10 @@ Or use the helper script:
 ```bash
 ./scripts/run_demo.sh
 ```
+
+Do **not** run `./scripts/run_demo.sh` against your production or main
+database. The demo workflow is intended for the PoC database and can remove
+and recreate the demo database file.
 
 ### 4. Open the UI
 
@@ -381,6 +409,9 @@ Make sure you've initialized the database:
 sqlite3 railhub.db < sql/init_db.sql
 ```
 
+If you are using the main NROD RailHub database, also make sure
+`NROD_RAILHUB_DB` points to that SQLite file before starting the API.
+
 ### WebSocket connection failed
 - Check that the server is running on port 8000
 - Ensure no firewall is blocking the connection
@@ -393,6 +424,17 @@ sqlite3 railhub.db < sql/init_db.sql
   ```bash
   sqlite3 railhub.db "SELECT * FROM event ORDER BY id DESC LIMIT 10;"
   ```
+
+## Shared Main Database Limitations
+
+Using `NROD_RAILHUB_DB` lets the visualisation API share the same SQLite file
+as the main application, but it does **not** yet convert the main
+`td_berth_events` and `td_state` tables into the PoC `event` and `train`
+display model.
+
+At present, the visualisation API still reads the PoC tables (`layout`,
+`berth`, `signal`, `train`, and `event`). This change is limited to safe
+shared-database configuration and documentation.
 
 ## Contributing
 
