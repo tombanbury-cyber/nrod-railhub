@@ -371,71 +371,71 @@
                     delete trainPositions[trainId];
                 }
             }
+        }
 
-            function renderSnapshot(snapshot) {
-                clearSchematicState();
+        function renderSnapshot(snapshot) {
+            clearSchematicState();
 
-                const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
-                trains.forEach(train => {
-                    const berthId = train.current_berth || train.to_berth || train.from_berth;
-                    const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
-                    if (berthId && trainId) {
-                        updateBerthOccupancy(berthId, true, trainId);
-                    }
+            const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
+            trains.forEach(train => {
+                const berthId = train.current_berth || train.to_berth || train.from_berth;
+                const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
+                if (berthId && trainId) {
+                    updateBerthOccupancy(berthId, true, trainId);
+                }
+            });
+
+            if (Array.isArray(snapshot.events)) {
+                const log = document.getElementById('eventLog');
+                log.innerHTML = '';
+                snapshot.events.slice(0, 20).forEach(event => {
+                    log.appendChild(renderEventItem(event));
                 });
+            }
 
-                if (Array.isArray(snapshot.events)) {
-                    const log = document.getElementById('eventLog');
-                    log.innerHTML = '';
-                    snapshot.events.slice(0, 20).forEach(event => {
-                        log.appendChild(renderEventItem(event));
-                    });
+            const layoutInfo = document.getElementById('layoutInfo');
+            const source = snapshot.source || 'unknown';
+            const trainCount = trains.length;
+            layoutInfo.textContent = `Layout: Demo Station • Source: ${source} • Trains: ${trainCount}`;
+        }
+
+        function renderEventItem(event) {
+            const item = document.createElement('div');
+            item.className = 'event-item';
+            const timestamp = event.display_ts || event.ts_iso || event.ts || '';
+            const label = event.event_type || event.msg_type || 'event';
+            const berth = event.object_id || event.berth_id || event.to_berth || event.from_berth || 'N/A';
+            const trainRef = event.train_id || event.headcode || event.train_ref || 'N/A';
+            const time = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
+            item.textContent = `[${time}] ${String(label).toUpperCase()} - ${berth} (Train: ${trainRef})`;
+            return item;
+        }
+
+        async function refreshState() {
+            try {
+                const params = new URLSearchParams(window.location.search);
+                const url = new URL(`${API_BASE}/state`);
+                const area = params.get('area');
+                const hc = params.get('hc');
+                if (area) url.searchParams.set('td_area', area);
+                if (hc) url.searchParams.set('headcode', hc);
+
+                const response = await fetch(url.toString());
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
                 }
-
-                const layoutInfo = document.getElementById('layoutInfo');
-                const source = snapshot.source || 'unknown';
-                const trainCount = trains.length;
-                layoutInfo.textContent = `Layout: Demo Station • Source: ${source} • Trains: ${trainCount}`;
+                const snapshot = await response.json();
+                renderSnapshot(snapshot);
+            } catch (error) {
+                console.error('Failed to refresh state:', error);
             }
+        }
 
-            function renderEventItem(event) {
-                const item = document.createElement('div');
-                item.className = 'event-item';
-                const timestamp = event.display_ts || event.ts_iso || event.ts || '';
-                const label = event.event_type || event.msg_type || 'event';
-                const berth = event.object_id || event.berth_id || event.to_berth || event.from_berth || 'N/A';
-                const trainRef = event.train_id || event.headcode || event.train_ref || 'N/A';
-                const time = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
-                item.textContent = `[${time}] ${String(label).toUpperCase()} - ${berth} (Train: ${trainRef})`;
-                return item;
+        function startStatePolling() {
+            if (statePollTimer) {
+                clearInterval(statePollTimer);
             }
-
-            async function refreshState() {
-                try {
-                    const params = new URLSearchParams(window.location.search);
-                    const url = new URL(`${API_BASE}/state`);
-                    const area = params.get('area');
-                    const hc = params.get('hc');
-                    if (area) url.searchParams.set('td_area', area);
-                    if (hc) url.searchParams.set('headcode', hc);
-
-                    const response = await fetch(url.toString());
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-                    const snapshot = await response.json();
-                    renderSnapshot(snapshot);
-                } catch (error) {
-                    console.error('Failed to refresh state:', error);
-                }
-            }
-
-            function startStatePolling() {
-                if (statePollTimer) {
-                    clearInterval(statePollTimer);
-                }
-                statePollTimer = setInterval(refreshState, STATE_REFRESH_MS);
-            }
+            statePollTimer = setInterval(refreshState, STATE_REFRESH_MS);
         }
         
         function updateTrainMarker(trainId, berthId) {
