@@ -20,6 +20,7 @@ def setup_logger(
     log_file: Optional[str] = None,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
+    console: bool = True,
 ) -> logging.Logger:
     """
     Configure and return the application logger.
@@ -48,10 +49,11 @@ def setup_logger(
     )
 
     # Console handler (stdout)
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(level)
-    console.setFormatter(formatter)
-    logger.addHandler(console)
+    if console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     # Optional rotating file handler
     if log_file:

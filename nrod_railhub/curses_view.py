@@ -27,6 +27,9 @@ CP_ERR = 3
 CP_TITLE = 4
 CP_DIM = 5
 CP_BORDER = 6
+TD_PAGE_INDEX = 0
+ERROR_PAGE_INDEX = 3
+STARTUP_DISPLAY_SECONDS = 3.0
 
 
 class QueueHandler(logging.Handler):
@@ -82,7 +85,8 @@ class InteractiveDashboardState:
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     
     # Page navigation
-    current_page: int = 0  # 0=TD, 1=TRUST, 2=VSTP, 3=Error, 4=DB, 5=HTTP, 6=Interesting
+    current_page: int = ERROR_PAGE_INDEX  # 0=TD, 1=TRUST, 2=VSTP, 3=Error, 4=DB, 5=HTTP, 6=Interesting
+    startup_page_until: Optional[float] = None
     
     paused: bool = False
     
@@ -337,6 +341,31 @@ def _collect_interesting_lines(listener: Optional[Listener], td_area_filter: Opt
     return lines
 
 
+def _advance_startup_page(state: InteractiveDashboardState, now: Optional[float] = None) -> None:
+    """Switch from the startup/error page back to TD once the hold time elapses."""
+    if state.startup_page_until is None:
+        return
+
+    current_time = time.monotonic() if now is None else now
+    if current_time < state.startup_page_until:
+        return
+
+    state.startup_page_until = None
+    if state.current_page == ERROR_PAGE_INDEX:
+        state.current_page = TD_PAGE_INDEX
+
+
+def _seed_startup_page(
+    state: InteractiveDashboardState,
+    message: str,
+    hold_seconds: float = STARTUP_DISPLAY_SECONDS,
+) -> None:
+    """Populate the error page with the startup message and hold it briefly."""
+    state.current_page = ERROR_PAGE_INDEX
+    state.add_error_line(message)
+    state.startup_page_until = time.monotonic() + hold_seconds
+
+
 def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, queues: dict, stop_event: threading.Event) -> None:
     """Main dashboard rendering loop."""
     stdscr.nodelay(True)
@@ -414,6 +443,8 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
             stdscr.clear()  # Force full redraw
             state.last_redraw = current_time
         
+        _advance_startup_page(state)
+
         # Render UI
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -442,6 +473,8 @@ def run_interactive_dashboard(
     headcode: Optional[str] = None,
     uid: Optional[str] = None,
     td_area: Optional[List[str]] = None,
+    startup_message: str = "Startup complete. Switching to TD messages shortly...",
+    startup_hold_seconds: float = STARTUP_DISPLAY_SECONDS,
 ) -> None:
     """
     Run the interactive curses dashboard.
@@ -463,6 +496,7 @@ def run_interactive_dashboard(
         uid_filter=uid,
         td_area_filter=td_area,
     )
+    _seed_startup_page(state, startup_message, hold_seconds=startup_hold_seconds)
     
     stop_event = threading.Event()
     

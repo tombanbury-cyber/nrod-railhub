@@ -27,8 +27,14 @@ from .logging_config import setup_logger, get_logger
 logger = get_logger("cli")
 
 
-def _emit_startup_feedback(message: str) -> None:
+def _emit_startup_feedback(message: str, log_queue: Optional["queue.Queue[str]"] = None) -> None:
     """Show startup progress even when the default log level is quiet."""
+    if log_queue is not None:
+        try:
+            log_queue.put_nowait(f"[INFO] {logger.name}: {message}")
+        except Exception:
+            pass
+        return
     if logger.getEffectiveLevel() <= logging.INFO:
         logger.info(message)
     else:
@@ -167,8 +173,33 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
     # Get db_path early so we can pass it to resolvers for persistence
     db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
+    startup_log_queue = None
+    output_queue = None
+    trust_queue = None
+    vstp_queue = None
+    error_queue = None
+    db_queue = None
+    http_queue = None
 
-    _emit_startup_feedback("Startup: loading CORPUS reference data...")
+    if args.interactive:
+        import queue
+        import logging
+        from .curses_view import QueueHandler
+
+        output_queue = queue.Queue(maxsize=500)
+        trust_queue = queue.Queue(maxsize=500)
+        vstp_queue = queue.Queue(maxsize=500)
+        error_queue = queue.Queue(maxsize=500)
+        db_queue = queue.Queue(maxsize=500)
+        http_queue = queue.Queue(maxsize=500)
+        startup_log_queue = error_queue
+
+        queue_handler = QueueHandler(error_queue)
+        queue_handler.setLevel(logging.DEBUG)
+        queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
+        logging.getLogger("nrod_railhub").addHandler(queue_handler)
+
+    _emit_startup_feedback("Startup: loading CORPUS reference data...", startup_log_queue)
     resolver = LocationResolver(db_path=db_path)
     resolver.load_or_download(
         username=args.user,
@@ -177,9 +208,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.corpus_refresh,
         quiet=False,
     )
-    _emit_startup_feedback("Startup: CORPUS reference data ready.")
+    _emit_startup_feedback("Startup: CORPUS reference data ready.", startup_log_queue)
 
-    _emit_startup_feedback("Startup: loading SMART reference data...")
+    _emit_startup_feedback("Startup: loading SMART reference data...", startup_log_queue)
     smart = SmartResolver(db_path=db_path)
     smart.load_or_download(
         username=args.user,
@@ -188,13 +219,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
         force=args.smart_refresh,
         quiet=False,
     )
-    _emit_startup_feedback("Startup: SMART reference data ready.")
+    _emit_startup_feedback("Startup: SMART reference data ready.", startup_log_queue)
     
     # Initialize TOC resolver
-    _emit_startup_feedback("Startup: loading TOC reference data...")
+    _emit_startup_feedback("Startup: loading TOC reference data...", startup_log_queue)
     toc_resolver = TOCResolver()
     logger.info(f"TOC: loaded {len(toc_resolver.TOC_DATA)} TOC codes")
-    _emit_startup_feedback("Startup: TOC reference data ready.")
+    _emit_startup_feedback("Startup: TOC reference data ready.", startup_log_queue)
     
     hv = HumanView(resolver=resolver, smart=smart, toc_resolver=toc_resolver)
 
@@ -210,7 +241,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
         def _schedule_worker() -> None:
             try:
-                _emit_startup_feedback("Startup: loading timetable enrichment...")
+                _emit_startup_feedback("Startup: loading timetable enrichment...", startup_log_queue)
                 # Check if toc_filter is configured
                 toc_filter = getattr(args, 'toc_filter', None)
                 
@@ -231,7 +262,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                         update_mode=False,  # Use FULL_DAILY
                         day="toc-full",
                         quiet=False,
-                        progress_callback=_emit_startup_feedback,
+                        progress_callback=lambda message: _emit_startup_feedback(message, startup_log_queue),
                     )
                     
                     if not downloaded_files:
@@ -334,7 +365,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         threading.Thread(target=_schedule_worker, daemon=True).start()
     logger.info(f"Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
-    _emit_startup_feedback("Startup: connecting to broker...")
+    _emit_startup_feedback("Startup: connecting to broker...", startup_log_queue)
 
     reconnect_attempts = getattr(args, "reconnect_attempts", -1)
     conn = stomp.Connection11(
@@ -370,31 +401,11 @@ def connect_and_run(args: argparse.Namespace) -> None:
     db_callback = None
     
     if args.interactive:
-        # In interactive mode, we'll capture output to multiple queues
-        import queue
-        import logging
-        from .curses_view import QueueHandler
-        
-        output_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        trust_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        vstp_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        error_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        db_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        http_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
-        
         output_callback = lambda text: output_queue.put(text) if not output_queue.full() else None
         trust_callback = lambda text: trust_queue.put(text) if not trust_queue.full() else None
         vstp_callback = lambda text: vstp_queue.put(text) if not vstp_queue.full() else None
         db_callback = lambda text: db_queue.put(text) if not db_queue.full() else None
-        
-        # Add queue handler for error logs (warnings and errors from nrod_railhub only)
-        queue_handler = QueueHandler(error_queue)
-        queue_handler.setLevel(logging.WARNING)  # Capture warnings and errors
-        queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
-        logging.getLogger("nrod_railhub").addHandler(queue_handler)
 
-    
-    
     listener = Listener(hv, args, db=db, output_callback=output_callback,
                        trust_callback=trust_callback, vstp_callback=vstp_callback,
                        db_callback=db_callback)
