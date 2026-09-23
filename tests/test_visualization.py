@@ -165,9 +165,20 @@ def test_api_returns_500_when_env_var_db_lacks_visualisation_schema(monkeypatch)
     try:
         monkeypatch.setenv("NROD_RAILHUB_DB", db_path)
         client = TestClient(app_module.app, raise_server_exceptions=False)
-        response = client.get("/trains")
+        response = client.post(
+            "/event",
+            json={
+                "ts": "2026-02-14T10:00:00Z",
+                "source": "td",
+                "train_id": "T1",
+                "event_type": "berth_enter",
+                "object_id": "BRTH_1",
+                "payload": {},
+            },
+        )
 
         assert response.status_code == 500
+        assert response.json()["detail"] == "no such table: event"
     finally:
         Path(db_path).unlink()
 
