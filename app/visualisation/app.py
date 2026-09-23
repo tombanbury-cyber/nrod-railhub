@@ -540,14 +540,20 @@ async def get_state(td_area: str | None = None, headcode: str | None = None, are
     td_area = td_area or area
     headcode = headcode or hc
     with get_conn() as conn:
-        return _fetch_td_snapshot(conn, td_area=td_area, headcode=headcode)
+        try:
+            return _fetch_td_snapshot(conn, td_area=td_area, headcode=headcode)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
 @app.get("/td/{td_area}/{headcode}/chain")
 async def get_td_chain(td_area: str, headcode: str):
     """Build a TD-backed berth chain for a headcode within one TD area."""
     with get_conn() as conn:
-        return _fetch_td_chain(conn, td_area=td_area, headcode=headcode)
+        try:
+            return _fetch_td_chain(conn, td_area=td_area, headcode=headcode)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
 @app.post("/event")

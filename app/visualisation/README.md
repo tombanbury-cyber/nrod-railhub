@@ -2,6 +2,10 @@
 
 FastAPI backend for real-time train schematic visualization.
 
+The demo UI polls `GET /state` to rebuild the current view from persisted TD
+state (`td_state` and `td_berth_events`) while keeping `POST /event` available
+for manual demo injections.
+
 ## Quick Start
 
 ```bash
