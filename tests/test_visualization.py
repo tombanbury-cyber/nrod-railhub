@@ -501,5 +501,149 @@ def test_admin_crud_endpoints_manage_layout_berth_and_signal(monkeypatch):
         Path(db_path).unlink()
 
 
+def test_admin_crud_endpoints_validate_payloads(monkeypatch):
+    """Test CRUD payload validation rejects empty, invalid, and out-of-range values."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.post(
+            "/api/layouts",
+            json={"id": "   ", "name": "North Layout", "description": None, "data": {}},
+        )
+        assert response.status_code == 422
+
+        response = client.post(
+            "/api/berths",
+            json={
+                "id": "N-B1",
+                "layout_id": "demo",
+                "name": "B1",
+                "x": 10,
+                "y": 20,
+                "width": 0,
+                "height": 35,
+                "berth_type": "platform",
+            },
+        )
+        assert response.status_code == 422
+
+        response = client.post(
+            "/api/signals",
+            json={
+                "id": "N-S1",
+                "layout_id": "demo",
+                "name": "S1",
+                "x": 30,
+                "y": -1,
+                "signal_type": "invalid",
+            },
+        )
+        assert response.status_code == 422
+    finally:
+        Path(db_path).unlink()
+
+
+def test_admin_crud_endpoints_require_existing_layouts(monkeypatch):
+    """Test berth and signal CRUD rejects unknown layout references."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.post(
+            "/api/berths",
+            json={
+                "id": "N-B1",
+                "layout_id": "missing",
+                "name": "B1",
+                "x": 10,
+                "y": 20,
+                "width": 70,
+                "height": 35,
+                "berth_type": "platform",
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Layout not found"
+
+        response = client.post(
+            "/api/signals",
+            json={
+                "id": "N-S1",
+                "layout_id": "missing",
+                "name": "S1",
+                "x": 30,
+                "y": 40,
+                "signal_type": "controlled",
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Layout not found"
+
+        assert client.post(
+            "/api/berths",
+            json={
+                "id": "N-B2",
+                "layout_id": "demo",
+                "name": "B2",
+                "x": 15,
+                "y": 25,
+                "width": 80,
+                "height": 40,
+                "berth_type": "siding",
+            },
+        ).status_code == 200
+
+        assert client.post(
+            "/api/signals",
+            json={
+                "id": "N-S2",
+                "layout_id": "demo",
+                "name": "S2",
+                "x": 35,
+                "y": 45,
+                "signal_type": "shunt",
+            },
+        ).status_code == 200
+
+        response = client.put(
+            "/api/berths/N-B2",
+            json={
+                "id": "N-B2",
+                "layout_id": "missing",
+                "name": "B2",
+                "x": 15,
+                "y": 25,
+                "width": 80,
+                "height": 40,
+                "berth_type": "siding",
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Layout not found"
+
+        response = client.put(
+            "/api/signals/N-S2",
+            json={
+                "id": "N-S2",
+                "layout_id": "missing",
+                "name": "S2",
+                "x": 35,
+                "y": 45,
+                "signal_type": "shunt",
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Layout not found"
+    finally:
+        Path(db_path).unlink()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
