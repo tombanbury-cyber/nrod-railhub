@@ -28,6 +28,12 @@ DB_PATH = Path(__file__).parent.parent.parent / "railhub.db"
 # Static files path
 STATIC_PATH = Path(__file__).parent.parent.parent / "web" / "static"
 
+DEFAULT_BERTH_WIDTH = 60
+DEFAULT_BERTH_HEIGHT = 30
+DEFAULT_BERTH_GAP = 10
+DEFAULT_BERTH_START_X = 50
+DEFAULT_BERTH_START_Y = 100
+
 
 class EventCreate(BaseModel):
     """Model for creating new events via POST /event."""
@@ -67,6 +73,12 @@ class SignalPayload(BaseModel):
     x: int = Field(ge=0)
     y: int = Field(ge=0)
     signal_type: Literal["auto", "controlled", "shunt"] = "auto"
+
+
+class BerthImportPayload(BaseModel):
+    """Model for importing selected berth chain items into a layout."""
+    layout_id: constr(strip_whitespace=True, min_length=1)
+    berth_ids: list[str] = Field(default_factory=list)
 
 
 class ConnectionManager:
@@ -166,6 +178,21 @@ def _require_layout_exists(conn: sqlite3.Connection, layout_id: str) -> None:
     existing = conn.execute("SELECT id FROM layout WHERE id = ?", (layout_id,)).fetchone()
     if not existing:
         raise HTTPException(status_code=404, detail="Layout not found")
+
+
+def _normalise_import_berth_ids(berth_ids: list[str]) -> list[str]:
+    """Trim, deduplicate, and validate selected berth IDs."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for berth_id in berth_ids:
+        berth_name = berth_id.strip()
+        if not berth_name or berth_name in seen:
+            continue
+        seen.add(berth_name)
+        cleaned.append(berth_name)
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="At least one berth must be selected")
+    return cleaned
 
 
 def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.Row], signal_rows: list[sqlite3.Row]) -> str:
@@ -284,7 +311,7 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
   <style>
     body{{font-family:system-ui,Arial,sans-serif;margin:0;background:#f6f8fb;color:#1f2937}}
     main{{max-width:1400px;margin:0 auto;padding:24px}}
-    h1,h2{{margin:0 0 12px}}
+    h1,h2,h3{{margin:0 0 12px}}
     section{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 20px;box-shadow:0 1px 2px rgba(0,0,0,.04)}}
     .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}}
     label{{display:flex;flex-direction:column;gap:4px;font-size:14px}}
@@ -292,6 +319,7 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
     textarea{{min-height:92px}}
     button{{cursor:pointer;background:#2563eb;color:#fff;border-color:#2563eb}}
     button.delete{{background:#dc2626;border-color:#dc2626}}
+    button.secondary{{background:#fff;color:#1f2937}}
     table{{width:100%;border-collapse:collapse;margin-top:12px}}
     th,td{{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;text-align:left}}
     th{{background:#f8fafc}}
@@ -299,12 +327,60 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
     .hint{{color:#6b7280;font-size:13px;margin-top:4px}}
     .section-head{{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;flex-wrap:wrap}}
     .layout-editor, .berth-editor, .signal-editor{{margin-top:14px}}
+    .search-grid{{margin-top:14px}}
+    .search-results, .chain-view{{margin-top:14px}}
+    .toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}
+    .status-message{{margin-top:10px;font-size:14px;color:#2563eb}}
+    .status-message.error{{color:#dc2626}}
   </style>
 </head>
 <body>
 <main>
   <h1>Visualisation admin</h1>
   <p class="hint">Edit layout, berth, and signal rows in the SQLite database.</p>
+  <section>
+    <div class="section-head">
+      <div>
+        <h2>Headcode chain import</h2>
+        <div class="hint">Search headcodes, inspect the berth chain, then choose exactly which berths to import into a layout.</div>
+      </div>
+      <button type="button" class="secondary" onclick="loadHeadcodes()">Refresh headcodes</button>
+    </div>
+    <div class="search-grid grid">
+      <label>Search headcodes
+        <input id="headcode-search" placeholder="2C90, EK, BRTH_1…" oninput="renderHeadcodeResults()" />
+      </label>
+      <label>Import into layout
+        <select id="chain-import-layout_id">{layout_options()}</select>
+      </label>
+    </div>
+    <div class="search-results">
+      <h3>Matching headcodes</h3>
+      <table>
+        <thead><tr><th>Headcode</th><th>TD area</th><th>Train ID</th><th>Description</th><th>Current berth</th><th>Action</th></tr></thead>
+        <tbody id="headcode-results"><tr><td colspan="6">Loading headcodes…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="chain-view">
+      <div class="section-head">
+        <div>
+          <h3>Selected berth chain</h3>
+          <div class="hint" id="chain-summary">Select a headcode to view its berth chain.</div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="secondary" onclick="setAllChainSelections(true)">Select all</button>
+        <button type="button" class="secondary" onclick="setAllChainSelections(false)">Clear all</button>
+        <button type="button" onclick="importSelectedChainBerths()">Import selected berths</button>
+      </div>
+      <table>
+        <thead><tr><th>Import</th><th>Berth</th><th>Entered</th><th>Source</th><th>Reason</th></tr></thead>
+        <tbody id="chain-results"><tr><td colspan="5">No berth chain loaded.</td></tr></tbody>
+      </table>
+      <div id="chain-import-status" class="status-message"></div>
+    </div>
+  </section>
+
   <section>
     <div class="section-head">
       <div>
@@ -338,8 +414,8 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
       <label>Name <input id="new-berth-name" /></label>
       <label>X <input id="new-berth-x" type="number" value="0" /></label>
       <label>Y <input id="new-berth-y" type="number" value="0" /></label>
-      <label>Width <input id="new-berth-width" type="number" value="60" /></label>
-      <label>Height <input id="new-berth-height" type="number" value="30" /></label>
+      <label>Width <input id="new-berth-width" type="number" value="{DEFAULT_BERTH_WIDTH}" /></label>
+      <label>Height <input id="new-berth-height" type="number" value="{DEFAULT_BERTH_HEIGHT}" /></label>
       <label>Type <input id="new-berth-berth_type" value="normal" /></label>
     </div>
     <p><button type="button" onclick="createBerth()">Create berth</button></p>
@@ -372,6 +448,9 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
   </section>
 </main>
 <script>
+let headcodeRows = [];
+let currentChain = [];
+
 function rowValue(rowKey, field) {{
   const el = document.getElementById(`${{rowKey}}-${{field}}`);
   return el ? el.value.trim() : "";
@@ -397,6 +476,172 @@ async function submitJson(url, method, payload) {{
 function parseLayoutData(inputId) {{
   const raw = document.getElementById(inputId).value.trim() || "{{}}";
   return JSON.parse(raw);
+}}
+
+function setChainStatus(message, isError = false) {{
+  const status = document.getElementById("chain-import-status");
+  status.textContent = message;
+  status.className = isError ? "status-message error" : "status-message";
+}}
+
+function createTextCell(text) {{
+  const cell = document.createElement("td");
+  cell.textContent = text || "";
+  return cell;
+}}
+
+function trainChainUrl(train) {{
+  if (train.td_area && train.headcode) {{
+    return `/td/${{encodeURIComponent(train.td_area)}}/${{encodeURIComponent(train.headcode)}}/chain`;
+  }}
+  return `/train/${{encodeURIComponent(train.id)}}/chain`;
+}}
+
+function renderHeadcodeResults() {{
+  const tbody = document.getElementById("headcode-results");
+  const query = document.getElementById("headcode-search").value.trim().toLowerCase();
+  tbody.innerHTML = "";
+  const liveDuplicateKeys = new Set(
+    headcodeRows
+      .filter(train => train.source === "td_state" && train.duplicate_key)
+      .map(train => train.duplicate_key)
+  );
+  const filtered = headcodeRows.filter(train => {{
+    if (train.source === "train" && train.duplicate_key && liveDuplicateKeys.has(train.duplicate_key)) {{
+      return false;
+    }}
+    return [train.headcode, train.td_area, train.id, train.description, train.current_berth]
+      .some(value => String(value || "").toLowerCase().includes(query));
+  }});
+  if (!filtered.length) {{
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    cell.textContent = "No headcodes matched the search.";
+    row.appendChild(cell);
+    tbody.appendChild(row);
+    return;
+  }}
+  filtered.forEach(train => {{
+    const row = document.createElement("tr");
+    row.appendChild(createTextCell(train.headcode || ""));
+    row.appendChild(createTextCell(train.td_area || ""));
+    row.appendChild(createTextCell(train.id || ""));
+    row.appendChild(createTextCell(train.description || ""));
+    row.appendChild(createTextCell(train.current_berth || ""));
+    const actionCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = "View chain";
+    button.addEventListener("click", () => loadTrainChain(train));
+    actionCell.appendChild(button);
+    row.appendChild(actionCell);
+    tbody.appendChild(row);
+  }});
+}}
+
+function renderChainRows(chainData, train) {{
+  currentChain = Array.isArray(chainData.chain) ? chainData.chain : [];
+  const tbody = document.getElementById("chain-results");
+  const summary = document.getElementById("chain-summary");
+  tbody.innerHTML = "";
+  const label = [train.headcode || chainData.headcode || train.id, train.td_area || chainData.td_area]
+    .filter(Boolean)
+    .join(" • ");
+  summary.textContent = label ? `Chain for ${{label}}` : "Selected berth chain";
+  if (!currentChain.length) {{
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.textContent = "No berth chain is available for the selected headcode.";
+    row.appendChild(cell);
+    tbody.appendChild(row);
+    return;
+  }}
+  currentChain.forEach((item, index) => {{
+    const row = document.createElement("tr");
+    const checkboxCell = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(item.berth_id);
+    checkbox.className = "chain-import-checkbox";
+    checkbox.dataset.berthId = item.berth_id || "";
+    checkbox.dataset.chainIndex = String(index);
+    checkbox.setAttribute("aria-label", `Import berth ${{item.berth_id || index + 1}}`);
+    checkboxCell.appendChild(checkbox);
+    row.appendChild(checkboxCell);
+    row.appendChild(createTextCell(item.berth_id || ""));
+    row.appendChild(createTextCell(item.enter_time || item.last_time_iso || ""));
+    row.appendChild(createTextCell(item.source || ""));
+    row.appendChild(createTextCell(item.reason || ""));
+    tbody.appendChild(row);
+  }});
+}}
+
+async function loadHeadcodes() {{
+  setChainStatus("");
+  try {{
+    const response = await fetch("/trains");
+    if (!response.ok) {{
+      throw new Error(`HTTP ${{response.status}}`);
+    }}
+    headcodeRows = await response.json();
+    renderHeadcodeResults();
+  }} catch (error) {{
+    console.error(error);
+    const tbody = document.getElementById("headcode-results");
+    tbody.innerHTML = '<tr><td colspan="6">Failed to load headcodes.</td></tr>';
+  }}
+}}
+
+async function loadTrainChain(train) {{
+  setChainStatus("Loading berth chain…");
+  try {{
+    const response = await fetch(trainChainUrl(train));
+    if (!response.ok) {{
+      throw new Error(`HTTP ${{response.status}}`);
+    }}
+    const chainData = await response.json();
+    renderChainRows(chainData, train);
+    setChainStatus(`Loaded ${{currentChain.length}} berth item(s).`);
+  }} catch (error) {{
+    console.error(error);
+    setChainStatus("Failed to load the berth chain.", true);
+  }}
+}}
+
+function setAllChainSelections(selected) {{
+  document.querySelectorAll(".chain-import-checkbox").forEach((checkbox) => {{
+    checkbox.checked = selected;
+  }});
+}}
+
+async function importSelectedChainBerths() {{
+  const layoutId = document.getElementById("chain-import-layout_id").value;
+  const berthIds = Array.from(document.querySelectorAll(".chain-import-checkbox"))
+    .filter((checkbox) => checkbox.checked && checkbox.dataset.berthId)
+    .map((checkbox) => checkbox.dataset.berthId);
+  if (!layoutId) {{
+    setChainStatus("Choose a layout before importing berths.", true);
+    return;
+  }}
+  if (!berthIds.length) {{
+    setChainStatus("Select at least one berth to import.", true);
+    return;
+  }}
+  try {{
+    const result = await submitJson("/api/berths/import-chain", "POST", {{
+      layout_id: layoutId,
+      berth_ids: berthIds,
+    }});
+    const importedCount = Array.isArray(result.imported) ? result.imported.length : 0;
+    const skippedCount = Array.isArray(result.skipped_existing) ? result.skipped_existing.length : 0;
+    setChainStatus(`Imported ${{importedCount}} berth(s) into ${{layoutId}}${{skippedCount ? `; skipped ${{skippedCount}} existing.` : "."}} Refresh to see them in the berth editor.`);
+  }} catch (error) {{
+    console.error(error);
+    setChainStatus("Failed to import selected berths.", true);
+  }}
 }}
 
 async function createLayout() {{
@@ -494,6 +739,8 @@ async function deleteSignal(rowKey) {{
   await submitJson(`/api/signals/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
   window.location.reload();
 }}
+
+loadHeadcodes();
 </script>
 </body>
 </html>
@@ -861,6 +1108,88 @@ async def create_berth(payload: BerthPayload):
         return {"status": "created", "id": payload.id, "berth": _model_dump(payload)}
 
 
+@app.post("/api/berths/import-chain")
+async def import_chain_berths(payload: BerthImportPayload):
+    """Import selected berth IDs from a displayed chain into a layout."""
+    berth_names = _normalise_import_berth_ids(payload.berth_ids)
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            _require_layout_exists(conn, payload.layout_id)
+            existing_rows = conn.execute(
+                """
+                SELECT id, name, x, y, width
+                FROM berth
+                WHERE layout_id = ?
+                ORDER BY x ASC, y ASC, id ASC
+                """,
+                (payload.layout_id,),
+            ).fetchall()
+            existing_names = {row["name"] for row in existing_rows}
+            existing_ids = {row["id"] for row in existing_rows}
+
+            if existing_rows:
+                anchor = max(
+                    existing_rows,
+                    key=lambda row: (
+                        (row["x"] or 0) + (row["width"] or DEFAULT_BERTH_WIDTH),
+                        row["y"] or 0,
+                    ),
+                )
+                next_x = (
+                    int(anchor["x"] or 0)
+                    + int(anchor["width"] or DEFAULT_BERTH_WIDTH)
+                    + DEFAULT_BERTH_GAP
+                )
+                next_y = int(anchor["y"] or 0)
+            else:
+                next_x = DEFAULT_BERTH_START_X
+                next_y = DEFAULT_BERTH_START_Y
+
+            rows_to_insert: list[tuple[str, str, str, int, int, int, int, str]] = []
+            imported: list[dict[str, Any]] = []
+            skipped_existing: list[str] = []
+            for berth_name in berth_names:
+                berth_id = f"{payload.layout_id}:{berth_name}"
+                if berth_name in existing_names or berth_id in existing_ids:
+                    skipped_existing.append(berth_name)
+                    continue
+                rows_to_insert.append(
+                    (
+                        berth_id,
+                        payload.layout_id,
+                        berth_name,
+                        next_x,
+                        next_y,
+                        DEFAULT_BERTH_WIDTH,
+                        DEFAULT_BERTH_HEIGHT,
+                        "normal",
+                    )
+                )
+                imported.append(
+                    {"id": berth_id, "name": berth_name, "x": next_x, "y": next_y}
+                )
+                existing_names.add(berth_name)
+                existing_ids.add(berth_id)
+                next_x += DEFAULT_BERTH_WIDTH + DEFAULT_BERTH_GAP
+
+            if rows_to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows_to_insert,
+                )
+
+        return {
+            "status": "imported",
+            "layout_id": payload.layout_id,
+            "imported": imported,
+            "skipped_existing": skipped_existing,
+        }
+
+
 @app.put("/api/berths/{berth_id}")
 async def update_berth(berth_id: str, payload: BerthPayload):
     """Update a berth row."""
@@ -1080,21 +1409,7 @@ async def get_trains():
     """Get all trains."""
     with get_conn() as conn:
         try:
-            if _table_exists(conn, "train"):
-                rows = conn.execute(
-                    "SELECT * FROM train ORDER BY created_at DESC"
-                ).fetchall()
-                if rows:
-                    return [
-                        {
-                            "id": row["id"],
-                            "headcode": row["headcode"],
-                            "description": row["description"],
-                            "toc": row["toc"],
-                            "created_at": row["created_at"],
-                        }
-                        for row in rows
-                    ]
+            trains: list[dict[str, Any]] = []
 
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
@@ -1104,20 +1419,43 @@ async def get_trains():
                     ORDER BY last_time_ms DESC, td_area, headcode
                     """
                 ).fetchall()
-                return [
-                    {
-                        "id": f"{row['td_area']}:{row['headcode']}",
-                        "headcode": row["headcode"],
-                        "description": row["location_name"] or row["to_berth"] or row["from_berth"],
-                        "toc": row["platform"],
-                        "created_at": row["last_time_iso"],
-                        "td_area": row["td_area"],
-                        "current_berth": row["to_berth"] or row["from_berth"],
-                    }
-                    for row in rows
-                    if row["headcode"]
-                ]
-            return []
+                for row in rows:
+                    if not row["headcode"]:
+                        continue
+                    trains.append(
+                        {
+                            "id": f"{row['td_area']}:{row['headcode']}",
+                            "headcode": row["headcode"],
+                            "description": row["location_name"] or row["to_berth"] or row["from_berth"],
+                            "toc": row["platform"],
+                            "created_at": row["last_time_iso"],
+                            "td_area": row["td_area"],
+                            "current_berth": row["to_berth"] or row["from_berth"],
+                            "source": "td_state",
+                            "duplicate_key": row["headcode"],
+                        }
+                    )
+
+            if _table_exists(conn, "train"):
+                rows = conn.execute(
+                    "SELECT * FROM train ORDER BY created_at DESC"
+                ).fetchall()
+                trains.extend(
+                    [
+                        {
+                            "id": row["id"],
+                            "headcode": row["headcode"],
+                            "description": row["description"],
+                            "toc": row["toc"],
+                            "created_at": row["created_at"],
+                            "source": "train",
+                            "duplicate_key": row["headcode"] or None,
+                        }
+                        for row in rows
+                    ]
+                )
+
+            return trains
         except sqlite3.OperationalError as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
