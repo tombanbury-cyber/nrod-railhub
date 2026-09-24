@@ -1146,6 +1146,7 @@ async def import_chain_berths(payload: BerthImportPayload):
                 next_x = DEFAULT_BERTH_START_X
                 next_y = DEFAULT_BERTH_START_Y
 
+            rows_to_insert: list[tuple[str, str, str, int, int, int, int, str]] = []
             imported: list[dict[str, Any]] = []
             skipped_existing: list[str] = []
             for berth_name in berth_names:
@@ -1153,11 +1154,7 @@ async def import_chain_berths(payload: BerthImportPayload):
                 if berth_name in existing_names or berth_id in existing_ids:
                     skipped_existing.append(berth_name)
                     continue
-                conn.execute(
-                    """
-                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                rows_to_insert.append(
                     (
                         berth_id,
                         payload.layout_id,
@@ -1167,7 +1164,7 @@ async def import_chain_berths(payload: BerthImportPayload):
                         DEFAULT_BERTH_WIDTH,
                         DEFAULT_BERTH_HEIGHT,
                         "normal",
-                    ),
+                    )
                 )
                 imported.append(
                     {"id": berth_id, "name": berth_name, "x": next_x, "y": next_y}
@@ -1175,6 +1172,15 @@ async def import_chain_berths(payload: BerthImportPayload):
                 existing_names.add(berth_name)
                 existing_ids.add(berth_id)
                 next_x += DEFAULT_BERTH_WIDTH + DEFAULT_BERTH_GAP
+
+            if rows_to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows_to_insert,
+                )
 
         return {
             "status": "imported",
@@ -1426,7 +1432,7 @@ async def get_trains():
                             "td_area": row["td_area"],
                             "current_berth": row["to_berth"] or row["from_berth"],
                             "source": "td_state",
-                            "duplicate_key": f"{row['td_area']}:{row['headcode']}",
+                            "duplicate_key": row["headcode"],
                         }
                     )
 
@@ -1443,7 +1449,7 @@ async def get_trains():
                             "toc": row["toc"],
                             "created_at": row["created_at"],
                             "source": "train",
-                            "duplicate_key": row["id"] if row["id"] and ":" in row["id"] else None,
+                            "duplicate_key": row["headcode"] or None,
                         }
                         for row in rows
                     ]
