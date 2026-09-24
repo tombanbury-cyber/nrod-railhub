@@ -501,7 +501,15 @@ function renderHeadcodeResults() {{
   const tbody = document.getElementById("headcode-results");
   const query = document.getElementById("headcode-search").value.trim().toLowerCase();
   tbody.innerHTML = "";
+  const liveHeadcodes = new Set(
+    headcodeRows
+      .filter(train => train.source === "td_state" && train.headcode)
+      .map(train => train.headcode)
+  );
   const filtered = headcodeRows.filter(train => {{
+    if (train.source === "train" && train.headcode && liveHeadcodes.has(train.headcode)) {{
+      return false;
+    }}
     return [train.headcode, train.td_area, train.id, train.description, train.current_berth]
       .some(value => String(value || "").toLowerCase().includes(query));
   }});
@@ -1394,6 +1402,9 @@ async def get_trains():
     """Get all trains."""
     with get_conn() as conn:
         try:
+            trains: list[dict[str, Any]] = []
+            live_headcodes: set[str] = set()
+
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
                     """
@@ -1402,8 +1413,11 @@ async def get_trains():
                     ORDER BY last_time_ms DESC, td_area, headcode
                     """
                 ).fetchall()
-                if rows:
-                    return [
+                for row in rows:
+                    if not row["headcode"]:
+                        continue
+                    live_headcodes.add(row["headcode"])
+                    trains.append(
                         {
                             "id": f"{row['td_area']}:{row['headcode']}",
                             "headcode": row["headcode"],
@@ -1412,28 +1426,30 @@ async def get_trains():
                             "created_at": row["last_time_iso"],
                             "td_area": row["td_area"],
                             "current_berth": row["to_berth"] or row["from_berth"],
+                            "source": "td_state",
                         }
-                        for row in rows
-                        if row["headcode"]
-                    ]
+                    )
 
             if _table_exists(conn, "train"):
                 rows = conn.execute(
                     "SELECT * FROM train ORDER BY created_at DESC"
                 ).fetchall()
-                if rows:
-                    return [
+                trains.extend(
+                    [
                         {
                             "id": row["id"],
                             "headcode": row["headcode"],
                             "description": row["description"],
                             "toc": row["toc"],
                             "created_at": row["created_at"],
+                            "source": "train",
+                            "live_duplicate": bool(row["headcode"] and row["headcode"] in live_headcodes),
                         }
                         for row in rows
                     ]
+                )
 
-            return []
+            return trains
         except sqlite3.OperationalError as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 

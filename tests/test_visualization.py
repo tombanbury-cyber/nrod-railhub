@@ -211,7 +211,7 @@ def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
 
 
 def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch, visualisation_db_path):
-    """Test /trains includes live TD rows and suppresses duplicate static headcodes."""
+    """Test /trains merges live TD rows with static rows and flags live duplicates."""
     conn = sqlite3.connect(visualisation_db_path)
     conn.executescript(
         """
@@ -248,10 +248,22 @@ def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch,
         and train["headcode"] == "1A23"
         and train["td_area"] == "EK"
         and train["current_berth"] == "BRTH_10"
+        and train["source"] == "td_state"
         for train in trains
     )
-    assert any(train["id"] == "WK:2C90" and train["current_berth"] == "BRTH_11" for train in trains)
-    assert not any(train["id"] == "T1" for train in trains)
+    assert any(
+        train["id"] == "WK:2C90"
+        and train["current_berth"] == "BRTH_11"
+        and train["source"] == "td_state"
+        for train in trains
+    )
+    assert any(
+        train["id"] == "T1"
+        and train["headcode"] == "2C90"
+        and train["source"] == "train"
+        and train["live_duplicate"] is True
+        for train in trains
+    )
 
 
 def test_api_returns_500_when_env_var_db_lacks_visualisation_schema(monkeypatch):
