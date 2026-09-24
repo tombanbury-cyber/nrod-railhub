@@ -308,9 +308,11 @@ def test_toc_td_areas_add_and_delete_persist_to_db():
                 original_flask_init(self, *args, **kwargs)
                 app_holder["app"] = self
 
-            Flask.__init__ = patched_init
-            web.start_web_dashboard(db_path, 8088, None, None)
-            Flask.__init__ = original_flask_init
+            try:
+                Flask.__init__ = patched_init
+                web.start_web_dashboard(db_path, 8088, None, None)
+            finally:
+                Flask.__init__ = original_flask_init
 
         import unittest.mock as mock
 
