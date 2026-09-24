@@ -210,6 +210,45 @@ def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
     assert layout["name"] == "Demo Station"
 
 
+def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch, visualisation_db_path):
+    """Test /trains exposes live TD headcodes even when the train table exists."""
+    conn = sqlite3.connect(visualisation_db_path)
+    conn.executescript(
+        """
+        CREATE TABLE td_state (
+            td_area TEXT,
+            headcode TEXT,
+            last_time_ms INTEGER,
+            last_time_iso TEXT,
+            from_berth TEXT,
+            to_berth TEXT,
+            stanox TEXT,
+            location_name TEXT,
+            platform TEXT,
+            uid TEXT
+        );
+        INSERT INTO td_state VALUES
+            ('EK', '1A23', 300, '2026-02-14T12:05:00Z', 'BRTH_9', 'BRTH_10', '12345', 'Waterloo', '1', NULL);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    import app.visualisation.app as app_module
+
+    monkeypatch.setattr(app_module, "DB_PATH", Path(visualisation_db_path))
+    client = TestClient(app_module.app)
+    response = client.get("/trains")
+
+    assert response.status_code == 200
+    trains = response.json()
+    assert trains[0]["id"] == "EK:1A23"
+    assert trains[0]["headcode"] == "1A23"
+    assert trains[0]["td_area"] == "EK"
+    assert trains[0]["current_berth"] == "BRTH_10"
+    assert any(train["id"] == "T1" and train["headcode"] == "2C90" for train in trains)
+
+
 def test_api_returns_500_when_env_var_db_lacks_visualisation_schema(monkeypatch):
     """Test API failure path when env-selected DB does not have the PoC schema."""
     import app.visualisation.app as app_module
@@ -374,10 +413,77 @@ def test_admin_page_renders_editors(monkeypatch):
         assert response.status_code == 200
         page = response.text
         assert "Visualisation admin" in page
+        assert "Headcode chain import" in page
+        assert "Search headcodes" in page
+        assert "Import selected berths" in page
         assert "Layout editor" in page
         assert "Berth editor" in page
         assert "Signal editor" in page
         assert "Demo Station" in page
+    finally:
+        Path(db_path).unlink()
+
+
+def test_admin_import_chain_endpoint_creates_selected_layout_berths(monkeypatch):
+    """Test importing berth chain selections appends new berths to a layout."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO layout (id, name, description, data)
+            VALUES ('north', 'North Layout', 'Import target', '{}')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.post(
+            "/api/berths/import-chain",
+            json={
+                "layout_id": "north",
+                "berth_ids": ["BRTH_2", "BRTH_4", "BRTH_2"],
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "imported"
+        assert payload["layout_id"] == "north"
+        assert [row["name"] for row in payload["imported"]] == ["BRTH_2", "BRTH_4"]
+        assert payload["skipped_existing"] == []
+
+        repeat_response = client.post(
+            "/api/berths/import-chain",
+            json={"layout_id": "north", "berth_ids": ["BRTH_2", "BRTH_9"]},
+        )
+        assert repeat_response.status_code == 200
+        repeat_payload = repeat_response.json()
+        assert [row["name"] for row in repeat_payload["imported"]] == ["BRTH_9"]
+        assert repeat_payload["skipped_existing"] == ["BRTH_2"]
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, name, x, y, width, height, berth_type
+                FROM berth
+                WHERE layout_id = 'north'
+                ORDER BY x ASC
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [
+            ("north:BRTH_2", "BRTH_2", 50, 100, 60, 30, "normal"),
+            ("north:BRTH_4", "BRTH_4", 120, 100, 60, 30, "normal"),
+            ("north:BRTH_9", "BRTH_9", 190, 100, 60, 30, "normal"),
+        ]
     finally:
         Path(db_path).unlink()
 
