@@ -1394,10 +1394,6 @@ async def get_trains():
     """Get all trains."""
     with get_conn() as conn:
         try:
-            trains: list[dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            live_headcode_counts: dict[str, int] = {}
-
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
                     """
@@ -1406,19 +1402,10 @@ async def get_trains():
                     ORDER BY last_time_ms DESC, td_area, headcode
                     """
                 ).fetchall()
-                for row in rows:
-                    if not row["headcode"]:
-                        continue
-                    train_id = f"{row['td_area']}:{row['headcode']}"
-                    if train_id in seen_ids:
-                        continue
-                    seen_ids.add(train_id)
-                    live_headcode_counts[row["headcode"]] = (
-                        live_headcode_counts.get(row["headcode"], 0) + 1
-                    )
-                    trains.append(
+                if rows:
+                    return [
                         {
-                            "id": train_id,
+                            "id": f"{row['td_area']}:{row['headcode']}",
                             "headcode": row["headcode"],
                             "description": row["location_name"] or row["to_berth"] or row["from_berth"],
                             "toc": row["platform"],
@@ -1426,19 +1413,16 @@ async def get_trains():
                             "td_area": row["td_area"],
                             "current_berth": row["to_berth"] or row["from_berth"],
                         }
-                    )
+                        for row in rows
+                        if row["headcode"]
+                    ]
 
             if _table_exists(conn, "train"):
                 rows = conn.execute(
                     "SELECT * FROM train ORDER BY created_at DESC"
                 ).fetchall()
-                for row in rows:
-                    if row["headcode"] and live_headcode_counts.get(row["headcode"]) == 1:
-                        continue
-                    if row["id"] in seen_ids:
-                        continue
-                    seen_ids.add(row["id"])
-                    trains.append(
+                if rows:
+                    return [
                         {
                             "id": row["id"],
                             "headcode": row["headcode"],
@@ -1446,9 +1430,10 @@ async def get_trains():
                             "toc": row["toc"],
                             "created_at": row["created_at"],
                         }
-                    )
+                        for row in rows
+                    ]
 
-            return trains
+            return []
         except sqlite3.OperationalError as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
