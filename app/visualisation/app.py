@@ -11,13 +11,13 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, constr
 
 from .route_inference import infer_train_chain
 
@@ -41,32 +41,32 @@ class EventCreate(BaseModel):
 
 class LayoutPayload(BaseModel):
     """Model for layout CRUD operations."""
-    id: str
-    name: str
+    id: constr(strip_whitespace=True, min_length=1)
+    name: constr(strip_whitespace=True, min_length=1)
     description: Optional[str] = None
     data: dict[str, Any] = Field(default_factory=dict)
 
 
 class BerthPayload(BaseModel):
     """Model for berth CRUD operations."""
-    id: str
-    layout_id: str
-    name: str
-    x: int
-    y: int
-    width: int = 60
-    height: int = 30
-    berth_type: str = "normal"
+    id: constr(strip_whitespace=True, min_length=1)
+    layout_id: constr(strip_whitespace=True, min_length=1)
+    name: constr(strip_whitespace=True, min_length=1)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(default=60, gt=0)
+    height: int = Field(default=30, gt=0)
+    berth_type: Literal["normal", "platform", "siding"] = "normal"
 
 
 class SignalPayload(BaseModel):
     """Model for signal CRUD operations."""
-    id: str
-    layout_id: str
-    name: str
-    x: int
-    y: int
-    signal_type: str = "auto"
+    id: constr(strip_whitespace=True, min_length=1)
+    layout_id: constr(strip_whitespace=True, min_length=1)
+    name: constr(strip_whitespace=True, min_length=1)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    signal_type: Literal["auto", "controlled", "shunt"] = "auto"
 
 
 class ConnectionManager:
@@ -159,6 +159,13 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _require_layout_exists(conn: sqlite3.Connection, layout_id: str) -> None:
+    """Raise a 404 when a referenced layout does not exist."""
+    existing = conn.execute("SELECT id FROM layout WHERE id = ?", (layout_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Layout not found")
 
 
 def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.Row], signal_rows: list[sqlite3.Row]) -> str:
@@ -832,6 +839,7 @@ async def create_berth(payload: BerthPayload):
         _require_visualisation_schema(conn)
         try:
             with conn:
+                _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
@@ -863,6 +871,7 @@ async def update_berth(berth_id: str, payload: BerthPayload):
                 existing = conn.execute("SELECT id FROM berth WHERE id = ?", (berth_id,)).fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Berth not found")
+                _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     UPDATE berth
@@ -906,6 +915,7 @@ async def create_signal(payload: SignalPayload):
         _require_visualisation_schema(conn)
         try:
             with conn:
+                _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     INSERT INTO signal (id, layout_id, name, x, y, signal_type)
@@ -935,6 +945,7 @@ async def update_signal(signal_id: str, payload: SignalPayload):
                 existing = conn.execute("SELECT id FROM signal WHERE id = ?", (signal_id,)).fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Signal not found")
+                _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     UPDATE signal
