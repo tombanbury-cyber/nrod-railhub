@@ -211,7 +211,7 @@ def test_api_uses_env_var_db_path(monkeypatch, visualisation_db_path):
 
 
 def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch, visualisation_db_path):
-    """Test /trains exposes live TD headcodes even when the train table exists."""
+    """Test /trains includes live TD rows and suppresses duplicate static headcodes."""
     conn = sqlite3.connect(visualisation_db_path)
     conn.executescript(
         """
@@ -228,7 +228,8 @@ def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch,
             uid TEXT
         );
         INSERT INTO td_state VALUES
-            ('EK', '1A23', 300, '2026-02-14T12:05:00Z', 'BRTH_9', 'BRTH_10', '12345', 'Waterloo', '1', NULL);
+            ('EK', '1A23', 300, '2026-02-14T12:05:00Z', 'BRTH_9', 'BRTH_10', '12345', 'Waterloo', '1', NULL),
+            ('WK', '2C90', 310, '2026-02-14T12:06:00Z', 'BRTH_10', 'BRTH_11', '54321', 'Victoria', '3', NULL);
         """
     )
     conn.commit()
@@ -242,11 +243,15 @@ def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch,
 
     assert response.status_code == 200
     trains = response.json()
-    assert trains[0]["id"] == "EK:1A23"
-    assert trains[0]["headcode"] == "1A23"
-    assert trains[0]["td_area"] == "EK"
-    assert trains[0]["current_berth"] == "BRTH_10"
-    assert any(train["id"] == "T1" and train["headcode"] == "2C90" for train in trains)
+    assert any(
+        train["id"] == "EK:1A23"
+        and train["headcode"] == "1A23"
+        and train["td_area"] == "EK"
+        and train["current_berth"] == "BRTH_10"
+        for train in trains
+    )
+    assert any(train["id"] == "WK:2C90" and train["current_berth"] == "BRTH_11" for train in trains)
+    assert not any(train["id"] == "T1" for train in trains)
 
 
 def test_api_returns_500_when_env_var_db_lacks_visualisation_schema(monkeypatch):

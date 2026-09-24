@@ -28,6 +28,12 @@ DB_PATH = Path(__file__).parent.parent.parent / "railhub.db"
 # Static files path
 STATIC_PATH = Path(__file__).parent.parent.parent / "web" / "static"
 
+DEFAULT_BERTH_WIDTH = 60
+DEFAULT_BERTH_HEIGHT = 30
+DEFAULT_BERTH_GAP = 10
+DEFAULT_BERTH_START_X = 50
+DEFAULT_BERTH_START_Y = 100
+
 
 class EventCreate(BaseModel):
     """Model for creating new events via POST /event."""
@@ -408,8 +414,8 @@ def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.
       <label>Name <input id="new-berth-name" /></label>
       <label>X <input id="new-berth-x" type="number" value="0" /></label>
       <label>Y <input id="new-berth-y" type="number" value="0" /></label>
-      <label>Width <input id="new-berth-width" type="number" value="60" /></label>
-      <label>Height <input id="new-berth-height" type="number" value="30" /></label>
+      <label>Width <input id="new-berth-width" type="number" value="{DEFAULT_BERTH_WIDTH}" /></label>
+      <label>Height <input id="new-berth-height" type="number" value="{DEFAULT_BERTH_HEIGHT}" /></label>
       <label>Type <input id="new-berth-berth_type" value="normal" /></label>
     </div>
     <p><button type="button" onclick="createBerth()">Create berth</button></p>
@@ -1116,13 +1122,20 @@ async def import_chain_berths(payload: BerthImportPayload):
             if existing_rows:
                 anchor = max(
                     existing_rows,
-                    key=lambda row: ((row["x"] or 0) + (row["width"] or 60), row["y"] or 0),
+                    key=lambda row: (
+                        (row["x"] or 0) + (row["width"] or DEFAULT_BERTH_WIDTH),
+                        row["y"] or 0,
+                    ),
                 )
-                next_x = int(anchor["x"] or 0) + int(anchor["width"] or 60) + 10
+                next_x = (
+                    int(anchor["x"] or 0)
+                    + int(anchor["width"] or DEFAULT_BERTH_WIDTH)
+                    + DEFAULT_BERTH_GAP
+                )
                 next_y = int(anchor["y"] or 0)
             else:
-                next_x = 50
-                next_y = 100
+                next_x = DEFAULT_BERTH_START_X
+                next_y = DEFAULT_BERTH_START_Y
 
             imported: list[dict[str, Any]] = []
             skipped_existing: list[str] = []
@@ -1136,14 +1149,23 @@ async def import_chain_berths(payload: BerthImportPayload):
                     INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (berth_id, payload.layout_id, berth_name, next_x, next_y, 60, 30, "normal"),
+                    (
+                        berth_id,
+                        payload.layout_id,
+                        berth_name,
+                        next_x,
+                        next_y,
+                        DEFAULT_BERTH_WIDTH,
+                        DEFAULT_BERTH_HEIGHT,
+                        "normal",
+                    ),
                 )
                 imported.append(
                     {"id": berth_id, "name": berth_name, "x": next_x, "y": next_y}
                 )
                 existing_names.add(berth_name)
                 existing_ids.add(berth_id)
-                next_x += 70
+                next_x += DEFAULT_BERTH_WIDTH + DEFAULT_BERTH_GAP
 
         return {
             "status": "imported",
@@ -1374,6 +1396,7 @@ async def get_trains():
         try:
             trains: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
+            live_headcodes: set[str] = set()
 
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
@@ -1390,6 +1413,7 @@ async def get_trains():
                     if train_id in seen_ids:
                         continue
                     seen_ids.add(train_id)
+                    live_headcodes.add(row["headcode"])
                     trains.append(
                         {
                             "id": train_id,
@@ -1407,6 +1431,8 @@ async def get_trains():
                     "SELECT * FROM train ORDER BY created_at DESC"
                 ).fetchall()
                 for row in rows:
+                    if row["headcode"] and row["headcode"] in live_headcodes:
+                        continue
                     if row["id"] in seen_ids:
                         continue
                     seen_ids.add(row["id"])
