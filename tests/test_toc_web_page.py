@@ -288,3 +288,80 @@ def test_toc_name_is_first_column():
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+
+
+def test_toc_td_areas_add_and_delete_persist_to_db():
+    """Test that TOC-TD area add/delete via web route persists in SQLite."""
+    from flask import Flask
+    from nrod_railhub import web
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        app_holder = {}
+
+        def start_app():
+            original_flask_init = Flask.__init__
+
+            def patched_init(self, *args, **kwargs):
+                original_flask_init(self, *args, **kwargs)
+                app_holder["app"] = self
+
+            Flask.__init__ = patched_init
+            web.start_web_dashboard(db_path, 8088, None, None)
+            Flask.__init__ = original_flask_init
+
+        import unittest.mock as mock
+
+        with mock.patch("flask.Flask.run"):
+            start_app()
+
+        app = app_holder["app"]
+        client = app.test_client()
+
+        add_response = client.post(
+            "/toc-td-areas",
+            data={
+                "action": "add",
+                "toc_code": "SW",
+                "td_area": "EK",
+                "is_primary": "on",
+                "notes": "persist-me",
+            },
+        )
+        assert add_response.status_code == 302
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT toc_code, td_area, is_primary, source, created_by, notes FROM toc_td_areas WHERE toc_code=? AND td_area=?",
+            ("SW", "EK"),
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "SW"
+        assert row[1] == "EK"
+        assert row[2] == 1
+        assert row[3] == "web_ui"
+        assert row[4] == "admin"
+        assert row[5] == "persist-me"
+
+        delete_response = client.post(
+            "/toc-td-areas",
+            data={"action": "delete", "toc_code": "SW", "td_area": "EK"},
+        )
+        assert delete_response.status_code == 302
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT 1 FROM toc_td_areas WHERE toc_code=? AND td_area=?",
+            ("SW", "EK"),
+        ).fetchone()
+        conn.close()
+
+        assert row is None
+
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)

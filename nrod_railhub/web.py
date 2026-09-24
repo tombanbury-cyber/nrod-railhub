@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional
 
 from flask import Flask, request, redirect
 
+from .database import RailDB
 from .logging_config import get_logger
 from .interesting import classify_interesting_train, format_location
 
@@ -33,6 +34,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
     app = Flask(__name__)
     db_path = str(pathlib.Path(db_path).expanduser())
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    rail_db = RailDB(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000;")
     
@@ -1936,16 +1938,13 @@ filterInput.addEventListener('input', updateFilter);
                 
                 if toc_code and td_area:
                     try:
-                        q(
-                            """
-                            INSERT INTO toc_td_areas(toc_code, td_area, is_primary, source, created_by, notes)
-                            VALUES (?, ?, ?, 'web_ui', 'admin', ?)
-                            ON CONFLICT(toc_code, td_area) DO UPDATE SET
-                                is_primary=excluded.is_primary,
-                                notes=excluded.notes,
-                                created_at_ts=strftime('%s','now') * 1000
-                            """,
-                            (toc_code, td_area, 1 if is_primary else 0, notes if notes else None)
+                        rail_db.upsert_toc_td_area(
+                            toc_code=toc_code,
+                            td_area=td_area,
+                            is_primary=is_primary,
+                            source="web_ui",
+                            created_by="admin",
+                            notes=notes if notes else None,
                         )
                         logger.info(f"Added/updated TOC-TD mapping: {toc_code} <-> {td_area}")
                     except Exception as e:
@@ -1960,7 +1959,7 @@ filterInput.addEventListener('input', updateFilter);
                 
                 if toc_code and td_area:
                     try:
-                        q("DELETE FROM toc_td_areas WHERE toc_code=? AND td_area=?", (toc_code, td_area))
+                        rail_db.delete_toc_td_area(toc_code=toc_code, td_area=td_area)
                         logger.info(f"Deleted TOC-TD mapping: {toc_code} <-> {td_area}")
                     except Exception as e:
                         logger.error(f"Error deleting TOC-TD mapping: {e}")
