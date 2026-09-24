@@ -261,7 +261,7 @@ def test_trains_endpoint_includes_live_td_rows_alongside_train_rows(monkeypatch,
         train["id"] == "T1"
         and train["headcode"] == "2C90"
         and train["source"] == "train"
-        and train["live_duplicate"] is True
+        and train["duplicate_key"] is None
         for train in trains
     )
 

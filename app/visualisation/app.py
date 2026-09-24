@@ -501,13 +501,13 @@ function renderHeadcodeResults() {{
   const tbody = document.getElementById("headcode-results");
   const query = document.getElementById("headcode-search").value.trim().toLowerCase();
   tbody.innerHTML = "";
-  const liveHeadcodes = new Set(
+  const liveDuplicateKeys = new Set(
     headcodeRows
-      .filter(train => train.source === "td_state" && train.headcode)
-      .map(train => train.headcode)
+      .filter(train => train.source === "td_state" && train.duplicate_key)
+      .map(train => train.duplicate_key)
   );
   const filtered = headcodeRows.filter(train => {{
-    if (train.source === "train" && train.headcode && liveHeadcodes.has(train.headcode)) {{
+    if (train.source === "train" && train.duplicate_key && liveDuplicateKeys.has(train.duplicate_key)) {{
       return false;
     }}
     return [train.headcode, train.td_area, train.id, train.description, train.current_berth]
@@ -568,6 +568,7 @@ function renderChainRows(chainData, train) {{
     checkbox.className = "chain-import-checkbox";
     checkbox.dataset.berthId = item.berth_id || "";
     checkbox.dataset.chainIndex = String(index);
+    checkbox.setAttribute("aria-label", `Import berth ${{item.berth_id || index + 1}}`);
     checkboxCell.appendChild(checkbox);
     row.appendChild(checkboxCell);
     row.appendChild(createTextCell(item.berth_id || ""));
@@ -1403,7 +1404,6 @@ async def get_trains():
     with get_conn() as conn:
         try:
             trains: list[dict[str, Any]] = []
-            live_headcodes: set[str] = set()
 
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
@@ -1416,7 +1416,6 @@ async def get_trains():
                 for row in rows:
                     if not row["headcode"]:
                         continue
-                    live_headcodes.add(row["headcode"])
                     trains.append(
                         {
                             "id": f"{row['td_area']}:{row['headcode']}",
@@ -1427,6 +1426,7 @@ async def get_trains():
                             "td_area": row["td_area"],
                             "current_berth": row["to_berth"] or row["from_berth"],
                             "source": "td_state",
+                            "duplicate_key": f"{row['td_area']}:{row['headcode']}",
                         }
                     )
 
@@ -1443,7 +1443,7 @@ async def get_trains():
                             "toc": row["toc"],
                             "created_at": row["created_at"],
                             "source": "train",
-                            "live_duplicate": bool(row["headcode"] and row["headcode"] in live_headcodes),
+                            "duplicate_key": row["id"] if row["id"] and ":" in row["id"] else None,
                         }
                         for row in rows
                     ]
