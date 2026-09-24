@@ -1396,7 +1396,7 @@ async def get_trains():
         try:
             trains: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
-            live_headcodes: set[str] = set()
+            live_headcode_counts: dict[str, int] = {}
 
             if _table_exists(conn, "td_state"):
                 rows = conn.execute(
@@ -1413,7 +1413,9 @@ async def get_trains():
                     if train_id in seen_ids:
                         continue
                     seen_ids.add(train_id)
-                    live_headcodes.add(row["headcode"])
+                    live_headcode_counts[row["headcode"]] = (
+                        live_headcode_counts.get(row["headcode"], 0) + 1
+                    )
                     trains.append(
                         {
                             "id": train_id,
@@ -1431,7 +1433,7 @@ async def get_trains():
                     "SELECT * FROM train ORDER BY created_at DESC"
                 ).fetchall()
                 for row in rows:
-                    if row["headcode"] and row["headcode"] in live_headcodes:
+                    if row["headcode"] and live_headcode_counts.get(row["headcode"]) == 1:
                         continue
                     if row["id"] in seen_ids:
                         continue

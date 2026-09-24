@@ -493,6 +493,44 @@ def test_admin_import_chain_endpoint_creates_selected_layout_berths(monkeypatch)
         Path(db_path).unlink()
 
 
+def test_admin_import_chain_endpoint_rejects_empty_selection(monkeypatch):
+    """Test importing without any selected berths returns a validation error."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.post(
+            "/api/berths/import-chain",
+            json={"layout_id": "demo", "berth_ids": ["   ", ""]},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == "At least one berth must be selected"
+    finally:
+        Path(db_path).unlink()
+
+
+def test_admin_import_chain_endpoint_requires_existing_layout(monkeypatch):
+    """Test importing chain berths rejects unknown layout IDs."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        response = client.post(
+            "/api/berths/import-chain",
+            json={"layout_id": "missing", "berth_ids": ["BRTH_2"]},
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Layout not found"
+    finally:
+        Path(db_path).unlink()
+
+
 def test_admin_crud_endpoints_manage_layout_berth_and_signal(monkeypatch):
     """Test the CRUD endpoints can create, update, rename, and delete rows."""
     db_path = _create_visualisation_db()
