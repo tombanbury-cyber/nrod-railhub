@@ -14,7 +14,7 @@ import json
 import yaml
 import logging
 import queue
-from datetime import datetime
+from datetime import datetime, timezone
 import html
 from urllib.parse import urlencode
 
@@ -93,6 +93,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             f"<a href='/tocs' class='navlink {'active' if active=='tocs' else ''}'>TOCs</a>"
             f"<a href='/toc-td-areas' class='navlink {'active' if active=='toc-td-areas' else ''}'>TOC-TD Areas</a>"
             f"<a href='/signal-mappings' class='navlink {'active' if active=='signal-mappings' else ''}'>Signal Mappings</a>"
+            f"<a href='/td-decode-lab' class='navlink {'active' if active=='td-decode-lab' else ''}'>TD Decode Lab</a>"
             f"<a href='/stats' class='navlink {'active' if active=='stats' else ''}'>Stats</a>"
             "</div>"
             "<div class='quickfilter'>"
@@ -134,6 +135,11 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             "th a{display:block;width:100%;height:100%}"
             "th:hover{background:#e8f0fe}"
             ".pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#eef3ff;margin-right:6px;font-size:13px}"
+            ".badge{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}"
+            ".badge.inferred{background:#eef2ff;color:#3730a3}"
+            ".badge.reviewed{background:#fef3c7;color:#92400e}"
+            ".badge.confirmed{background:#d1fae5;color:#065f46}"
+            ".badge.manual{background:#e0f2fe;color:#075985}"
             ".dim{color:#6c757d;font-size:12px}"
             ".mono{font-family:monospace}"
             "</style>"
@@ -142,6 +148,43 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         body = "<div class='container'>" + nav_html(active) + "".join(body_parts) + "</div>"
         foot = "</body></html>"
         return "\n".join([head, body, foot])
+
+    def _parse_date_bound(value: str, *, end_of_day: bool = False) -> Optional[int]:
+        value = (value or "").strip()
+        if not value:
+            return None
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+            if end_of_day:
+                parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999000)
+            return int(parsed.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        except Exception:
+            return None
+
+    def _sclass_bit_state(raw_data: str, byte_offset: int, bit: int) -> Optional[int]:
+        try:
+            payload = bytes.fromhex((raw_data or "").strip())
+        except Exception:
+            return None
+        if byte_offset < 0 or byte_offset >= len(payload):
+            return None
+        return 1 if payload[byte_offset] & (1 << bit) else 0
+
+    def _sclass_badge(state: str, confidence: Optional[float] = None, source: Optional[str] = None) -> str:
+        state_value = (state or "inferred").strip().lower()
+        if state_value not in {"inferred", "reviewed", "confirmed"}:
+            state_value = "inferred"
+        label_map = {
+            "inferred": "Inferred",
+            "reviewed": "Manually reviewed",
+            "confirmed": "Confirmed",
+        }
+        label = label_map[state_value]
+        if source:
+            label = f"{label} · {html.escape(source)}"
+        if confidence is not None:
+            label = f"{label} · {confidence:.2f}"
+        return f"<span class='badge {state_value}'>{label}</span>"
 
     @app.get("/")
     def index():
@@ -1041,6 +1084,430 @@ filterInput.addEventListener('input', updateFilter);
             logger.error(f"Web dashboard: Error querying S-class correlations: {e}")
             body.append(f"<p><i>Error querying S-class correlations: {e}</i></p>")
         return render_page("Signals - NR RailHub", body, active="signals")
+
+    @app.get("/td-decode-lab")
+    def td_decode_lab():
+        """Explore S-Class bit transitions and berth correlations."""
+        view = request.args.get("view", "bit").strip().lower()
+        if view not in {"bit", "berth"}:
+            view = "bit"
+
+        area = request.args.get("area", "").strip().upper()
+        address = request.args.get("address", "").strip().upper()
+        berth = request.args.get("berth", "").strip().upper()
+        try:
+            byte_offset = max(0, int(request.args.get("byte_offset", "0") or 0))
+        except ValueError:
+            byte_offset = 0
+        try:
+            bit = int(request.args.get("bit", "").strip()) if request.args.get("bit", "").strip() else None
+        except ValueError:
+            bit = None
+        from_date = request.args.get("from_date", "").strip()
+        to_date = request.args.get("to_date", "").strip()
+        min_confidence_raw = request.args.get("min_confidence", "").strip()
+        try:
+            min_confidence = float(min_confidence_raw) if min_confidence_raw else None
+        except ValueError:
+            min_confidence = None
+
+        try:
+            page = max(1, int(request.args.get("page", "1")))
+        except ValueError:
+            page = 1
+        per_page = 25
+        offset = (page - 1) * per_page
+
+        start_ms = _parse_date_bound(from_date)
+        end_ms = _parse_date_bound(to_date, end_of_day=True)
+
+        def annotation_map(relation_type: str) -> dict[tuple[Any, ...], sqlite3.Row]:
+            sql = """
+                SELECT relation_type, td_area, address, byte_offset, bit, from_berth, to_berth,
+                       state, source, confidence, notes, updated_at_utc
+                FROM td_sclass_lab_annotations
+                WHERE relation_type=?
+            """
+            params: list[Any] = [relation_type]
+            if area:
+                sql += " AND td_area=?"
+                params.append(area)
+            rows = q(sql, params)
+            mapping: dict[tuple[Any, ...], sqlite3.Row] = {}
+            for row in rows:
+                if relation_type == "bit":
+                    mapping[(row["td_area"], row["address"], row["byte_offset"], row["bit"])] = row
+                else:
+                    mapping[(row["td_area"], row["from_berth"], row["to_berth"])] = row
+            return mapping
+
+        bit_annotations = annotation_map("bit")
+        berth_annotations = annotation_map("berth")
+        body = ["<h2>TD Decode Lab</h2>"]
+        body.append(
+            "<p class='dim'>Explore S-Class transition bits, correlated berth moves, and the evidence behind each inferred mapping.</p>"
+        )
+        body.append(
+            f"<p><a class='pill' href='/td-decode-lab?view=bit{f'&area={area}' if area else ''}'>Bit view</a> "
+            f"<a class='pill' href='/td-decode-lab?view=berth{f'&area={area}' if area else ''}'>Berth view</a></p>"
+        )
+
+        body.append(
+            """
+            <form method='get' style='background:#f7f9fc;padding:15px;border-radius:8px;margin:15px 0'>
+                <input type='hidden' name='view' value='"""+view+"""'>
+                <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px'>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>TD Area:</label><input type='text' name='area' value='"""+html.escape(area)+"""' placeholder='e.g. EK' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>Address:</label><input type='text' name='address' value='"""+html.escape(address)+"""' placeholder='e.g. D0' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>Bit:</label><input type='number' min='0' max='7' name='bit' value='"""+(str(bit) if bit is not None else "")+"""' placeholder='0-7' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>Byte Offset:</label><input type='number' min='0' name='byte_offset' value='"""+str(byte_offset)+"""' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>Berth:</label><input type='text' name='berth' value='"""+html.escape(berth)+"""' placeholder='e.g. 0152' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>From Date:</label><input type='date' name='from_date' value='"""+html.escape(from_date)+"""' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>To Date:</label><input type='date' name='to_date' value='"""+html.escape(to_date)+"""' style='padding:6px;width:100%'></div>
+                    <div><label style='font-weight:600;display:block;margin-bottom:4px'>Min Confidence:</label><input type='number' step='0.01' min='0' max='1' name='min_confidence' value='"""+html.escape(min_confidence_raw)+"""' placeholder='0.75' style='padding:6px;width:100%'></div>
+                </div>
+                <div style='margin-top:12px'>
+                    <button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer;margin-right:8px'>Apply Filters</button>
+                    <a href='/td-decode-lab?view="""+view+"""' style='padding:8px 16px;background:#eee;color:#222;text-decoration:none;border-radius:6px;font-weight:600'>Clear Filters</a>
+                </div>
+            </form>
+            """
+        )
+
+        counts = q(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM td_sclass_state) AS state_count,
+                (SELECT COUNT(*) FROM td_sclass_changes) AS change_count,
+                (SELECT COUNT(*) FROM td_sclass_movement_observations) AS observation_count,
+                (SELECT COUNT(*) FROM td_sclass_movement_scores) AS score_count,
+                (SELECT COUNT(*) FROM td_sclass_lab_annotations) AS annotation_count
+            """
+        )[0]
+        body.append(
+            "<div style='background:#f7f9fc;padding:12px;border-radius:6px;margin:12px 0'>"
+            f"<b>Current states:</b> {counts['state_count']} &nbsp; "
+            f"<b>Changes:</b> {counts['change_count']} &nbsp; "
+            f"<b>Observations:</b> {counts['observation_count']} &nbsp; "
+            f"<b>Scores:</b> {counts['score_count']} &nbsp; "
+            f"<b>Reviewed mappings:</b> {counts['annotation_count']}"
+            "</div>"
+        )
+
+        if view == "bit":
+            summary_sql = """
+                SELECT td_area, address, byte_offset, bit,
+                       COUNT(*) AS change_count,
+                       SUM(CASE WHEN new_state=1 THEN 1 ELSE 0 END) AS on_count,
+                       SUM(CASE WHEN new_state=0 THEN 1 ELSE 0 END) AS off_count,
+                       MAX(ts_ms) AS last_seen_ts,
+                       MAX(ts_iso) AS last_seen_iso
+                FROM td_sclass_changes
+                WHERE 1=1
+            """
+            params: list[Any] = []
+            if area:
+                summary_sql += " AND td_area=?"
+                params.append(area)
+            if address:
+                summary_sql += " AND address=?"
+                params.append(address)
+            if bit is not None:
+                summary_sql += " AND bit=?"
+                params.append(bit)
+            if start_ms is not None:
+                summary_sql += " AND ts_ms>=?"
+                params.append(start_ms)
+            if end_ms is not None:
+                summary_sql += " AND ts_ms<=?"
+                params.append(end_ms)
+            summary_sql += " GROUP BY td_area, address, byte_offset, bit ORDER BY last_seen_ts DESC, change_count DESC LIMIT ? OFFSET ?"
+            params.extend([per_page, offset])
+            summary_rows = q(summary_sql, params)
+
+            state_rows = {}
+            for row in summary_rows:
+                state_row = q(
+                    "SELECT td_area, address, msg_type, last_seen_ts, last_seen_iso, raw_data, byte_length FROM td_sclass_state WHERE td_area=? AND address=?",
+                    (row["td_area"], row["address"]),
+                )
+                if state_row:
+                    state_rows[(row["td_area"], row["address"])] = state_row[0]
+
+            body.append("<h3>Bit / Address Summary</h3>")
+            body.append("<table>")
+            body.append("<tr><th>Area</th><th>Address</th><th>Bit</th><th>Current</th><th>Changes</th><th>ON</th><th>OFF</th><th>Last Seen</th><th>State</th><th>Evidence</th></tr>")
+            for row in summary_rows:
+                key = (row["td_area"], row["address"])
+                state_row = state_rows.get(key)
+                current_state = _sclass_bit_state(state_row["raw_data"], row["byte_offset"], row["bit"]) if state_row else None
+                bit_label = f"{row['address']}.{row['bit']}" if int(row["byte_offset"] or 0) == 0 else f"{row['address']}+{row['byte_offset']}.{row['bit']}"
+                ann = bit_annotations.get((row["td_area"], row["address"], row["byte_offset"], row["bit"]))
+                relation_state = ann["state"] if ann else "inferred"
+                display_confidence = ann["confidence"] if ann and ann["confidence"] is not None else None
+                if min_confidence is not None:
+                    max_conf = display_confidence if display_confidence is not None else 0.0
+                    if max_conf < min_confidence:
+                        continue
+                body.append(
+                    "<tr>"
+                    f"<td>{html.escape(row['td_area'])}</td>"
+                    f"<td><a href='#bit-detail'>{html.escape(row['address'])}</a></td>"
+                    f"<td class='mono'>{html.escape(bit_label)}</td>"
+                    f"<td>{'ON' if current_state == 1 else 'OFF' if current_state == 0 else 'N/A'}</td>"
+                    f"<td>{row['change_count']}</td>"
+                    f"<td>{row['on_count']}</td>"
+                    f"<td>{row['off_count']}</td>"
+                    f"<td class='mono dim'>{html.escape(row['last_seen_iso'] or '')}</td>"
+                    f"<td>{_sclass_badge(relation_state, display_confidence, ann['source'] if ann else None)}</td>"
+                    f"<td><a href='/td-decode-lab?view=bit&area={html.escape(row['td_area'])}&address={html.escape(row['address'])}&byte_offset={row['byte_offset']}&bit={row['bit']}#bit-detail'>Inspect</a></td>"
+                    "</tr>"
+                )
+            body.append("</table>")
+
+            if address and bit is not None:
+                selected_label = f"{address}.{bit}" if byte_offset == 0 else f"{address}+{byte_offset}.{bit}"
+                body.append(f"<h3 id='bit-detail'>Bit Detail · {html.escape(area or 'ALL')} / {html.escape(selected_label)}</h3>")
+                detail_params = [area or None, address, byte_offset, bit]
+                detail_sql = """
+                    SELECT id, ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit, old_state, new_state, raw_old, raw_new
+                    FROM td_sclass_changes
+                    WHERE 1=1
+                """
+                detail_query_params: list[Any] = []
+                if area:
+                    detail_sql += " AND td_area=?"
+                    detail_query_params.append(area)
+                detail_sql += " AND address=? AND byte_offset=? AND bit=?"
+                detail_query_params.extend([address, byte_offset, bit])
+                if start_ms is not None:
+                    detail_sql += " AND ts_ms>=?"
+                    detail_query_params.append(start_ms)
+                if end_ms is not None:
+                    detail_sql += " AND ts_ms<=?"
+                    detail_query_params.append(end_ms)
+                detail_sql += " ORDER BY ts_ms DESC, id DESC LIMIT ? OFFSET ?"
+                detail_query_params.extend([per_page, offset])
+                detail_rows = q(detail_sql, detail_query_params)
+
+                body.append(
+                    "<table><tr><th>Time</th><th>Type</th><th>Bit</th><th>Transition</th><th>Raw</th></tr>"
+                )
+                for row in detail_rows:
+                    bit_name = f"{row['address']}.{row['bit']}" if int(row["byte_offset"] or 0) == 0 else f"{row['address']}+{row['byte_offset']}.{row['bit']}"
+                    body.append(
+                        f"<tr><td class='mono'>{html.escape(row['ts_iso'])}</td><td>{html.escape(row['msg_type'])}</td>"
+                        f"<td class='mono'>{html.escape(bit_name)}</td><td>{'OFF → ON' if row['old_state']==0 and row['new_state']==1 else 'ON → OFF' if row['old_state']==1 and row['new_state']==0 else f'{row['old_state']} → {row['new_state']}'}</td>"
+                        f"<td class='mono'>{html.escape(row['raw_old'])} → {html.escape(row['raw_new'])}</td></tr>"
+                    )
+                body.append("</table>")
+
+                score_sql = """
+                    SELECT td_area, from_berth, to_berth, observation_count, matching_count, movement_count,
+                           correlation_pct, mean_dt_ms, median_dt_ms, variance_dt_ms,
+                           lead_count, lag_count, on_count, off_count, associated_bits_json, last_seen_iso
+                    FROM td_sclass_movement_scores
+                    WHERE 1=1
+                """
+                score_params: list[Any] = []
+                if area:
+                    score_sql += " AND td_area=?"
+                    score_params.append(area)
+                score_sql += " AND associated_bits_json LIKE ?"
+                score_params.append(f"%{selected_label}%")
+                if min_confidence is not None:
+                    score_sql += " AND correlation_pct>=?"
+                    score_params.append(min_confidence)
+                if start_ms is not None:
+                    score_sql += " AND last_seen_ts_ms>=?"
+                    score_params.append(start_ms)
+                if end_ms is not None:
+                    score_sql += " AND last_seen_ts_ms<=?"
+                    score_params.append(end_ms)
+                score_sql += " ORDER BY correlation_pct DESC, observation_count DESC LIMIT ? OFFSET ?"
+                score_params.extend([per_page, offset])
+                score_rows = q(score_sql, score_params)
+
+                body.append("<h4>Strongest berth correlations</h4>")
+                if score_rows:
+                    body.append("<table><tr><th>State</th><th>From</th><th>To</th><th>Confidence</th><th>Obs</th><th>Mean Δt</th><th>Median</th><th>Bits</th><th>Last Seen</th><th>Evidence</th></tr>")
+                    for row in score_rows:
+                        ann = berth_annotations.get((row["td_area"], row["from_berth"], row["to_berth"]))
+                        relation_state = ann["state"] if ann else "inferred"
+                        display_confidence = ann["confidence"] if ann and ann["confidence"] is not None else row["correlation_pct"]
+                        bits = []
+                        try:
+                            bits = json.loads(row["associated_bits_json"] or "[]")
+                        except Exception:
+                            bits = [row["associated_bits_json"]]
+                        body.append(
+                            "<tr>"
+                            f"<td>{_sclass_badge(relation_state, display_confidence, ann['source'] if ann else None)}</td>"
+                            f"<td><a href='/td-decode-lab?view=berth&area={html.escape(row['td_area'])}&berth={html.escape(row['from_berth'])}'>{html.escape(row['from_berth'])}</a></td>"
+                            f"<td><a href='/td-decode-lab?view=berth&area={html.escape(row['td_area'])}&berth={html.escape(row['to_berth'])}'>{html.escape(row['to_berth'])}</a></td>"
+                            f"<td>{row['correlation_pct']:.2f}</td>"
+                            f"<td>{row['observation_count']}</td>"
+                            f"<td>{int(row['mean_dt_ms']) if row['mean_dt_ms'] is not None else ''}</td>"
+                            f"<td>{int(row['median_dt_ms']) if row['median_dt_ms'] is not None else ''}</td>"
+                            f"<td class='mono'>{html.escape(', '.join(bits))}</td>"
+                            f"<td class='mono dim'>{html.escape(row['last_seen_iso'] or '')}</td>"
+                            f"<td><a href='#bit-observations'>View</a></td>"
+                            "</tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No correlated berth mappings found for this bit.</i></p>")
+
+                obs_sql = """
+                    SELECT id, movement_ts_ms, movement_ts_iso, headcode, from_berth, to_berth,
+                           source_msg_type, change_ts_iso, dt_ms, weight, evidence_json
+                    FROM td_sclass_movement_observations
+                    WHERE 1=1
+                """
+                obs_params: list[Any] = []
+                if area:
+                    obs_sql += " AND td_area=?"
+                    obs_params.append(area)
+                obs_sql += " AND address=? AND byte_offset=? AND bit=?"
+                obs_params.extend([address, byte_offset, bit])
+                if start_ms is not None:
+                    obs_sql += " AND movement_ts_ms>=?"
+                    obs_params.append(start_ms)
+                if end_ms is not None:
+                    obs_sql += " AND movement_ts_ms<=?"
+                    obs_params.append(end_ms)
+                if min_confidence is not None:
+                    obs_sql += " AND weight>=?"
+                    obs_params.append(min_confidence)
+                obs_sql += " ORDER BY movement_ts_ms DESC, id DESC LIMIT ? OFFSET ?"
+                obs_params.extend([per_page, offset])
+                obs_rows = q(obs_sql, obs_params)
+
+                body.append("<h4 id='bit-observations'>Underlying observations</h4>")
+                if obs_rows:
+                    body.append("<table><tr><th>Time</th><th>Headcode</th><th>From</th><th>To</th><th>Δt</th><th>Weight</th><th>Evidence</th></tr>")
+                    for row in obs_rows:
+                        body.append(
+                            f"<tr id='obs-{row['id']}'><td class='mono'>{html.escape(row['movement_ts_iso'])}</td>"
+                            f"<td>{html.escape(row['headcode'])}</td>"
+                            f"<td><a href='/td-decode-lab?view=berth&area={html.escape(area)}&berth={html.escape(row['from_berth'])}'>{html.escape(row['from_berth'])}</a></td>"
+                            f"<td><a href='/td-decode-lab?view=berth&area={html.escape(area)}&berth={html.escape(row['to_berth'])}'>{html.escape(row['to_berth'])}</a></td>"
+                            f"<td>{row['dt_ms']}</td><td>{row['weight']:.3f}</td>"
+                            f"<td class='mono dim'>{html.escape(row['evidence_json'])}</td></tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No observations found for the selected bit.</i></p>")
+
+        else:
+            summary_sql = """
+                SELECT td_area, from_berth, to_berth, observation_count, matching_count, movement_count,
+                       correlation_pct, mean_dt_ms, median_dt_ms, variance_dt_ms,
+                       lead_count, lag_count, on_count, off_count, associated_bits_json, last_seen_ts_ms, last_seen_iso
+                FROM td_sclass_movement_scores
+                WHERE 1=1
+            """
+            params = []
+            if area:
+                summary_sql += " AND td_area=?"
+                params.append(area)
+            if berth:
+                summary_sql += " AND (from_berth LIKE ? OR to_berth LIKE ?)"
+                params.extend([f"%{berth}%", f"%{berth}%"])
+            if start_ms is not None:
+                summary_sql += " AND last_seen_ts_ms>=?"
+                params.append(start_ms)
+            if end_ms is not None:
+                summary_sql += " AND last_seen_ts_ms<=?"
+                params.append(end_ms)
+            if min_confidence is not None:
+                summary_sql += " AND correlation_pct>=?"
+                params.append(min_confidence)
+            summary_sql += " ORDER BY correlation_pct DESC, observation_count DESC LIMIT ? OFFSET ?"
+            params.extend([per_page, offset])
+            summary_rows = q(summary_sql, params)
+
+            body.append("<h3>Berth Relationship Summary</h3>")
+            body.append("<table>")
+            body.append("<tr><th>State</th><th>Area</th><th>From</th><th>To</th><th>Confidence</th><th>Obs</th><th>Mean Δt</th><th>Median</th><th>Bits</th><th>Last Seen</th></tr>")
+            for row in summary_rows:
+                ann = berth_annotations.get((row["td_area"], row["from_berth"], row["to_berth"]))
+                relation_state = ann["state"] if ann else "inferred"
+                display_confidence = ann["confidence"] if ann and ann["confidence"] is not None else row["correlation_pct"]
+                if min_confidence is not None and display_confidence is not None and display_confidence < min_confidence:
+                    continue
+                try:
+                    bits = json.loads(row["associated_bits_json"] or "[]")
+                except Exception:
+                    bits = [row["associated_bits_json"]]
+                body.append(
+                    "<tr>"
+                    f"<td>{_sclass_badge(relation_state, display_confidence, ann['source'] if ann else None)}</td>"
+                    f"<td>{html.escape(row['td_area'])}</td>"
+                    f"<td><a href='/td-decode-lab?view=berth&area={html.escape(row['td_area'])}&berth={html.escape(row['from_berth'])}#berth-detail'>{html.escape(row['from_berth'])}</a></td>"
+                    f"<td><a href='/td-decode-lab?view=berth&area={html.escape(row['td_area'])}&berth={html.escape(row['to_berth'])}#berth-detail'>{html.escape(row['to_berth'])}</a></td>"
+                    f"<td>{row['correlation_pct']:.2f}</td>"
+                    f"<td>{row['observation_count']}</td>"
+                    f"<td>{int(row['mean_dt_ms']) if row['mean_dt_ms'] is not None else ''}</td>"
+                    f"<td>{int(row['median_dt_ms']) if row['median_dt_ms'] is not None else ''}</td>"
+                    f"<td class='mono'>{html.escape(', '.join(bits))}</td>"
+                    f"<td class='mono dim'>{html.escape(row['last_seen_iso'] or '')}</td>"
+                    "</tr>"
+                )
+            body.append("</table>")
+
+            if berth:
+                body.append(f"<h3 id='berth-detail'>Berth Detail · {html.escape(area or 'ALL')} / {html.escape(berth)}</h3>")
+                obs_sql = """
+                    SELECT id, td_area, movement_ts_ms, movement_ts_iso, headcode, from_berth, to_berth,
+                           source_msg_type, address, byte_offset, bit, dt_ms, weight, evidence_json
+                    FROM td_sclass_movement_observations
+                    WHERE 1=1
+                """
+                obs_params = []
+                if area:
+                    obs_sql += " AND td_area=?"
+                    obs_params.append(area)
+                obs_sql += " AND (from_berth LIKE ? OR to_berth LIKE ?)"
+                obs_params.extend([f"%{berth}%", f"%{berth}%"])
+                if start_ms is not None:
+                    obs_sql += " AND movement_ts_ms>=?"
+                    obs_params.append(start_ms)
+                if end_ms is not None:
+                    obs_sql += " AND movement_ts_ms<=?"
+                    obs_params.append(end_ms)
+                if min_confidence is not None:
+                    obs_sql += " AND weight>=?"
+                    obs_params.append(min_confidence)
+                obs_sql += " ORDER BY movement_ts_ms DESC, id DESC LIMIT ? OFFSET ?"
+                obs_params.extend([per_page, offset])
+                obs_rows = q(obs_sql, obs_params)
+
+                body.append("<h4>Observed exits and route relationships</h4>")
+                if obs_rows:
+                    body.append("<table><tr><th>Time</th><th>Headcode</th><th>From</th><th>To</th><th>Signal</th><th>Weight</th><th>Bit</th><th>Evidence</th></tr>")
+                    for row in obs_rows:
+                        bit_name = f"{row['address']}.{row['bit']}" if int(row["byte_offset"] or 0) == 0 else f"{row['address']}+{row['byte_offset']}.{row['bit']}"
+                        body.append(
+                            f"<tr id='obs-{row['id']}'><td class='mono'>{html.escape(row['movement_ts_iso'])}</td>"
+                            f"<td>{html.escape(row['headcode'])}</td>"
+                            f"<td>{html.escape(row['from_berth'])}</td><td>{html.escape(row['to_berth'])}</td>"
+                            f"<td class='mono'>{html.escape(row['address'])}</td><td>{row['weight']:.3f}</td>"
+                            f"<td><a href='/td-decode-lab?view=bit&area={html.escape(row['td_area'])}&address={html.escape(row['address'])}&byte_offset={row['byte_offset']}&bit={row['bit']}#bit-detail'>{html.escape(bit_name)}</a></td>"
+                            f"<td class='mono dim'>{html.escape(row['evidence_json'])}</td></tr>"
+                        )
+                    body.append("</table>")
+                else:
+                    body.append("<p><i>No berth observations found for the selected berth.</i></p>")
+
+        if page > 1:
+            prev_params = {k: v for k, v in request.args.items() if k != "page"}
+            prev_params["page"] = str(page - 1)
+            body.append(f"<p><a href='/td-decode-lab?{urlencode(prev_params)}'>← Previous</a></p>")
+        next_params = {k: v for k, v in request.args.items() if k != "page"}
+        next_params["page"] = str(page + 1)
+        body.append(f"<p><a href='/td-decode-lab?{urlencode(next_params)}'>Next →</a></p>")
+        return render_page("TD Decode Lab - NR RailHub", body, active="td-decode-lab")
 
     @app.get("/trust")
     def trust():

@@ -2046,6 +2046,28 @@ class RailDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_scores_area_ts
                     ON td_sclass_movement_scores(td_area, last_seen_ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_sclass_lab_annotations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    relation_type TEXT NOT NULL,
+                    td_area TEXT NOT NULL,
+                    address TEXT,
+                    byte_offset INTEGER,
+                    bit INTEGER,
+                    from_berth TEXT,
+                    to_berth TEXT,
+                    state TEXT NOT NULL DEFAULT 'inferred',
+                    source TEXT,
+                    confidence REAL,
+                    notes TEXT,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_td_sclass_lab_annotations_unique
+                    ON td_sclass_lab_annotations(
+                        relation_type, td_area, address, byte_offset, bit, from_berth, to_berth
+                    );
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_lab_annotations_area_state
+                    ON td_sclass_lab_annotations(td_area, relation_type, state);
                 """
             )
             for key, value in (
