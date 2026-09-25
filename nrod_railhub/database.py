@@ -7,7 +7,7 @@ import json
 import sqlite3
 import threading
 import time
-from typing import Optional, Any
+from typing import Optional, Any, Dict, Tuple
 
 from .models import safe_int
 
@@ -66,6 +66,7 @@ class RailDB:
         
         # Raw JSON storage setting
         self.save_raw_json = save_raw_json
+        self._td_movement_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         
         self.enable_mapper = enable_mapper
         if enable_mapper:
@@ -116,6 +117,23 @@ class RailDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_berth_ts ON td_berth_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_berth_area_hc_ts ON td_berth_events(td_area, headcode, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_berth_movements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_event_id INTEGER UNIQUE,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    td_area TEXT NOT NULL,
+                    headcode TEXT NOT NULL,
+                    from_berth TEXT NOT NULL,
+                    to_berth TEXT NOT NULL,
+                    source_msg_type TEXT NOT NULL,
+                    evidence_json TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_berth_movements_ts ON td_berth_movements(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_berth_movements_area_hc_ts ON td_berth_movements(td_area, headcode, ts_ms);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_td_berth_movements_dedupe
+                    ON td_berth_movements(td_area, headcode, ts_ms, from_berth, to_berth);
                 
                 CREATE TABLE IF NOT EXISTS td_signal_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -690,10 +708,27 @@ class RailDB:
         
         with self._lock, self._conn:
             #logger.error(f"insert_td_berth_event: {ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr}")
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO td_berth_events(ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr) VALUES (?,?,?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr),
             )
+            event_id = cursor.lastrowid
+            movement = self._extract_td_berth_movement(
+                {
+                    "id": event_id,
+                    "ts_ms": ts_ms,
+                    "ts_iso": ts_iso,
+                    "td_area": area,
+                    "headcode": headcode,
+                    "msg_type": msg_type,
+                    "from_berth": from_berth,
+                    "to_berth": to_berth,
+                    "descr": descr,
+                },
+                self._td_movement_state,
+            )
+            if movement:
+                self._insert_td_berth_movement(movement)
         
         # Add to mapper batch if enabled
         if self.enable_mapper:
@@ -708,6 +743,186 @@ class RailDB:
                 'data': None,
                 'received_at_utc': ts_iso
             })
+
+    @staticmethod
+    def _norm_text(value: Any, *, upper: bool = False) -> str:
+        """Return a stripped string, optionally upper-cased, for TD movement normalization."""
+        text = str(value or "").strip()
+        return text.upper() if upper else text
+
+    @staticmethod
+    def _is_reset_berth(value: str) -> bool:
+        """Return True when berth token indicates a clear/reset rather than occupancy."""
+        return value in {"", "0000", "000", "----", "****", "NULL"}
+
+    def _extract_td_berth_movement(self, row: Dict[str, Any], state_store: Dict[Tuple[str, str], Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        msg_type = self._norm_text(row.get("msg_type"), upper=True)
+        if msg_type not in {"CA", "CB", "CC"}:
+            return None
+
+        td_area = self._norm_text(row.get("td_area"), upper=True)
+        headcode = self._norm_text(row.get("headcode"), upper=True)
+        if not td_area or not headcode:
+            return None
+
+        ts_ms = safe_int(row.get("ts_ms")) or 0
+        if ts_ms <= 0:
+            return None
+
+        from_berth = self._norm_text(row.get("from_berth"), upper=True)
+        to_berth = self._norm_text(row.get("to_berth"), upper=True)
+        key = (td_area, headcode)
+        state = state_store.setdefault(
+            key,
+            {"current_berth": None, "last_ts_ms": 0, "last_event_id": 0, "last_sig": None},
+        )
+        event_id = safe_int(row.get("id")) or 0
+
+        sig = (ts_ms, msg_type, from_berth, to_berth)
+        if state.get("last_sig") == sig:
+            if event_id > 0:
+                state["last_event_id"] = max(int(state.get("last_event_id") or 0), event_id)
+            return None
+
+        if self._is_reset_berth(from_berth) and self._is_reset_berth(to_berth):
+            state["current_berth"] = None
+            state["last_ts_ms"] = max(state.get("last_ts_ms", 0), ts_ms)
+            if event_id > 0:
+                state["last_event_id"] = max(int(state.get("last_event_id") or 0), event_id)
+            return None
+
+        last_ts_ms = int(state.get("last_ts_ms") or 0)
+        last_event_id = int(state.get("last_event_id") or 0)
+        out_of_order = ts_ms < last_ts_ms or (ts_ms == last_ts_ms and event_id > 0 and event_id <= last_event_id)
+        if out_of_order:
+            return None
+        state["last_sig"] = sig
+
+        movement_from = ""
+        movement_to = ""
+
+        if from_berth and to_berth and not self._is_reset_berth(from_berth) and not self._is_reset_berth(to_berth):
+            if from_berth != to_berth:
+                movement_from = from_berth
+                movement_to = to_berth
+            state["current_berth"] = to_berth
+        else:
+            if from_berth and not self._is_reset_berth(from_berth):
+                state["current_berth"] = from_berth
+            if to_berth and not self._is_reset_berth(to_berth):
+                current = state.get("current_berth")
+                if current and current != to_berth:
+                    movement_from = current
+                    movement_to = to_berth
+                state["current_berth"] = to_berth
+
+        state["last_ts_ms"] = ts_ms
+        if event_id > 0:
+            state["last_event_id"] = event_id
+
+        if not movement_from or not movement_to or movement_from == movement_to:
+            return None
+
+        return {
+            "source_event_id": row.get("id"),
+            "ts_ms": ts_ms,
+            "ts_iso": self._norm_text(row.get("ts_iso")),
+            "td_area": td_area,
+            "headcode": headcode,
+            "from_berth": movement_from,
+            "to_berth": movement_to,
+            "source_msg_type": msg_type,
+            "evidence_json": json.dumps(
+                {
+                    "msg_type": msg_type,
+                    "from_berth_raw": from_berth or None,
+                    "to_berth_raw": to_berth or None,
+                    "descr": self._norm_text(row.get("descr")),
+                    "out_of_order": out_of_order,
+                },
+                separators=(",", ":"),
+            ),
+        }
+
+    def _insert_td_berth_movement(self, movement: Dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO td_berth_movements(
+                source_event_id, ts_ms, ts_iso, td_area, headcode, from_berth, to_berth, source_msg_type, evidence_json
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                movement["source_event_id"],
+                movement["ts_ms"],
+                movement["ts_iso"],
+                movement["td_area"],
+                movement["headcode"],
+                movement["from_berth"],
+                movement["to_berth"],
+                movement["source_msg_type"],
+                movement["evidence_json"],
+            ),
+        )
+
+    def rebuild_td_berth_movements(self, td_area: Optional[str] = None) -> dict:
+        """Rebuild normalized C-Class berth movements from td_berth_events."""
+        scanned = 0
+        inserted = 0
+        state_store: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        td_area_filter = self._norm_text(td_area, upper=True)
+        preserved_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        with self._lock, self._conn:
+            if td_area_filter:
+                preserved_state = {
+                    key: value
+                    for key, value in self._td_movement_state.items()
+                    if key[0] != td_area_filter
+                }
+                self._conn.execute("DELETE FROM td_berth_movements WHERE td_area=?", (td_area_filter,))
+            else:
+                self._conn.execute("DELETE FROM td_berth_movements")
+
+            query = """
+                SELECT id, ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr
+                FROM td_berth_events
+                WHERE msg_type IN ('CA', 'CB', 'CC')
+            """
+            params: tuple[Any, ...] = ()
+            if td_area_filter:
+                query += " AND UPPER(COALESCE(td_area, '')) = ?"
+                params = (td_area_filter,)
+            query += " ORDER BY ts_ms ASC, id ASC"
+
+            for row in self._conn.execute(query, params):
+                scanned += 1
+                movement = self._extract_td_berth_movement(
+                    {
+                        "id": row[0],
+                        "ts_ms": row[1],
+                        "ts_iso": row[2],
+                        "td_area": row[3],
+                        "headcode": row[4],
+                        "msg_type": row[5],
+                        "from_berth": row[6],
+                        "to_berth": row[7],
+                        "descr": row[8],
+                    },
+                    state_store,
+                )
+                if movement:
+                    before = self._conn.total_changes
+                    self._insert_td_berth_movement(movement)
+                    if self._conn.total_changes > before:
+                        inserted += 1
+
+            if td_area_filter:
+                preserved_state.update(state_store)
+                self._td_movement_state = preserved_state
+            else:
+                self._td_movement_state = state_store
+
+        return {"scanned": scanned, "inserted": inserted}
 
     def insert_td_signal_event(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str = "") -> None:
         """Insert a TD signal event (S-Class: SF, SG, SH)."""

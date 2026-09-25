@@ -266,6 +266,18 @@ The Mapper page allows you to adjust the parameters used for correlating berth s
 
 You can rebuild the correlation scores with new parameters without re-collecting data. The rebuild processes existing observations and regenerates the `berth_signal_scores` table.
 
+### Normalized C-Class movement model
+
+For TD C-Class events (`CA`/`CB`/`CC`), the database now stores normalized berth transitions in `td_berth_movements`:
+
+- `ts_ms`, `ts_iso`, `td_area`, `headcode`, `from_berth`, `to_berth`
+- `source_event_id` linking back to `td_berth_events.id`
+- `source_msg_type` and `evidence_json` preserving raw extraction evidence
+
+The extractor is deterministic and de-duplicates repeated activity, while safely ignoring incomplete/reset records and out-of-order rows that cannot produce a reliable berth-to-berth transition.
+
+Historical backfill is repeatable using `RailDB.rebuild_td_berth_movements()`, which rebuilds normalized transitions from existing `td_berth_events` without requiring fresh live traffic.
+
 ## Architecture
 
 ```
