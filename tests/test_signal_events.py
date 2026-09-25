@@ -323,6 +323,69 @@ def test_mapper_rebuilds_across_batch_boundaries():
             os.unlink(db_path)
 
 
+def test_sclass_movement_correlations_rebuild_and_dedupe():
+    """Test S-class to berth correlations are reproducible and rebuild-safe."""
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.update_sclass_correlation_config(pre_ms=2000, post_ms=2000, tau_ms=1000)
+
+        db.insert_td_signal_event(800, '2024-01-01T00:00:00.800Z', 'EK', 'SF', 'D0', '00')
+        db.insert_td_signal_event(1100, '2024-01-01T00:00:01.100Z', 'EK', 'SF', 'D0', '80')
+        db.insert_td_berth_event(1000, '2024-01-01T00:00:01.000Z', 'EK', '2C90', 'CA', '0152', '0153', '2C90')
+
+        status = db.get_sclass_correlation_status()
+        assert status['config']['pre_ms'] == 2000
+        assert status['observation_count'] == 1
+        assert status['score_count'] == 1
+        assert status['movement_count'] == 1
+        assert status['change_count'] == 1
+
+        with db._conn:
+            row = db._conn.execute(
+                """
+                SELECT td_area, from_berth, to_berth, observation_count, matching_count,
+                       correlation_pct, lead_count, lag_count, on_count, off_count, associated_bits_json
+                FROM td_sclass_movement_scores
+                WHERE td_area='EK' AND from_berth='0152' AND to_berth='0153'
+                """
+            ).fetchone()
+
+        assert row is not None
+        assert row[0] == 'EK'
+        assert row[1] == '0152'
+        assert row[2] == '0153'
+        assert row[3] == 1
+        assert row[4] == 1
+        assert row[5] == 1.0
+        assert row[6] == 0
+        assert row[7] == 1
+        assert row[8] == 1
+        assert row[9] == 0
+        assert row[10] == '["D0.7"]'
+
+        first = db.rebuild_td_sclass_correlations()
+        second = db.rebuild_td_sclass_correlations()
+
+        assert first['inserted_observations'] == 1
+        assert second['inserted_observations'] == 1
+
+        with db._conn:
+            obs_count = db._conn.execute("SELECT COUNT(*) FROM td_sclass_movement_observations").fetchone()[0]
+            score_count = db._conn.execute("SELECT COUNT(*) FROM td_sclass_movement_scores").fetchone()[0]
+
+        assert obs_count == 1
+        assert score_count == 1
+
+        db.close()
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_signal_event_capture()
     test_berth_events_still_work()
