@@ -316,3 +316,79 @@ def test_interesting_trains_page_groups_trains_by_type():
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+
+
+def test_td_decode_lab_shows_bit_and_berth_views():
+    """Test the TD Decode Lab renders correlated bit and berth evidence."""
+    from flask import Flask
+    from nrod_railhub import web
+    from nrod_railhub.database import RailDB
+    import unittest.mock as mock
+
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.update_sclass_correlation_config(pre_ms=2000, post_ms=2000, tau_ms=1000)
+        db.insert_td_signal_event(800, '2024-01-01T00:00:00.800Z', 'EK', 'SF', 'D0', '00')
+        db.insert_td_signal_event(1100, '2024-01-01T00:00:01.100Z', 'EK', 'SF', 'D0', '80')
+        db.insert_td_berth_event(1000, '2024-01-01T00:00:01.000Z', 'EK', '2C90', 'CA', '0152', '0153', '2C90')
+        with db._conn:
+            db._conn.execute(
+                """
+                INSERT INTO td_sclass_lab_annotations (
+                    relation_type, td_area, address, byte_offset, bit, state, source, confidence, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ('bit', 'EK', 'D0', 0, 7, 'confirmed', 'manual', 0.95, 'checked'),
+            )
+            db._conn.execute(
+                """
+                INSERT INTO td_sclass_lab_annotations (
+                    relation_type, td_area, from_berth, to_berth, state, source, confidence, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ('berth', 'EK', '0152', '0153', 'reviewed', 'manual', 0.75, 'checked'),
+            )
+        db.close()
+
+        app_holder = {}
+        original_flask_init = Flask.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_flask_init(self, *args, **kwargs)
+            app_holder['app'] = self
+
+        Flask.__init__ = patched_init
+        try:
+            with mock.patch('flask.Flask.run'):
+                web.start_web_dashboard(db_path, 8088, None, None)
+        finally:
+            Flask.__init__ = original_flask_init
+
+        app = app_holder['app']
+        client = app.test_client()
+
+        bit_response = client.get('/td-decode-lab?view=bit&area=EK&address=D0&byte_offset=0&bit=7&min_confidence=0.5')
+        assert bit_response.status_code == 200
+        bit_result = bit_response.data.decode('utf-8')
+        assert 'TD Decode Lab' in bit_result
+        assert 'Bit Detail' in bit_result
+        assert 'Confirmed' in bit_result
+        assert 'Strongest berth correlations' in bit_result
+        assert 'Underlying observations' in bit_result
+        assert '0152' in bit_result
+        assert '0153' in bit_result
+
+        berth_response = client.get('/td-decode-lab?view=berth&area=EK&berth=0152&min_confidence=0.5')
+        assert berth_response.status_code == 200
+        berth_result = berth_response.data.decode('utf-8')
+        assert 'Berth Detail' in berth_result
+        assert 'Manually reviewed' in berth_result
+        assert 'Observed exits and route relationships' in berth_result
+        assert 'D0.7' in berth_result
+
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
