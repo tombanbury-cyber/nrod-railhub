@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+from statistics import median, pvariance
 from typing import Optional, Any, Dict, Tuple
 
 from .models import safe_int
@@ -54,7 +55,8 @@ class RailDB:
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._init_schema()
-        
+        self.ensure_sclass_correlation_schema()
+
         # Retention settings
         self.retain_trust_days = retain_trust_days
         self.retain_vstp_days = retain_vstp_days
@@ -131,6 +133,7 @@ class RailDB:
                     evidence_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_berth_movements_ts ON td_berth_movements(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_berth_movements_area_ts ON td_berth_movements(td_area, ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_berth_movements_area_hc_ts ON td_berth_movements(td_area, headcode, ts_ms);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_td_berth_movements_dedupe
                     ON td_berth_movements(td_area, headcode, ts_ms, from_berth, to_berth);
@@ -174,6 +177,7 @@ class RailDB:
                     raw_new TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_ts ON td_sclass_changes(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_ts ON td_sclass_changes(td_area, ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_addr_ts ON td_sclass_changes(td_area, address, ts_ms);
 
                 CREATE TABLE IF NOT EXISTS trust_state (
@@ -458,15 +462,16 @@ class RailDB:
         except ValueError:
             return None
 
-    def _persist_td_sclass_state(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str) -> None:
+    def _persist_td_sclass_state(self, ts_ms: int, ts_iso: str, area: str, msg_type: str, address: str, data: str) -> list[dict[str, Any]]:
         """Persist S-class snapshot state and derived bit transitions."""
         payload = self._normalize_sclass_bytes(data)
         if not payload:
-            return
+            return []
 
         raw_new = payload.hex().upper()
         byte_length = len(payload)
 
+        movement = None
         with self._lock, self._conn:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -491,8 +496,9 @@ class RailDB:
             )
 
             if not prev_payload or len(prev_payload) != len(payload):
-                return
+                return []
 
+            changes: list[dict[str, Any]] = []
             for byte_offset, (old_byte, new_byte) in enumerate(zip(prev_payload, payload)):
                 if old_byte == new_byte:
                     continue
@@ -526,6 +532,21 @@ class RailDB:
                             raw_new_byte,
                         ),
                     )
+                    changes.append(
+                        {
+                            "id": cursor.lastrowid,
+                            "ts_ms": ts_ms,
+                            "ts_iso": ts_iso,
+                            "td_area": area,
+                            "msg_type": msg_type,
+                            "address": address,
+                            "byte_offset": byte_offset,
+                            "bit": bit,
+                            "old_state": 1 if (old_byte & mask) else 0,
+                            "new_state": 1 if (new_byte & mask) else 0,
+                        }
+                    )
+            return changes
 
     def purge_old_data(self) -> dict:
         """
@@ -729,7 +750,7 @@ class RailDB:
             )
             if movement:
                 self._insert_td_berth_movement(movement)
-        
+
         # Add to mapper batch if enabled
         if self.enable_mapper:
             self._add_event_to_batch({
@@ -743,6 +764,9 @@ class RailDB:
                 'data': None,
                 'received_at_utc': ts_iso
             })
+
+        if movement:
+            self._correlate_td_berth_movement_with_sclass_changes(movement)
 
     @staticmethod
     def _norm_text(value: Any, *, upper: bool = False) -> str:
@@ -938,7 +962,9 @@ class RailDB:
 
         if msg_type in ("SF", "SG", "SH"):
             try:
-                self._persist_td_sclass_state(ts_ms, ts_iso, area, msg_type, address, data or "")
+                changes = self._persist_td_sclass_state(ts_ms, ts_iso, area, msg_type, address, data or "")
+                for change in changes:
+                    self._correlate_td_sclass_change_with_berth_movements(change)
             except Exception as e:
                 logger.error(f"insert_td_signal_event: S-class state decode failed: {type(e).__name__}: {e}")
         
@@ -1945,7 +1971,497 @@ class RailDB:
             self._conn.execute("""
                 UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'
             """, (tau_ms,))
-    
+
+    @staticmethod
+    def _sclass_bit_label(address: str, byte_offset: int, bit: int) -> str:
+        suffix = f"+{byte_offset}" if int(byte_offset or 0) else ""
+        return f"{address}{suffix}.{bit}"
+
+    def ensure_sclass_correlation_schema(self) -> None:
+        """Create S-class/berth correlation tables and defaults."""
+        with self._conn:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS sclass_correlation_config (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS td_sclass_movement_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    td_area TEXT NOT NULL,
+                    movement_event_id INTEGER NOT NULL,
+                    movement_ts_ms INTEGER NOT NULL,
+                    movement_ts_iso TEXT NOT NULL,
+                    headcode TEXT NOT NULL,
+                    from_berth TEXT NOT NULL,
+                    to_berth TEXT NOT NULL,
+                    source_msg_type TEXT NOT NULL,
+                    change_event_id INTEGER NOT NULL,
+                    change_ts_ms INTEGER NOT NULL,
+                    change_ts_iso TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    byte_offset INTEGER NOT NULL DEFAULT 0,
+                    bit INTEGER NOT NULL,
+                    old_state INTEGER NOT NULL,
+                    new_state INTEGER NOT NULL,
+                    dt_ms INTEGER NOT NULL,
+                    weight REAL NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_unique
+                    ON td_sclass_movement_observations(movement_event_id, change_event_id);
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_area_ts
+                    ON td_sclass_movement_observations(td_area, movement_ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_bit
+                    ON td_sclass_movement_observations(td_area, address, byte_offset, bit, change_ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_mov_ts
+                    ON td_sclass_movement_observations(td_area, from_berth, to_berth, movement_ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_sclass_movement_scores (
+                    td_area TEXT NOT NULL,
+                    from_berth TEXT NOT NULL,
+                    to_berth TEXT NOT NULL,
+                    observation_count INTEGER NOT NULL DEFAULT 0,
+                    matching_count INTEGER NOT NULL DEFAULT 0,
+                    movement_count INTEGER NOT NULL DEFAULT 0,
+                    correlation_pct REAL NOT NULL DEFAULT 0.0,
+                    mean_dt_ms REAL,
+                    median_dt_ms REAL,
+                    variance_dt_ms REAL,
+                    min_dt_ms INTEGER,
+                    max_dt_ms INTEGER,
+                    lead_count INTEGER NOT NULL DEFAULT 0,
+                    lag_count INTEGER NOT NULL DEFAULT 0,
+                    on_count INTEGER NOT NULL DEFAULT 0,
+                    off_count INTEGER NOT NULL DEFAULT 0,
+                    associated_bits_json TEXT NOT NULL,
+                    last_seen_ts_ms INTEGER NOT NULL,
+                    last_seen_iso TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    PRIMARY KEY (td_area, from_berth, to_berth)
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_scores_area_ts
+                    ON td_sclass_movement_scores(td_area, last_seen_ts_ms);
+                """
+            )
+            for key, value in (
+                ("pre_ms", 120000),
+                ("post_ms", 120000),
+                ("tau_ms", 60000),
+            ):
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+
+    def get_sclass_correlation_config(self) -> dict:
+        """Get current S-class correlation configuration parameters."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT key, value FROM sclass_correlation_config")
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def update_sclass_correlation_config(self, pre_ms: int, post_ms: int, tau_ms: int) -> None:
+        """Update S-class correlation configuration parameters."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'",
+                (pre_ms,),
+            )
+            self._conn.execute(
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'",
+                (post_ms,),
+            )
+            self._conn.execute(
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'",
+                (tau_ms,),
+            )
+
+    def _get_sclass_correlation_window(self) -> tuple[int, int, int]:
+        config = self.get_sclass_correlation_config()
+        return (
+            int(config.get("pre_ms", 120000) or 120000),
+            int(config.get("post_ms", 120000) or 120000),
+            int(config.get("tau_ms", 60000) or 60000),
+        )
+
+    def _insert_td_sclass_movement_observation(self, observation: Dict[str, Any]) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO td_sclass_movement_observations(
+                    td_area, movement_event_id, movement_ts_ms, movement_ts_iso, headcode,
+                    from_berth, to_berth, source_msg_type, change_event_id, change_ts_ms,
+                    change_ts_iso, address, byte_offset, bit, old_state, new_state,
+                    dt_ms, weight, evidence_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(movement_event_id, change_event_id) DO NOTHING
+                """,
+                (
+                    observation["td_area"],
+                    observation["movement_event_id"],
+                    observation["movement_ts_ms"],
+                    observation["movement_ts_iso"],
+                    observation["headcode"],
+                    observation["from_berth"],
+                    observation["to_berth"],
+                    observation["source_msg_type"],
+                    observation["change_event_id"],
+                    observation["change_ts_ms"],
+                    observation["change_ts_iso"],
+                    observation["address"],
+                    observation["byte_offset"],
+                    observation["bit"],
+                    observation["old_state"],
+                    observation["new_state"],
+                    observation["dt_ms"],
+                    observation["weight"],
+                    observation["evidence_json"],
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def _refresh_td_sclass_movement_scores(self, td_area: Optional[str] = None) -> dict:
+        with self._lock, self._conn:
+            if td_area:
+                self._conn.execute(
+                    "DELETE FROM td_sclass_movement_scores WHERE td_area=?",
+                    (td_area,),
+                )
+                rows = self._conn.execute(
+                    """
+                    SELECT td_area, from_berth, to_berth, movement_event_id, movement_ts_ms,
+                           change_ts_ms, dt_ms, new_state, address, byte_offset, bit
+                    FROM td_sclass_movement_observations
+                    WHERE td_area=?
+                    ORDER BY td_area, from_berth, to_berth, movement_ts_ms, change_ts_ms, id
+                    """,
+                    (td_area,),
+                ).fetchall()
+            else:
+                self._conn.execute("DELETE FROM td_sclass_movement_scores")
+                rows = self._conn.execute(
+                    """
+                    SELECT td_area, from_berth, to_berth, movement_event_id, movement_ts_ms,
+                           change_ts_ms, dt_ms, new_state, address, byte_offset, bit
+                    FROM td_sclass_movement_observations
+                    ORDER BY td_area, from_berth, to_berth, movement_ts_ms, change_ts_ms, id
+                    """
+                ).fetchall()
+
+            groups: Dict[Tuple[str, str, str], list[dict[str, Any]]] = {}
+            for row in rows:
+                key = (row[0], row[1], row[2])
+                groups.setdefault(key, []).append(
+                    {
+                        "movement_event_id": row[3],
+                        "movement_ts_ms": row[4],
+                        "change_ts_ms": row[5],
+                        "dt_ms": row[6],
+                        "new_state": row[7],
+                        "address": row[8],
+                        "byte_offset": row[9],
+                        "bit": row[10],
+                    }
+                )
+
+            summary_count = 0
+            for (area, from_berth, to_berth), items in groups.items():
+                dt_values = [int(item["dt_ms"]) for item in items]
+                movement_ids = {int(item["movement_event_id"]) for item in items if item["movement_event_id"] is not None}
+                bits = []
+                seen_bits = set()
+                for item in items:
+                    bit_label = self._sclass_bit_label(item["address"], int(item["byte_offset"] or 0), int(item["bit"]))
+                    if bit_label not in seen_bits:
+                        seen_bits.add(bit_label)
+                        bits.append(bit_label)
+                obs_count = len(items)
+                matching_count = len(movement_ids)
+                movement_count = matching_count
+                correlation_pct = (matching_count / obs_count) if obs_count else 0.0
+                mean_dt = sum(dt_values) / len(dt_values)
+                variance_dt = pvariance(dt_values) if len(dt_values) > 1 else 0.0
+                lead_count = sum(1 for dt in dt_values if dt < 0)
+                lag_count = sum(1 for dt in dt_values if dt > 0)
+                on_count = sum(1 for item in items if int(item["new_state"]) == 1)
+                off_count = sum(1 for item in items if int(item["new_state"]) == 0)
+                last_seen_ts = max(int(item["change_ts_ms"]) for item in items)
+                last_seen_iso_row = self._conn.execute(
+                    "SELECT change_ts_iso FROM td_sclass_movement_observations WHERE td_area=? AND from_berth=? AND to_berth=? ORDER BY change_ts_ms DESC, id DESC LIMIT 1",
+                    (area, from_berth, to_berth),
+                ).fetchone()
+                last_seen_iso = last_seen_iso_row[0] if last_seen_iso_row else ""
+                self._conn.execute(
+                    """
+                    INSERT INTO td_sclass_movement_scores(
+                        td_area, from_berth, to_berth, observation_count, matching_count,
+                        movement_count, correlation_pct, mean_dt_ms, median_dt_ms, variance_dt_ms,
+                        min_dt_ms, max_dt_ms, lead_count, lag_count, on_count, off_count,
+                        associated_bits_json, last_seen_ts_ms, last_seen_iso
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        area,
+                        from_berth,
+                        to_berth,
+                        obs_count,
+                        matching_count,
+                        movement_count,
+                        correlation_pct,
+                        mean_dt,
+                        median(dt_values),
+                        variance_dt,
+                        min(dt_values),
+                        max(dt_values),
+                        lead_count,
+                        lag_count,
+                        on_count,
+                        off_count,
+                        json.dumps(bits, separators=(",", ":")),
+                        last_seen_ts,
+                        last_seen_iso or "",
+                    ),
+                )
+                summary_count += 1
+
+            return {
+                "observation_count": len(rows),
+                "summary_count": summary_count,
+                "area": td_area,
+            }
+
+    def _build_td_sclass_observation(self, movement: dict, change: dict, tau_ms: int) -> dict:
+        dt_ms = int(change["ts_ms"]) - int(movement["ts_ms"])
+        weight = float(1.0 if tau_ms <= 0 else __import__("math").exp(-abs(dt_ms) / float(tau_ms)))
+        movement_event_id = movement.get("id", movement.get("movement_event_id", movement.get("source_event_id")))
+        change_event_id = change.get("id", change.get("change_event_id"))
+        return {
+            "td_area": movement["td_area"],
+            "movement_event_id": movement_event_id,
+            "movement_ts_ms": movement["ts_ms"],
+            "movement_ts_iso": movement["ts_iso"],
+            "headcode": movement["headcode"],
+            "from_berth": movement["from_berth"],
+            "to_berth": movement["to_berth"],
+            "source_msg_type": movement["source_msg_type"],
+            "change_event_id": change_event_id,
+            "change_ts_ms": change["ts_ms"],
+            "change_ts_iso": change["ts_iso"],
+            "address": change["address"],
+            "byte_offset": change["byte_offset"],
+            "bit": change["bit"],
+            "old_state": change["old_state"],
+            "new_state": change["new_state"],
+            "dt_ms": dt_ms,
+            "weight": weight,
+            "evidence_json": json.dumps(
+                {
+                    "movement_event_id": movement_event_id,
+                    "change_event_id": change_event_id,
+                    "movement_ts_ms": movement["ts_ms"],
+                    "change_ts_ms": change["ts_ms"],
+                    "dt_ms": dt_ms,
+                    "bit_label": self._sclass_bit_label(change["address"], int(change["byte_offset"] or 0), int(change["bit"])),
+                    "old_state": change["old_state"],
+                    "new_state": change["new_state"],
+                },
+                separators=(",", ":"),
+            ),
+        }
+
+    def _correlate_td_berth_movement_with_sclass_changes(self, movement: dict) -> int:
+        pre_ms, post_ms, tau_ms = self._get_sclass_correlation_window()
+        start_ts = int(movement["ts_ms"]) - pre_ms
+        end_ts = int(movement["ts_ms"]) + post_ms
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit, old_state, new_state
+                FROM td_sclass_changes
+                WHERE td_area=? AND ts_ms BETWEEN ? AND ?
+                ORDER BY ts_ms ASC, id ASC
+                """,
+                (movement["td_area"], start_ts, end_ts),
+            )
+            changes = cursor.fetchall()
+        inserted = 0
+        for change_row in changes:
+            change = {
+                "id": change_row[0],
+                "ts_ms": change_row[1],
+                "ts_iso": change_row[2],
+                "td_area": change_row[3],
+                "msg_type": change_row[4],
+                "address": change_row[5],
+                "byte_offset": change_row[6],
+                "bit": change_row[7],
+                "old_state": change_row[8],
+                "new_state": change_row[9],
+            }
+            observation = self._build_td_sclass_observation(movement, change, tau_ms)
+            if self._insert_td_sclass_movement_observation(observation):
+                inserted += 1
+        if inserted:
+            self._refresh_td_sclass_movement_scores(movement["td_area"])
+        return inserted
+
+    def _correlate_td_sclass_change_with_berth_movements(self, change: dict) -> int:
+        pre_ms, post_ms, tau_ms = self._get_sclass_correlation_window()
+        start_ts = int(change["ts_ms"]) - post_ms
+        end_ts = int(change["ts_ms"]) + pre_ms
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, ts_ms, ts_iso, td_area, headcode, from_berth, to_berth, source_msg_type
+                FROM td_berth_movements
+                WHERE td_area=? AND ts_ms BETWEEN ? AND ?
+                ORDER BY ts_ms ASC, id ASC
+                """,
+                (change["td_area"], start_ts, end_ts),
+            )
+            movements = cursor.fetchall()
+        inserted = 0
+        for movement_row in movements:
+            movement = {
+                "id": movement_row[0],
+                "ts_ms": movement_row[1],
+                "ts_iso": movement_row[2],
+                "td_area": movement_row[3],
+                "headcode": movement_row[4],
+                "from_berth": movement_row[5],
+                "to_berth": movement_row[6],
+                "source_msg_type": movement_row[7],
+            }
+            observation = self._build_td_sclass_observation(movement, change, tau_ms)
+            if self._insert_td_sclass_movement_observation(observation):
+                inserted += 1
+        if inserted:
+            self._refresh_td_sclass_movement_scores(change["td_area"])
+        return inserted
+
+    def rebuild_td_sclass_correlations(self, td_area: Optional[str] = None) -> dict:
+        """Rebuild S-class/berth correlation observations and summary scores."""
+        td_area_filter = self._norm_text(td_area, upper=True)
+        with self._lock, self._conn:
+            if td_area_filter:
+                self._conn.execute(
+                    "DELETE FROM td_sclass_movement_observations WHERE td_area=?",
+                    (td_area_filter,),
+                )
+                self._conn.execute(
+                    "DELETE FROM td_sclass_movement_scores WHERE td_area=?",
+                    (td_area_filter,),
+                )
+            else:
+                self._conn.execute("DELETE FROM td_sclass_movement_observations")
+                self._conn.execute("DELETE FROM td_sclass_movement_scores")
+
+        pre_ms, post_ms, tau_ms = self._get_sclass_correlation_window()
+        with self._lock:
+            cursor = self._conn.cursor()
+            query = """
+                SELECT id, ts_ms, ts_iso, td_area, headcode, from_berth, to_berth, source_msg_type
+                FROM td_berth_movements
+                WHERE td_area IS NOT NULL
+            """
+            params: tuple[Any, ...] = ()
+            if td_area_filter:
+                query += " AND UPPER(td_area)=?"
+                params = (td_area_filter,)
+            query += " ORDER BY td_area, ts_ms ASC, id ASC"
+            movement_rows = cursor.execute(query, params).fetchall()
+
+        inserted = 0
+        for movement_row in movement_rows:
+            movement = {
+                "id": movement_row[0],
+                "ts_ms": movement_row[1],
+                "ts_iso": movement_row[2],
+                "td_area": movement_row[3],
+                "headcode": movement_row[4],
+                "from_berth": movement_row[5],
+                "to_berth": movement_row[6],
+                "source_msg_type": movement_row[7],
+            }
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit, old_state, new_state
+                    FROM td_sclass_changes
+                    WHERE td_area=? AND ts_ms BETWEEN ? AND ?
+                    ORDER BY ts_ms ASC, id ASC
+                    """,
+                    (movement["td_area"], movement["ts_ms"] - pre_ms, movement["ts_ms"] + post_ms),
+                )
+                changes = cursor.fetchall()
+            for change_row in changes:
+                change = {
+                    "id": change_row[0],
+                    "ts_ms": change_row[1],
+                    "ts_iso": change_row[2],
+                    "td_area": change_row[3],
+                    "msg_type": change_row[4],
+                    "address": change_row[5],
+                    "byte_offset": change_row[6],
+                    "bit": change_row[7],
+                    "old_state": change_row[8],
+                    "new_state": change_row[9],
+                }
+                observation = self._build_td_sclass_observation(movement, change, tau_ms)
+                if self._insert_td_sclass_movement_observation(observation):
+                    inserted += 1
+
+        score_info = self._refresh_td_sclass_movement_scores(td_area_filter or None)
+        return {
+            "scanned_movements": len(movement_rows),
+            "inserted_observations": inserted,
+            "summary_count": score_info["summary_count"],
+            "observation_count": score_info["observation_count"],
+            "td_area": td_area_filter or None,
+        }
+
+    def get_sclass_correlation_status(self) -> dict:
+        """Return a snapshot of S-class correlation configuration and processing status."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            config = {row[0]: row[1] for row in cursor.execute("SELECT key, value FROM sclass_correlation_config").fetchall()}
+            counts = cursor.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM td_sclass_movement_observations) AS observation_count,
+                    (SELECT COUNT(*) FROM td_sclass_movement_scores) AS score_count,
+                    (SELECT COUNT(*) FROM td_berth_movements) AS movement_count,
+                    (SELECT COUNT(*) FROM td_sclass_changes) AS change_count,
+                    (SELECT COUNT(DISTINCT td_area) FROM td_sclass_movement_scores) AS area_count
+                """
+            ).fetchone()
+            latest = cursor.execute(
+                """
+                SELECT
+                    COALESCE(MAX(movement_ts_ms), 0) AS last_movement_ts,
+                    COALESCE(MAX(change_ts_ms), 0) AS last_change_ts
+                FROM td_sclass_movement_observations
+                """
+            ).fetchone()
+            return {
+                "config": config,
+                "observation_count": counts[0],
+                "score_count": counts[1],
+                "movement_count": counts[2],
+                "change_count": counts[3],
+                "area_count": counts[4],
+                "last_movement_ts_ms": latest[0],
+                "last_change_ts_ms": latest[1],
+            }
+
     def populate_corpus_data(self, corpus_data: list[dict]) -> int:
         """Populate CORPUS location reference data into the database.
         

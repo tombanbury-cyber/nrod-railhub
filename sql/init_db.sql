@@ -99,6 +99,80 @@ CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_ts
 CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_addr_ts
     ON td_sclass_changes(td_area, address, ts_ms);
 
+CREATE INDEX IF NOT EXISTS idx_td_sclass_changes_area_ts
+    ON td_sclass_changes(td_area, ts_ms);
+
+CREATE TABLE IF NOT EXISTS sclass_correlation_config (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL,
+    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES ('pre_ms', 120000);
+INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES ('post_ms', 120000);
+INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES ('tau_ms', 60000);
+
+CREATE TABLE IF NOT EXISTS td_sclass_movement_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    td_area TEXT NOT NULL,
+    movement_event_id INTEGER NOT NULL,
+    movement_ts_ms INTEGER NOT NULL,
+    movement_ts_iso TEXT NOT NULL,
+    headcode TEXT NOT NULL,
+    from_berth TEXT NOT NULL,
+    to_berth TEXT NOT NULL,
+    source_msg_type TEXT NOT NULL,
+    change_event_id INTEGER NOT NULL,
+    change_ts_ms INTEGER NOT NULL,
+    change_ts_iso TEXT NOT NULL,
+    address TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    bit INTEGER NOT NULL,
+    old_state INTEGER NOT NULL,
+    new_state INTEGER NOT NULL,
+    dt_ms INTEGER NOT NULL,
+    weight REAL NOT NULL,
+    evidence_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_unique
+    ON td_sclass_movement_observations(movement_event_id, change_event_id);
+CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_area_ts
+    ON td_sclass_movement_observations(td_area, movement_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_bit
+    ON td_sclass_movement_observations(td_area, address, byte_offset, bit, change_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_mov_ts
+    ON td_sclass_movement_observations(td_area, from_berth, to_berth, movement_ts_ms);
+
+CREATE TABLE IF NOT EXISTS td_sclass_movement_scores (
+    td_area TEXT NOT NULL,
+    from_berth TEXT NOT NULL,
+    to_berth TEXT NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    matching_count INTEGER NOT NULL DEFAULT 0,
+    movement_count INTEGER NOT NULL DEFAULT 0,
+    correlation_pct REAL NOT NULL DEFAULT 0.0,
+    mean_dt_ms REAL,
+    median_dt_ms REAL,
+    variance_dt_ms REAL,
+    min_dt_ms INTEGER,
+    max_dt_ms INTEGER,
+    lead_count INTEGER NOT NULL DEFAULT 0,
+    lag_count INTEGER NOT NULL DEFAULT 0,
+    on_count INTEGER NOT NULL DEFAULT 0,
+    off_count INTEGER NOT NULL DEFAULT 0,
+    associated_bits_json TEXT NOT NULL,
+    last_seen_ts_ms INTEGER NOT NULL,
+    last_seen_iso TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (td_area, from_berth, to_berth)
+);
+
+CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_scores_area_ts
+    ON td_sclass_movement_scores(td_area, last_seen_ts_ms);
+
 -- Historical berth transition evidence derived from observed train chains
 CREATE TABLE IF NOT EXISTS berth_transition_counts (
     headcode TEXT NOT NULL,

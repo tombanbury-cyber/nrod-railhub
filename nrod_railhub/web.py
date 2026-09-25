@@ -985,6 +985,61 @@ filterInput.addEventListener('input', updateFilter);
                 f"<td class='mono'>{bit_label}</td><td>{change_label}</td><td class='mono'>{r['raw_old']} → {r['raw_new']}</td></tr>"
             )
         body.append("</table>")
+
+        try:
+            status = rail_db.get_sclass_correlation_status()
+            cfg = status["config"]
+            body.append("<h3 style='margin-top:28px'>S-Class / Berth Correlation Status</h3>")
+            body.append(
+                "<table><tr><th>Metric</th><th>Value</th></tr>"
+                f"<tr><td>Window Before</td><td>{cfg.get('pre_ms', 0)} ms</td></tr>"
+                f"<tr><td>Window After</td><td>{cfg.get('post_ms', 0)} ms</td></tr>"
+                f"<tr><td>Weight Tau</td><td>{cfg.get('tau_ms', 0)} ms</td></tr>"
+                f"<tr><td>Movements</td><td>{status['movement_count']}</td></tr>"
+                f"<tr><td>Changes</td><td>{status['change_count']}</td></tr>"
+                f"<tr><td>Observations</td><td>{status['observation_count']}</td></tr>"
+                f"<tr><td>Scores</td><td>{status['score_count']}</td></tr>"
+                f"<tr><td>Areas</td><td>{status['area_count']}</td></tr>"
+                "</table>"
+            )
+
+            score_rows = q(
+                """
+                SELECT td_area, from_berth, to_berth, observation_count, matching_count, movement_count,
+                       correlation_pct, mean_dt_ms, median_dt_ms, variance_dt_ms,
+                       lead_count, lag_count, on_count, off_count, associated_bits_json, last_seen_iso
+                FROM td_sclass_movement_scores
+                ORDER BY correlation_pct DESC, observation_count DESC, td_area, from_berth, to_berth
+                LIMIT 100
+                """
+            )
+            if score_rows:
+                body.append("<h3>Correlated S-Class / Berth Pairs</h3>")
+                body.append("<table><tr><th>Area</th><th>From</th><th>To</th><th>Obs</th><th>Match</th><th>%</th><th>Mean Δt</th><th>Median</th><th>Var</th><th>Lead</th><th>Lag</th><th>ON</th><th>OFF</th><th>Bits</th><th>Last Seen</th></tr>")
+                for r in score_rows:
+                    body.append(
+                        "<tr>"
+                        f"<td>{r['td_area']}</td>"
+                        f"<td>{r['from_berth']}</td>"
+                        f"<td>{r['to_berth']}</td>"
+                        f"<td>{r['observation_count']}</td>"
+                        f"<td>{r['matching_count']}</td>"
+                        f"<td>{(r['correlation_pct'] * 100.0):.1f}%</td>"
+                        f"<td>{int(r['mean_dt_ms']) if r['mean_dt_ms'] is not None else ''}</td>"
+                        f"<td>{int(r['median_dt_ms']) if r['median_dt_ms'] is not None else ''}</td>"
+                        f"<td>{int(r['variance_dt_ms']) if r['variance_dt_ms'] is not None else ''}</td>"
+                        f"<td>{r['lead_count']}</td>"
+                        f"<td>{r['lag_count']}</td>"
+                        f"<td>{r['on_count']}</td>"
+                        f"<td>{r['off_count']}</td>"
+                        f"<td class='mono'>{r['associated_bits_json']}</td>"
+                        f"<td class='mono dim'>{r['last_seen_iso']}</td>"
+                        "</tr>"
+                    )
+                body.append("</table>")
+        except Exception as e:
+            logger.error(f"Web dashboard: Error querying S-class correlations: {e}")
+            body.append(f"<p><i>Error querying S-class correlations: {e}</i></p>")
         return render_page("Signals - NR RailHub", body, active="signals")
 
     @app.get("/trust")
@@ -2269,7 +2324,9 @@ filterInput.addEventListener('input', updateFilter);
                 SELECT 
                     (SELECT COUNT(*) FROM td_state) AS td_state,
                     (SELECT COUNT(*) FROM td_berth_events) AS td_berth_events,
-                    (SELECT COUNT(*) FROM td_signal_events) AS td_signal_events
+                    (SELECT COUNT(*) FROM td_signal_events) AS td_signal_events,
+                    (SELECT COUNT(*) FROM td_sclass_movement_observations) AS td_sclass_obs,
+                    (SELECT COUNT(*) FROM td_sclass_movement_scores) AS td_sclass_scores
             """)[0]
     
             # Top 10 signals by event count
@@ -2318,6 +2375,7 @@ filterInput.addEventListener('input', updateFilter);
             body.append(f"<div class='stat-card'><h3>Total tracked trains</h3><div class='dim'>{counts['td_state']}</div></div>")
             body.append(f"<div class='stat-card'><h3>Total berth events</h3><div class='dim'>{counts['td_berth_events']}</div></div>")
             body.append(f"<div class='stat-card'><h3>Total signal events</h3><div class='dim'>{counts['td_signal_events']}</div></div>")
+            body.append(f"<div class='stat-card'><h3>S-Class correlations</h3><div class='dim'>{counts['td_sclass_obs']} observations / {counts['td_sclass_scores']} scores</div></div>")
             body.append("</div>")
     
             # Top lists
