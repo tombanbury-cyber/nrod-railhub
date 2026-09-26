@@ -140,6 +140,10 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
             ".badge.reviewed{background:#fef3c7;color:#92400e}"
             ".badge.confirmed{background:#d1fae5;color:#065f46}"
             ".badge.manual{background:#e0f2fe;color:#075985}"
+            ".badge.unknown{background:#e5e7eb;color:#374151}"
+            ".badge.probable{background:#fde68a;color:#92400e}"
+            ".badge.corrected{background:#fecaca;color:#991b1b}"
+            ".badge.revoked{background:#f3f4f6;color:#6b7280}"
             ".dim{color:#6c757d;font-size:12px}"
             ".mono{font-family:monospace}"
             "</style>"
@@ -185,6 +189,25 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         if confidence is not None:
             label = f"{label} · {confidence:.2f}"
         return f"<span class='badge {state_value}'>{label}</span>"
+
+    def _physical_signal_badge(status: str, confidence: Optional[float] = None, source: Optional[str] = None) -> str:
+        status_value = (status or "unknown").strip().lower()
+        if status_value not in {"unknown", "inferred", "probable", "confirmed", "corrected", "revoked"}:
+            status_value = "unknown"
+        label_map = {
+            "unknown": "Unknown",
+            "inferred": "Inferred",
+            "probable": "Probable",
+            "confirmed": "Confirmed",
+            "corrected": "Corrected",
+            "revoked": "Revoked",
+        }
+        label = label_map[status_value]
+        if source:
+            label = f"{label} · {html.escape(source)}"
+        if confidence is not None:
+            label = f"{label} · {confidence:.2f}"
+        return f"<span class='badge {status_value}'>{label}</span>"
 
     @app.get("/")
     def index():
@@ -1295,9 +1318,15 @@ filterInput.addEventListener('input', updateFilter);
                 )
                 for row in detail_rows:
                     bit_name = f"{row['address']}.{row['bit']}" if int(row["byte_offset"] or 0) == 0 else f"{row['address']}+{row['byte_offset']}.{row['bit']}"
+                    if row["old_state"] == 0 and row["new_state"] == 1:
+                        transition_label = "OFF → ON"
+                    elif row["old_state"] == 1 and row["new_state"] == 0:
+                        transition_label = "ON → OFF"
+                    else:
+                        transition_label = f"{row['old_state']} → {row['new_state']}"
                     body.append(
                         f"<tr><td class='mono'>{html.escape(row['ts_iso'])}</td><td>{html.escape(row['msg_type'])}</td>"
-                        f"<td class='mono'>{html.escape(bit_name)}</td><td>{'OFF → ON' if row['old_state']==0 and row['new_state']==1 else 'ON → OFF' if row['old_state']==1 and row['new_state']==0 else f'{row['old_state']} → {row['new_state']}'}</td>"
+                        f"<td class='mono'>{html.escape(bit_name)}</td><td>{transition_label}</td>"
                         f"<td class='mono'>{html.escape(row['raw_old'])} → {html.escape(row['raw_new'])}</td></tr>"
                     )
                 body.append("</table>")
@@ -2933,6 +2962,194 @@ filterInput.addEventListener('input', updateFilter);
         """Redirect to unified configuration page."""
         return redirect("/config", code=302)
 
+    def _physical_signal_request_payload() -> Dict[str, Any]:
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            return payload
+        return {key: value for key, value in request.form.items()}
+
+    def _physical_signal_mapping_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        def text(name: str) -> Optional[str]:
+            value = payload.get(name)
+            if value is None:
+                return None
+            value = str(value).strip()
+            return value or None
+
+        def integer(name: str) -> Optional[int]:
+            value = payload.get(name)
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def number(name: str) -> Optional[float]:
+            value = payload.get(name)
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "td_area": text("td_area"),
+            "address": text("address"),
+            "byte_offset": integer("byte_offset"),
+            "bit": integer("bit"),
+            "from_berth": text("from_berth"),
+            "to_berth": text("to_berth"),
+            "physical_signal_number": text("physical_signal_number"),
+            "physical_signal_location": text("physical_signal_location"),
+            "mapping_confidence": number("mapping_confidence"),
+            "correlation_confidence": number("correlation_confidence"),
+            "verification_status": (text("verification_status") or "unknown").lower(),
+            "source": text("source"),
+            "reviewer": text("reviewer"),
+            "evidence_json": payload.get("evidence_json"),
+            "notes": text("notes"),
+            "supersedes_id": integer("supersedes_id"),
+            "mapping_id": integer("mapping_id"),
+        }
+
+    @app.post("/signal-mappings")
+    def signal_mappings_update():
+        payload = _physical_signal_request_payload()
+        action = (payload.get("action") or "create").strip().lower()
+        data = _physical_signal_mapping_payload(payload)
+        if not data["td_area"] or not data["address"] or data["bit"] is None:
+            if request.is_json:
+                return {"status": "error", "message": "td_area, address, and bit are required"}, 400
+            return redirect("/signal-mappings")
+
+        if action == "revoke":
+            if data["mapping_id"] is None:
+                if request.is_json:
+                    return {"status": "error", "message": "mapping_id is required to revoke"}, 400
+                return redirect("/signal-mappings")
+            rail_db.revoke_physical_signal_mapping(
+                data["mapping_id"],
+                reviewer=data["reviewer"],
+                notes=data["notes"],
+            )
+            mapping_id = data["mapping_id"]
+        elif action in {"confirm", "update"} and data["mapping_id"] is not None:
+            rail_db.update_physical_signal_mapping(
+                data["mapping_id"],
+                verification_status="confirmed" if action == "confirm" else data["verification_status"],
+                reviewer=data["reviewer"],
+                physical_signal_number=data["physical_signal_number"],
+                physical_signal_location=data["physical_signal_location"],
+                mapping_confidence=data["mapping_confidence"],
+                correlation_confidence=data["correlation_confidence"],
+                source=data["source"],
+                evidence_json=data["evidence_json"],
+                notes=data["notes"],
+                supersedes_id=data["supersedes_id"],
+            )
+            mapping_id = data["mapping_id"]
+        else:
+            supersedes_id = data["supersedes_id"] if data["supersedes_id"] is not None else data["mapping_id"] if action == "correct" else None
+            mapping_id = rail_db.add_physical_signal_mapping(
+                data["td_area"],
+                data["address"],
+                data["byte_offset"] or 0,
+                data["bit"],
+                physical_signal_number=data["physical_signal_number"],
+                physical_signal_location=data["physical_signal_location"],
+                from_berth=data["from_berth"],
+                to_berth=data["to_berth"],
+                mapping_confidence=data["mapping_confidence"],
+                correlation_confidence=data["correlation_confidence"],
+                verification_status=(
+                    "confirmed" if action == "confirm" else
+                    "corrected" if action == "correct" else
+                    data["verification_status"]
+                ),
+                source=data["source"],
+                reviewer=data["reviewer"],
+                evidence_json=data["evidence_json"],
+                notes=data["notes"],
+                supersedes_id=supersedes_id,
+            )
+
+        if request.is_json:
+            return {
+                "status": "ok",
+                "action": action,
+                "id": mapping_id,
+                "mapping": rail_db.get_physical_signal_mapping(mapping_id) if mapping_id else None,
+            }
+        return redirect("/signal-mappings")
+
+    @app.get("/api/physical-signal-mappings")
+    def api_physical_signal_mappings():
+        payload = _physical_signal_request_payload()
+        rows = rail_db.get_physical_signal_mappings(
+            td_area=payload.get("td_area"),
+            address=payload.get("address"),
+            verification_status=payload.get("verification_status"),
+            limit=int(payload.get("limit") or 200),
+        )
+        return {"items": rows, "count": len(rows)}
+
+    @app.post("/api/physical-signal-mappings")
+    def api_create_physical_signal_mapping():
+        payload = _physical_signal_request_payload()
+        data = _physical_signal_mapping_payload(payload)
+        if not data["td_area"] or not data["address"] or data["bit"] is None:
+            return {"status": "error", "message": "td_area, address, and bit are required"}, 400
+        mapping_id = rail_db.add_physical_signal_mapping(
+            data["td_area"],
+            data["address"],
+            data["byte_offset"] or 0,
+            data["bit"],
+            physical_signal_number=data["physical_signal_number"],
+            physical_signal_location=data["physical_signal_location"],
+            from_berth=data["from_berth"],
+            to_berth=data["to_berth"],
+            mapping_confidence=data["mapping_confidence"],
+            correlation_confidence=data["correlation_confidence"],
+            verification_status=data["verification_status"],
+            source=data["source"],
+            reviewer=data["reviewer"],
+            evidence_json=data["evidence_json"],
+            notes=data["notes"],
+            supersedes_id=data["supersedes_id"],
+        )
+        return {"status": "ok", "id": mapping_id}
+
+    @app.patch("/api/physical-signal-mappings/<int:mapping_id>")
+    def api_update_physical_signal_mapping(mapping_id: int):
+        payload = _physical_signal_request_payload()
+        data = _physical_signal_mapping_payload(payload)
+        rail_db.update_physical_signal_mapping(
+            mapping_id,
+            verification_status=data["verification_status"] if "verification_status" in payload else None,
+            reviewer=data["reviewer"],
+            physical_signal_number=data["physical_signal_number"],
+            physical_signal_location=data["physical_signal_location"],
+            mapping_confidence=data["mapping_confidence"],
+            correlation_confidence=data["correlation_confidence"],
+            source=data["source"],
+            evidence_json=data["evidence_json"],
+            notes=data["notes"],
+            supersedes_id=data["supersedes_id"],
+        )
+        return {"status": "ok", "id": mapping_id}
+
+    @app.delete("/api/physical-signal-mappings/<int:mapping_id>")
+    def api_delete_physical_signal_mapping(mapping_id: int):
+        payload = _physical_signal_request_payload()
+        rail_db.revoke_physical_signal_mapping(
+            mapping_id,
+            reviewer=(payload.get("reviewer") or None),
+            notes=(payload.get("notes") or None),
+        )
+        return {"status": "ok", "id": mapping_id, "verification_status": "revoked"}
+
     @app.get("/signal-mappings")
     def signal_mappings():
         """Signal mappings enquiry screen showing berth-signal correlations."""
@@ -2956,6 +3173,7 @@ filterInput.addEventListener('input', updateFilter);
         to_berth_filter = request.args.get("to_berth", "").strip()
         min_score = request.args.get("min_score", "").strip()
         min_obs = request.args.get("min_obs", "").strip()
+        signal_status_filter = request.args.get("signal_status", "").strip()
         
         # Get sort parameters
         sort_by = request.args.get("sort", "score").strip()
@@ -3268,7 +3486,93 @@ filterInput.addEventListener('input', updateFilter);
                 body.append("</table>")
             else:
                 body.append("<p><i>No mappings found matching the current filters.</i></p>")
-                
+
+            body.append("<hr style='margin:28px 0;border:0;border-top:2px solid #eee'>")
+            body.append("<h3>Physical Signal Identity Review</h3>")
+            body.append(
+                "<p class='dim'>Record reviewed physical signal numbers and locations for S-Class bits. "
+                "Keep mapping confidence separate from the underlying berth/signal correlation score.</p>"
+            )
+            physical_rows = rail_db.get_physical_signal_mappings(
+                td_area=td_area_filter or None,
+                address=address_filter or None,
+                verification_status=signal_status_filter or None,
+                limit=200,
+            )
+            body.append(
+                "<form method='post' action='/signal-mappings' style='background:#f7f9fc;padding:15px;border-radius:6px;margin-bottom:16px'>"
+                "<input type='hidden' name='action' value='create'/>"
+                "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px'>"
+                f"<div><label style='font-weight:600;display:block;margin-bottom:4px'>TD Area:</label><input type='text' name='td_area' value='{html.escape(td_area_filter)}' placeholder='e.g. EK' style='padding:6px;width:100%'></div>"
+                f"<div><label style='font-weight:600;display:block;margin-bottom:4px'>Address:</label><input type='text' name='address' value='{html.escape(address_filter)}' placeholder='e.g. D0' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Byte Offset:</label><input type='number' min='0' name='byte_offset' value='0' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Bit:</label><input type='number' min='0' max='7' name='bit' placeholder='0-7' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Physical Signal No:</label><input type='text' name='physical_signal_number' placeholder='e.g. SN123' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Location:</label><input type='text' name='physical_signal_location' placeholder='e.g. Up platform end' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>From Berth:</label><input type='text' name='from_berth' placeholder='e.g. 0152' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>To Berth:</label><input type='text' name='to_berth' placeholder='e.g. 0153' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Mapping Confidence:</label><input type='number' step='0.01' min='0' max='1' name='mapping_confidence' placeholder='0.80' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Correlation Confidence:</label><input type='number' step='0.01' min='0' max='1' name='correlation_confidence' placeholder='0.95' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Verification Status:</label><input type='text' name='verification_status' value='unknown' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Source:</label><input type='text' name='source' placeholder='manual, import, review' style='padding:6px;width:100%'></div>"
+                "<div><label style='font-weight:600;display:block;margin-bottom:4px'>Reviewer:</label><input type='text' name='reviewer' placeholder='optional' style='padding:6px;width:100%'></div>"
+                "<div style='grid-column:1 / -1'><label style='font-weight:600;display:block;margin-bottom:4px'>Evidence (JSON or free text):</label><textarea name='evidence_json' rows='3' style='padding:6px;width:100%'></textarea></div>"
+                "<div style='grid-column:1 / -1'><label style='font-weight:600;display:block;margin-bottom:4px'>Notes:</label><input type='text' name='notes' placeholder='review notes' style='padding:6px;width:100%;box-sizing:border-box'></div>"
+                "</div>"
+                "<div style='margin-top:12px'>"
+                "<button type='submit' style='padding:8px 16px;background:#0b5cff;color:white;border:0;border-radius:6px;font-weight:600;cursor:pointer'>Add Mapping</button>"
+                "</div>"
+                "</form>"
+            )
+            if physical_rows:
+                body.append(
+                    f"<p class='dim'>Showing {len(physical_rows)} physical signal mapping(s)</p>"
+                )
+                body.append("<table style='font-size:13px'>")
+                body.append(
+                    "<tr><th>Status</th><th>TD Area</th><th>Bit</th><th>Signal No.</th><th>Location</th>"
+                    "<th>From</th><th>To</th><th>Mapping Conf.</th><th>Correlation Conf.</th>"
+                    "<th>Source</th><th>Reviewer</th><th>Evidence</th><th>Actions</th></tr>"
+                )
+                for row in physical_rows:
+                    bit_label = f"{row['address']}.{row['bit']}" if int(row["byte_offset"] or 0) == 0 else f"{row['address']}+{row['byte_offset']}.{row['bit']}"
+                    mapping_conf_text = f"{row['mapping_confidence']:.2f}" if row["mapping_confidence"] is not None else ""
+                    correlation_conf_text = f"{row['correlation_confidence']:.2f}" if row["correlation_confidence"] is not None else ""
+                    body.append("<tr>")
+                    body.append(
+                        f"<td>{_physical_signal_badge(row['verification_status'], row['mapping_confidence'], row['source'])}</td>"
+                    )
+                    body.append(f"<td>{html.escape(row['td_area'])}</td>")
+                    body.append(f"<td class='mono'>{html.escape(bit_label)}</td>")
+                    body.append(f"<td>{html.escape(row['physical_signal_number'] or '')}</td>")
+                    body.append(f"<td>{html.escape(row['physical_signal_location'] or '')}</td>")
+                    body.append(f"<td>{html.escape(row['from_berth'] or '')}</td>")
+                    body.append(f"<td>{html.escape(row['to_berth'] or '')}</td>")
+                    body.append(f"<td>{mapping_conf_text}</td>")
+                    body.append(f"<td>{correlation_conf_text}</td>")
+                    body.append(f"<td>{html.escape(row['source'] or '')}</td>")
+                    body.append(f"<td>{html.escape(row['reviewer'] or '')}</td>")
+                    body.append(f"<td class='mono dim'>{html.escape(row['evidence_json'] or '')}</td>")
+                    body.append(
+                        "<td>"
+                        f"<form method='post' action='/signal-mappings' style='display:inline;margin-right:4px'>"
+                        f"<input type='hidden' name='action' value='confirm'/>"
+                        f"<input type='hidden' name='mapping_id' value='{row['id']}'/>"
+                        f"<input type='hidden' name='reviewer' value='web_ui'/>"
+                        f"<button type='submit' style='padding:4px 8px;background:#d1fae5;color:#065f46;border:0;border-radius:4px;cursor:pointer;font-size:12px'>Confirm</button>"
+                        f"</form>"
+                        f"<form method='post' action='/signal-mappings' style='display:inline'>"
+                        f"<input type='hidden' name='action' value='revoke'/>"
+                        f"<input type='hidden' name='mapping_id' value='{row['id']}'/>"
+                        f"<input type='hidden' name='reviewer' value='web_ui'/>"
+                        f"<button type='submit' onclick='return confirm(\"Revoke this mapping?\")' style='padding:4px 8px;background:#dc3545;color:white;border:0;border-radius:4px;cursor:pointer;font-size:12px'>Revoke</button>"
+                        f"</form>"
+                        "</td>"
+                    )
+                    body.append("</tr>")
+                body.append("</table>")
+            else:
+                body.append("<p><i>No physical signal mappings recorded yet.</i></p>")
         except Exception as e:
             logger.error(f"Web dashboard: Error querying signal mappings: {e}")
             body.append(f"<p style='color:red'>Error querying signal mappings: {e}</p>")
