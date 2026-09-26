@@ -3150,6 +3150,47 @@ filterInput.addEventListener('input', updateFilter);
         )
         return {"status": "ok", "id": mapping_id, "verification_status": "revoked"}
 
+    @app.get("/api/signalling-topology")
+    def api_signalling_topology():
+        try:
+            topology = rail_db.get_signalling_topology(
+                td_area=request.args.get("area"),
+                start_node_id=request.args.get("start"),
+                max_depth=int(request.args.get("depth", "5")),
+                verification_status=request.args.get("status"),
+                limit=int(request.args.get("limit", "2000")),
+            )
+        except (TypeError, ValueError) as exc:
+            return {"status": "error", "message": str(exc)}, 400
+        return topology
+
+    @app.post("/api/signalling-topology/rebuild")
+    def api_rebuild_signalling_topology():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return {"status": "error", "message": "Expected a JSON object"}, 400
+        return {"status": "ok", **rail_db.rebuild_signalling_topology(payload.get("area"))}
+
+    @app.patch("/api/signalling-topology/edges/<edge_id>")
+    def api_review_signalling_topology_edge(edge_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return {"status": "error", "message": "Expected a JSON object"}, 400
+        try:
+            updated = rail_db.set_topology_edge_status(
+                edge_id,
+                payload.get("verification_status"),
+                reviewer=payload.get("reviewer"),
+                notes=payload.get("notes"),
+            )
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}, 400
+        if not updated:
+            return {"status": "error", "message": "Topology edge not found"}, 404
+        return {"status": "ok", "edge_id": edge_id}
+
     @app.get("/signal-mappings")
     def signal_mappings():
         """Signal mappings enquiry screen showing berth-signal correlations."""
