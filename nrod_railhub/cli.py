@@ -526,6 +526,13 @@ def parse_args() -> argparse.Namespace:
         dest="td_area",
         help="Only show console output for these TD area IDs (repeatable, e.g. --td-area EK). Default: show all areas.",
     )
+    p.add_argument(
+        "--toc-filter",
+        action="append",
+        default=[],
+        dest="toc_filter",
+        help="Download schedules for these TOCs (repeatable, e.g. --toc-filter SE).",
+    )
 
     p.add_argument(
         "--log-level",
