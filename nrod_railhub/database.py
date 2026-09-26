@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -57,6 +58,7 @@ class RailDB:
         self._init_schema()
         self.ensure_sclass_correlation_schema()
         self.ensure_physical_signal_schema()
+        self.ensure_topology_schema()
 
         # Retention settings
         self.retain_trust_days = retain_trust_days
@@ -2116,6 +2118,57 @@ class RailDB:
                 """
             )
 
+    def ensure_topology_schema(self) -> None:
+        """Create evidence-backed signalling topology tables."""
+        with self._conn:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS topology_nodes (
+                    node_id TEXT PRIMARY KEY,
+                    td_area TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    attributes_json TEXT NOT NULL DEFAULT '{}',
+                    verification_status TEXT NOT NULL DEFAULT 'inferred',
+                    provenance TEXT NOT NULL DEFAULT 'manual',
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_nodes_area_type
+                    ON topology_nodes(td_area, node_type, verification_status);
+
+                CREATE TABLE IF NOT EXISTS topology_edges (
+                    edge_id TEXT PRIMARY KEY,
+                    td_area TEXT NOT NULL,
+                    from_node_id TEXT NOT NULL,
+                    relationship TEXT NOT NULL,
+                    to_node_id TEXT NOT NULL,
+                    hypothesis TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL,
+                    verification_status TEXT NOT NULL DEFAULT 'inferred',
+                    provenance TEXT NOT NULL DEFAULT 'manual',
+                    reviewed_by TEXT,
+                    review_notes TEXT,
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    UNIQUE(td_area, from_node_id, relationship, to_node_id, hypothesis)
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_edges_area_from
+                    ON topology_edges(td_area, from_node_id, verification_status);
+                CREATE INDEX IF NOT EXISTS idx_topology_edges_area_to
+                    ON topology_edges(td_area, to_node_id, verification_status);
+
+                CREATE TABLE IF NOT EXISTS topology_edge_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    edge_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    UNIQUE(edge_id, source_type, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_edge_evidence_edge
+                    ON topology_edge_evidence(edge_id);
+                """
+            )
+
     @staticmethod
     def _json_or_none(value: Any) -> Optional[str]:
         if value is None:
@@ -3022,4 +3075,554 @@ class RailDB:
                 (td_area,)
             )
             return [row[0] for row in cursor.fetchall()]
+
+    @staticmethod
+    def _topology_node_id(td_area: str, node_type: str, key: str) -> str:
+        return f"{td_area}:{node_type}:{key}"
+
+    def _topology_add_node(
+        self,
+        td_area: str,
+        node_type: str,
+        key: str,
+        label: str,
+        attributes: Optional[dict] = None,
+        verification_status: str = "inferred",
+        provenance: str = "manual",
+    ) -> str:
+        td_area = (td_area or "").strip().upper()
+        node_type = (node_type or "").strip().lower()
+        key = (key or "").strip()
+        verification_status = (verification_status or "inferred").strip().lower()
+        if not td_area or not key or node_type not in {
+            "berth", "signal", "route", "points", "track_section", "transition"
+        }:
+            raise ValueError("Topology nodes require an area, key, and supported node type")
+        if verification_status not in {"inferred", "confirmed"}:
+            raise ValueError("Node verification status must be inferred or confirmed")
+        node_id = self._topology_node_id(td_area, node_type, key)
+        self._conn.execute(
+            """
+            INSERT INTO topology_nodes(
+                node_id, td_area, node_type, label, attributes_json,
+                verification_status, provenance
+            ) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(node_id) DO UPDATE SET
+                label=excluded.label,
+                attributes_json=excluded.attributes_json,
+                verification_status=CASE
+                    WHEN topology_nodes.verification_status='confirmed' THEN 'confirmed'
+                    ELSE excluded.verification_status
+                END,
+                provenance=CASE
+                    WHEN topology_nodes.verification_status='confirmed' THEN topology_nodes.provenance
+                    ELSE excluded.provenance
+                END,
+                updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            """,
+            (
+                node_id,
+                td_area,
+                node_type,
+                (label or key).strip(),
+                self._json_or_none(attributes or {}) or "{}",
+                verification_status,
+                provenance,
+            ),
+        )
+        return node_id
+
+    def add_topology_node(
+        self,
+        td_area: str,
+        node_type: str,
+        key: str,
+        label: str,
+        *,
+        attributes: Optional[dict] = None,
+        verification_status: str = "inferred",
+        provenance: str = "manual",
+    ) -> str:
+        """Insert or update a topology node, preserving prior confirmation."""
+        with self._lock, self._conn:
+            return self._topology_add_node(
+                td_area, node_type, key, label, attributes, verification_status, provenance
+            )
+
+    def _topology_add_edge(
+        self,
+        td_area: str,
+        from_node_id: str,
+        relationship: str,
+        to_node_id: str,
+        confidence: float,
+        *,
+        hypothesis: str = "",
+        verification_status: str = "inferred",
+        provenance: str = "manual",
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+        evidence: Optional[Any] = None,
+    ) -> str:
+        td_area = (td_area or "").strip().upper()
+        relationship = (relationship or "").strip().lower()
+        verification_status = (verification_status or "inferred").strip().lower()
+        confidence = float(confidence)
+        if not td_area or not relationship:
+            raise ValueError("Topology edges require an area and relationship")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("Topology edge confidence must be between 0 and 1")
+        if verification_status not in {"inferred", "confirmed", "rejected"}:
+            raise ValueError("Edge verification status must be inferred, confirmed, or rejected")
+        endpoints = self._conn.execute(
+            "SELECT COUNT(*) FROM topology_nodes WHERE node_id IN (?,?) AND td_area=?",
+            (from_node_id, to_node_id, td_area),
+        ).fetchone()[0]
+        if endpoints != 2:
+            raise ValueError("Both topology edge endpoints must exist in the same area")
+        hypothesis = (hypothesis or "").strip()
+        natural_key = json.dumps(
+            [td_area, from_node_id, relationship, to_node_id, hypothesis],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        edge_id = hashlib.sha256(natural_key.encode("utf-8")).hexdigest()
+        self._conn.execute(
+            """
+            INSERT INTO topology_edges(
+                edge_id, td_area, from_node_id, relationship, to_node_id,
+                hypothesis, confidence, verification_status, provenance
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(edge_id) DO UPDATE SET
+                confidence=MAX(topology_edges.confidence, excluded.confidence),
+                verification_status=CASE
+                    WHEN topology_edges.verification_status='inferred'
+                    THEN excluded.verification_status
+                    ELSE topology_edges.verification_status
+                END,
+                provenance=CASE
+                    WHEN topology_edges.verification_status='inferred' THEN excluded.provenance
+                    ELSE topology_edges.provenance
+                END,
+                updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            """,
+            (
+                edge_id, td_area, from_node_id, relationship, to_node_id,
+                hypothesis, confidence, verification_status, provenance,
+            ),
+        )
+        if source_type and source_id is not None:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO topology_edge_evidence(
+                    edge_id, source_type, source_id, evidence_json
+                ) VALUES (?,?,?,?)
+                """,
+                (
+                    edge_id,
+                    source_type,
+                    str(source_id),
+                    self._json_or_none(evidence or {}) or "{}",
+                ),
+            )
+        return edge_id
+
+    def add_topology_edge(
+        self,
+        td_area: str,
+        from_node_id: str,
+        relationship: str,
+        to_node_id: str,
+        confidence: float,
+        *,
+        hypothesis: str = "",
+        verification_status: str = "inferred",
+        provenance: str = "manual",
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+        evidence: Optional[Any] = None,
+    ) -> str:
+        """Insert an edge hypothesis and its supporting evidence."""
+        with self._lock, self._conn:
+            return self._topology_add_edge(
+                td_area,
+                from_node_id,
+                relationship,
+                to_node_id,
+                confidence,
+                hypothesis=hypothesis,
+                verification_status=verification_status,
+                provenance=provenance,
+                source_type=source_type,
+                source_id=source_id,
+                evidence=evidence,
+            )
+
+    def set_topology_edge_status(
+        self, edge_id: str, verification_status: str, *, reviewer: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Review an inferred edge without discarding its evidence or alternatives."""
+        status = (verification_status or "").strip().lower()
+        if status not in {"inferred", "confirmed", "rejected"}:
+            raise ValueError("Edge verification status must be inferred, confirmed, or rejected")
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE topology_edges
+                SET verification_status=?, reviewed_by=?, review_notes=?,
+                    updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE edge_id=?
+                """,
+                (status, reviewer, notes, edge_id),
+            )
+            return cursor.rowcount > 0
+
+    def rebuild_signalling_topology(self, td_area: Optional[str] = None) -> dict:
+        """Reconstruct inferred berth, signal, and route relationships from stored evidence."""
+        area = (td_area or "").strip().upper() or None
+        with self._lock, self._conn:
+            params: tuple[Any, ...] = (area,) if area else ()
+            area_sql = " AND td_area=?" if area else ""
+            generated_edges = self._conn.execute(
+                "SELECT edge_id FROM topology_edges WHERE provenance='reconstruction' "
+                "AND verification_status='inferred'" + area_sql,
+                params,
+            ).fetchall()
+            if generated_edges:
+                self._conn.executemany(
+                    "DELETE FROM topology_edge_evidence WHERE edge_id=?",
+                    generated_edges,
+                )
+            self._conn.execute(
+                "DELETE FROM topology_edges WHERE provenance='reconstruction' "
+                "AND verification_status='inferred'" + area_sql,
+                params,
+            )
+            self._conn.execute(
+                """
+                DELETE FROM topology_nodes
+                WHERE provenance='reconstruction' AND verification_status='inferred'
+                  AND (? IS NULL OR td_area=?)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM topology_edges e
+                      WHERE e.from_node_id=topology_nodes.node_id
+                         OR e.to_node_id=topology_nodes.node_id
+                  )
+                """,
+                (area, area),
+            )
+            query_area = " WHERE UPPER(td_area)=?" if area else ""
+            movement_rows = self._conn.execute(
+                """
+                SELECT id, ts_ms, ts_iso, td_area, headcode, from_berth, to_berth
+                FROM td_berth_movements
+                """ + query_area + " ORDER BY td_area, ts_ms, id",
+                params,
+            ).fetchall()
+
+            def add_transition(
+                movement_area: str, from_berth: str, to_berth: str, source_type: str,
+                source_id: str, confidence: float, evidence: dict,
+            ) -> tuple[str, str, str]:
+                start_id = self._topology_add_node(
+                    movement_area, "berth", from_berth, from_berth,
+                    provenance="reconstruction",
+                )
+                target_id = self._topology_add_node(
+                    movement_area, "berth", to_berth, to_berth,
+                    provenance="reconstruction",
+                )
+                route_key = f"{from_berth}>{to_berth}"
+                route_id = self._topology_add_node(
+                    movement_area,
+                    "route",
+                    route_key,
+                    f"{from_berth} → {to_berth}",
+                    {"from_berth": from_berth, "to_berth": to_berth},
+                    provenance="reconstruction",
+                )
+                self._topology_add_edge(
+                    movement_area, start_id, "uses_route", route_id, confidence,
+                    provenance="reconstruction", source_type=source_type,
+                    source_id=source_id, evidence=evidence,
+                )
+                self._topology_add_edge(
+                    movement_area, route_id, "leads_to", target_id, confidence,
+                    provenance="reconstruction", source_type=source_type,
+                    source_id=source_id, evidence=evidence,
+                )
+                return start_id, route_id, target_id
+
+            for row in movement_rows:
+                movement_id, ts_ms, ts_iso, movement_area, headcode, from_berth, to_berth = row
+                if not movement_area or not from_berth or not to_berth:
+                    continue
+                add_transition(
+                    movement_area, from_berth, to_berth, "td_berth_movement",
+                    str(movement_id), 1.0,
+                    {"movement_id": movement_id, "ts_ms": ts_ms, "ts_iso": ts_iso,
+                     "headcode": headcode},
+                )
+
+            score_rows = self._conn.execute(
+                """
+                SELECT td_area, from_berth, to_berth, observation_count, matching_count,
+                       correlation_pct, associated_bits_json
+                FROM td_sclass_movement_scores
+                """ + query_area + " ORDER BY td_area, from_berth, to_berth",
+                params,
+            ).fetchall()
+            for row in score_rows:
+                score_area, from_berth, to_berth, observation_count, matching_count, confidence, bits_json = row
+                if not from_berth or not to_berth:
+                    continue
+                start_id, route_id, _ = add_transition(
+                    score_area, from_berth, to_berth, "sclass_correlation",
+                    f"{score_area}:{from_berth}:{to_berth}", confidence,
+                    {"observation_count": observation_count, "matching_count": matching_count},
+                )
+                try:
+                    bit_labels = json.loads(bits_json or "[]")
+                except (TypeError, ValueError):
+                    bit_labels = []
+                for bit_label in bit_labels:
+                    address = str(bit_label).strip()
+                    if not address:
+                        continue
+                    signal_id = self._topology_add_node(
+                        score_area, "signal", address, address,
+                        {"sclass_bit": address}, provenance="reconstruction",
+                    )
+                    evidence = {
+                        "from_berth": from_berth,
+                        "to_berth": to_berth,
+                        "correlation_pct": confidence,
+                        "observation_count": observation_count,
+                        "matching_count": matching_count,
+                        "sclass_bit": address,
+                    }
+                    source_id = f"{score_area}:{from_berth}:{to_berth}:{address}"
+                    self._topology_add_edge(
+                        score_area, start_id, "indicated_by_signal", signal_id, confidence,
+                        provenance="reconstruction", source_type="sclass_correlation",
+                        source_id=source_id, evidence=evidence,
+                    )
+                    self._topology_add_edge(
+                        score_area, signal_id, "indicates_route", route_id, confidence,
+                        provenance="reconstruction", source_type="sclass_correlation",
+                        source_id=source_id, evidence=evidence,
+                    )
+
+            mapping_area_sql = " AND UPPER(p.td_area)=?" if area else ""
+            mapping_rows = self._conn.execute(
+                """
+                SELECT p.id, p.td_area, p.address, p.byte_offset, p.bit, p.from_berth,
+                       p.to_berth, p.physical_signal_number, p.physical_signal_location,
+                       p.mapping_confidence, p.correlation_confidence, p.verification_status,
+                       p.source, p.evidence_json
+                FROM physical_signal_mappings p
+                WHERE p.verification_status<>'revoked'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM physical_signal_mappings newer
+                      WHERE newer.supersedes_id=p.id
+                  )
+                """ + mapping_area_sql + " ORDER BY p.td_area, p.id",
+                params,
+            ).fetchall()
+            for row in mapping_rows:
+                (
+                    mapping_id, mapping_area, address, byte_offset, bit, from_berth,
+                    to_berth, physical_number, location, mapping_confidence,
+                    correlation_confidence, status, source, evidence_json,
+                ) = row
+                signal_key = physical_number or f"{address}+{byte_offset}.{bit}"
+                signal_id = self._topology_add_node(
+                    mapping_area,
+                    "signal",
+                    signal_key,
+                    physical_number or f"{address}+{byte_offset}.{bit}",
+                    {
+                        "physical_signal_number": physical_number,
+                        "physical_signal_location": location,
+                        "td_address": address,
+                        "byte_offset": byte_offset,
+                        "bit": bit,
+                        "mapping_status": status,
+                    },
+                    provenance="reconstruction",
+                )
+                confidence = mapping_confidence
+                if confidence is None:
+                    confidence = correlation_confidence
+                if confidence is None:
+                    confidence = 0.5
+                confidence = max(0.0, min(1.0, float(confidence)))
+                evidence = {
+                    "mapping_id": mapping_id,
+                    "verification_status": status,
+                    "source": source,
+                    "evidence_json": evidence_json,
+                    "correlation_confidence": correlation_confidence,
+                }
+                source_id = str(mapping_id)
+                if from_berth:
+                    start_id = self._topology_add_node(
+                        mapping_area, "berth", from_berth, from_berth,
+                        provenance="reconstruction",
+                    )
+                    self._topology_add_edge(
+                        mapping_area, start_id, "approach_signal", signal_id, confidence,
+                        provenance="reconstruction", source_type="physical_signal_mapping",
+                        source_id=source_id, evidence=evidence,
+                    )
+                if from_berth and to_berth:
+                    _, route_id, target_id = add_transition(
+                        mapping_area, from_berth, to_berth,
+                        "physical_signal_mapping", source_id, confidence, evidence,
+                    )
+                    self._topology_add_edge(
+                        mapping_area, signal_id, "protects_route", route_id, confidence,
+                        provenance="reconstruction", source_type="physical_signal_mapping",
+                        source_id=source_id, evidence=evidence,
+                    )
+
+            generated_count = self._conn.execute(
+                "SELECT COUNT(*) FROM topology_edges WHERE provenance='reconstruction' "
+                "AND verification_status='inferred'" + area_sql,
+                params,
+            ).fetchone()[0]
+            return {
+                "td_area": area,
+                "movement_rows": len(movement_rows),
+                "correlation_rows": len(score_rows),
+                "physical_mappings": len(mapping_rows),
+                "candidate_edges": generated_count,
+            }
+
+    def get_signalling_topology(
+        self,
+        *,
+        td_area: Optional[str] = None,
+        start_node_id: Optional[str] = None,
+        max_depth: int = 5,
+        verification_status: Optional[str] = None,
+        limit: int = 2000,
+    ) -> dict:
+        """Return all matching topology hypotheses or traverse outward from one node."""
+        area = (td_area or "").strip().upper() or None
+        status = (verification_status or "").strip().lower() or None
+        if status and status not in {"inferred", "confirmed", "rejected"}:
+            raise ValueError("Unsupported topology verification status")
+        params: list[Any] = []
+        filters = []
+        if area:
+            filters.append("td_area=?")
+            params.append(area)
+        if status:
+            filters.append("verification_status=?")
+            params.append(status)
+        where = " WHERE " + " AND ".join(filters) if filters else ""
+        params.append(max(1, min(int(limit or 1), 10000)))
+        with self._lock:
+            edges = self._conn.execute(
+                """
+                SELECT edge_id, td_area, from_node_id, relationship, to_node_id,
+                       hypothesis, confidence, verification_status, provenance,
+                       reviewed_by, review_notes
+                FROM topology_edges
+                """ + where + " ORDER BY td_area, from_node_id, relationship, to_node_id, hypothesis LIMIT ?",
+                params,
+            ).fetchall()
+            if start_node_id:
+                max_depth = max(0, min(int(max_depth or 0), 20))
+                adjacency: dict[str, list[tuple]] = {}
+                for edge in edges:
+                    adjacency.setdefault(edge[2], []).append(edge)
+                depths = {start_node_id: 0}
+                selected_ids: set[str] = set()
+                queue = [start_node_id]
+                while queue:
+                    node_id = queue.pop(0)
+                    depth = depths[node_id]
+                    if depth >= max_depth:
+                        continue
+                    for edge in adjacency.get(node_id, []):
+                        selected_ids.add(edge[0])
+                        if edge[4] not in depths:
+                            depths[edge[4]] = depth + 1
+                            queue.append(edge[4])
+                edges = [edge for edge in edges if edge[0] in selected_ids]
+            node_ids = {edge[2] for edge in edges} | {edge[4] for edge in edges}
+            if start_node_id:
+                start_node = self._conn.execute(
+                    "SELECT td_area FROM topology_nodes WHERE node_id=?",
+                    (start_node_id,),
+                ).fetchone()
+                if start_node and (not area or start_node[0] == area):
+                    node_ids.add(start_node_id)
+            else:
+                node_query = "SELECT node_id FROM topology_nodes"
+                node_params: tuple[Any, ...] = ()
+                if area:
+                    node_query += " WHERE td_area=?"
+                    node_params = (area,)
+                node_query += " ORDER BY node_id LIMIT ?"
+                node_ids.update(
+                    row[0]
+                    for row in self._conn.execute(
+                        node_query,
+                        node_params + (max(1, min(int(limit or 1), 10000)),),
+                    ).fetchall()
+                )
+            nodes_by_id = {}
+            if node_ids:
+                placeholders = ",".join("?" for _ in node_ids)
+                for row in self._conn.execute(
+                    "SELECT node_id, td_area, node_type, label, attributes_json, "
+                    "verification_status, provenance FROM topology_nodes "
+                    f"WHERE node_id IN ({placeholders})",
+                    tuple(sorted(node_ids)),
+                ).fetchall():
+                    try:
+                        attributes = json.loads(row[4] or "{}")
+                    except (TypeError, ValueError):
+                        attributes = {}
+                    nodes_by_id[row[0]] = {
+                        "id": row[0], "td_area": row[1], "type": row[2], "label": row[3],
+                        "attributes": attributes, "verification_status": row[5],
+                        "provenance": row[6],
+                    }
+            evidence_map: dict[str, list[dict]] = {}
+            if edges:
+                placeholders = ",".join("?" for _ in edges)
+                for row in self._conn.execute(
+                    "SELECT edge_id, source_type, source_id, evidence_json "
+                    f"FROM topology_edge_evidence WHERE edge_id IN ({placeholders}) "
+                    "ORDER BY source_type, source_id",
+                    tuple(edge[0] for edge in edges),
+                ).fetchall():
+                    try:
+                        evidence = json.loads(row[3] or "{}")
+                    except (TypeError, ValueError):
+                        evidence = row[3]
+                    evidence_map.setdefault(row[0], []).append(
+                        {"source_type": row[1], "source_id": row[2], "details": evidence}
+                    )
+            edge_data = [
+                {
+                    "id": row[0], "td_area": row[1], "from": row[2],
+                    "relationship": row[3], "to": row[4], "hypothesis": row[5],
+                    "confidence": row[6], "verification_status": row[7],
+                    "provenance": row[8], "reviewed_by": row[9], "review_notes": row[10],
+                    "evidence": evidence_map.get(row[0], []),
+                }
+                for row in edges
+            ]
+            return {
+                "nodes": sorted(nodes_by_id.values(), key=lambda node: node["id"]),
+                "edges": edge_data,
+                "start_node_id": start_node_id,
+                "max_depth": max_depth if start_node_id else None,
+            }
     
