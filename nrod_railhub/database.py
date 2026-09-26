@@ -56,6 +56,7 @@ class RailDB:
         self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._init_schema()
         self.ensure_sclass_correlation_schema()
+        self.ensure_physical_signal_schema()
 
         # Retention settings
         self.retain_trust_days = retain_trust_days
@@ -2079,6 +2080,280 @@ class RailDB:
                     "INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES (?, ?)",
                     (key, value),
                 )
+
+    def ensure_physical_signal_schema(self) -> None:
+        """Create tables for reviewed physical signal identities."""
+        with self._conn:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS physical_signal_mappings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    td_area TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    byte_offset INTEGER NOT NULL DEFAULT 0,
+                    bit INTEGER NOT NULL,
+                    from_berth TEXT,
+                    to_berth TEXT,
+                    physical_signal_number TEXT,
+                    physical_signal_location TEXT,
+                    mapping_confidence REAL,
+                    correlation_confidence REAL,
+                    verification_status TEXT NOT NULL DEFAULT 'unknown',
+                    source TEXT,
+                    reviewer TEXT,
+                    evidence_json TEXT,
+                    notes TEXT,
+                    supersedes_id INTEGER,
+                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_physical_signal_mappings_area_status
+                    ON physical_signal_mappings(td_area, verification_status, updated_at_utc DESC);
+                CREATE INDEX IF NOT EXISTS idx_physical_signal_mappings_bit
+                    ON physical_signal_mappings(td_area, address, byte_offset, bit, updated_at_utc DESC);
+                CREATE INDEX IF NOT EXISTS idx_physical_signal_mappings_signal
+                    ON physical_signal_mappings(physical_signal_number, td_area);
+                """
+            )
+
+    @staticmethod
+    def _json_or_none(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text if text else None
+        try:
+            return json.dumps(value, sort_keys=True)
+        except Exception:
+            return str(value)
+
+    def add_physical_signal_mapping(
+        self,
+        td_area: str,
+        address: str,
+        byte_offset: int,
+        bit: int,
+        *,
+        physical_signal_number: Optional[str] = None,
+        physical_signal_location: Optional[str] = None,
+        from_berth: Optional[str] = None,
+        to_berth: Optional[str] = None,
+        mapping_confidence: Optional[float] = None,
+        correlation_confidence: Optional[float] = None,
+        verification_status: str = "unknown",
+        source: Optional[str] = None,
+        reviewer: Optional[str] = None,
+        evidence_json: Optional[Any] = None,
+        notes: Optional[str] = None,
+        supersedes_id: Optional[int] = None,
+    ) -> int:
+        """Insert a new physical signal mapping revision."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO physical_signal_mappings(
+                    td_area, address, byte_offset, bit, from_berth, to_berth,
+                    physical_signal_number, physical_signal_location,
+                    mapping_confidence, correlation_confidence, verification_status,
+                    source, reviewer, evidence_json, notes, supersedes_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    td_area.strip().upper(),
+                    address.strip().upper(),
+                    int(byte_offset or 0),
+                    int(bit),
+                    from_berth.strip().upper() if from_berth else None,
+                    to_berth.strip().upper() if to_berth else None,
+                    physical_signal_number.strip() if physical_signal_number else None,
+                    physical_signal_location.strip() if physical_signal_location else None,
+                    mapping_confidence,
+                    correlation_confidence,
+                    (verification_status or "unknown").strip().lower(),
+                    source.strip() if source else None,
+                    reviewer.strip() if reviewer else None,
+                    self._json_or_none(evidence_json),
+                    notes.strip() if notes else None,
+                    supersedes_id,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def update_physical_signal_mapping(
+        self,
+        mapping_id: int,
+        *,
+        verification_status: Optional[str] = None,
+        reviewer: Optional[str] = None,
+        physical_signal_number: Optional[str] = None,
+        physical_signal_location: Optional[str] = None,
+        mapping_confidence: Optional[float] = None,
+        correlation_confidence: Optional[float] = None,
+        source: Optional[str] = None,
+        evidence_json: Optional[Any] = None,
+        notes: Optional[str] = None,
+        supersedes_id: Optional[int] = None,
+    ) -> None:
+        """Update an existing physical signal mapping without deleting history."""
+        updates = []
+        params: list[Any] = []
+        if verification_status is not None:
+            updates.append("verification_status=?")
+            params.append(verification_status.strip().lower())
+        if reviewer is not None:
+            updates.append("reviewer=?")
+            params.append(reviewer.strip())
+        if physical_signal_number is not None:
+            updates.append("physical_signal_number=?")
+            params.append(physical_signal_number.strip())
+        if physical_signal_location is not None:
+            updates.append("physical_signal_location=?")
+            params.append(physical_signal_location.strip())
+        if mapping_confidence is not None:
+            updates.append("mapping_confidence=?")
+            params.append(mapping_confidence)
+        if correlation_confidence is not None:
+            updates.append("correlation_confidence=?")
+            params.append(correlation_confidence)
+        if source is not None:
+            updates.append("source=?")
+            params.append(source.strip())
+        if evidence_json is not None:
+            updates.append("evidence_json=?")
+            params.append(self._json_or_none(evidence_json))
+        if notes is not None:
+            updates.append("notes=?")
+            params.append(notes.strip())
+        if supersedes_id is not None:
+            updates.append("supersedes_id=?")
+            params.append(supersedes_id)
+        updates.append("updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+        params.append(mapping_id)
+
+        if len(updates) == 1:
+            return
+
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE physical_signal_mappings SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+
+    def revoke_physical_signal_mapping(
+        self,
+        mapping_id: int,
+        *,
+        reviewer: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Mark a physical signal mapping as revoked."""
+        self.update_physical_signal_mapping(
+            mapping_id,
+            verification_status="revoked",
+            reviewer=reviewer,
+            notes=notes,
+        )
+
+    def get_physical_signal_mappings(
+        self,
+        *,
+        td_area: Optional[str] = None,
+        address: Optional[str] = None,
+        verification_status: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return reviewed or inferred physical signal mappings."""
+        sql = """
+            SELECT id, td_area, address, byte_offset, bit, from_berth, to_berth,
+                   physical_signal_number, physical_signal_location,
+                   mapping_confidence, correlation_confidence, verification_status,
+                   source, reviewer, evidence_json, notes, supersedes_id,
+                   created_at_utc, updated_at_utc
+            FROM physical_signal_mappings
+            WHERE 1=1
+        """
+        params: list[Any] = []
+        if td_area:
+            sql += " AND td_area=?"
+            params.append(td_area.strip().upper())
+        if address:
+            sql += " AND address=?"
+            params.append(address.strip().upper())
+        if verification_status:
+            sql += " AND verification_status=?"
+            params.append(verification_status.strip().lower())
+        sql += " ORDER BY updated_at_utc DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit or 1)))
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+        return [
+            {
+                "id": row[0],
+                "td_area": row[1],
+                "address": row[2],
+                "byte_offset": row[3],
+                "bit": row[4],
+                "from_berth": row[5],
+                "to_berth": row[6],
+                "physical_signal_number": row[7],
+                "physical_signal_location": row[8],
+                "mapping_confidence": row[9],
+                "correlation_confidence": row[10],
+                "verification_status": row[11],
+                "source": row[12],
+                "reviewer": row[13],
+                "evidence_json": row[14],
+                "notes": row[15],
+                "supersedes_id": row[16],
+                "created_at_utc": row[17],
+                "updated_at_utc": row[18],
+            }
+            for row in rows
+        ]
+
+    def get_physical_signal_mapping(self, mapping_id: int) -> Optional[dict]:
+        """Return a single physical signal mapping by primary key."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, td_area, address, byte_offset, bit, from_berth, to_berth,
+                       physical_signal_number, physical_signal_location,
+                       mapping_confidence, correlation_confidence, verification_status,
+                       source, reviewer, evidence_json, notes, supersedes_id,
+                       created_at_utc, updated_at_utc
+                FROM physical_signal_mappings
+                WHERE id=?
+                """,
+                (mapping_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "td_area": row[1],
+            "address": row[2],
+            "byte_offset": row[3],
+            "bit": row[4],
+            "from_berth": row[5],
+            "to_berth": row[6],
+            "physical_signal_number": row[7],
+            "physical_signal_location": row[8],
+            "mapping_confidence": row[9],
+            "correlation_confidence": row[10],
+            "verification_status": row[11],
+            "source": row[12],
+            "reviewer": row[13],
+            "evidence_json": row[14],
+            "notes": row[15],
+            "supersedes_id": row[16],
+            "created_at_utc": row[17],
+            "updated_at_utc": row[18],
+        }
 
     def get_sclass_correlation_config(self) -> dict:
         """Get current S-class correlation configuration parameters."""
