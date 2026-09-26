@@ -7,7 +7,7 @@ import pytest
 import tempfile
 import yaml
 
-from nrod_railhub.cli import connect_and_run, load_config_file, merge_config_with_args
+from nrod_railhub.cli import connect_and_run, load_config_file, merge_config_with_args, parse_args
 
 
 def test_load_config_file_valid():
@@ -86,6 +86,22 @@ def test_load_config_file_expanduser():
         
         config = load_config_file(str(config_path))
         assert config['user'] == 'test@example.com'
+
+
+def test_parse_args_loads_toc_filter_from_config(monkeypatch, tmp_path):
+    """Test that configured TOC selections reach the schedule downloader settings."""
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump({
+        'user': 'test@example.com',
+        'password': 'testpass',
+        'db_path': str(tmp_path / 'railhub.db'),
+        'toc_filter': ['SE', 'SW'],
+    }))
+    monkeypatch.setattr('sys.argv', ['nrod_railhub', '--config', str(config_path)])
+
+    args = parse_args()
+
+    assert args.toc_filter == ['SE', 'SW']
 
 
 def test_merge_config_with_args_basic():
