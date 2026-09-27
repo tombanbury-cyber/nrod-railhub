@@ -381,10 +381,14 @@ class Listener(stomp.ConnectionListener):
 
     def wait_for_td_work(self, timeout: float = 5.0) -> bool:
         """Best-effort helper for tests to wait until queued TD work is drained."""
-        waiter = threading.Thread(target=self._td_work_q.join, daemon=True)
-        waiter.start()
-        waiter.join(max(timeout, 0.0))
-        return not waiter.is_alive()
+        deadline = time.time() + max(timeout, 0.0)
+        with self._td_work_q.all_tasks_done:
+            while self._td_work_q.unfinished_tasks:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                self._td_work_q.all_tasks_done.wait(remaining)
+            return True
 
     def on_message(self, frame) -> None:
         self.last_message_at = utc_now_iso()
