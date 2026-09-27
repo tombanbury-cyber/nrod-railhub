@@ -346,7 +346,10 @@ class Listener(stomp.ConnectionListener):
 
     def _get_cached_tocs_for_td_area(self, td_area: str) -> Optional[set[str]]:
         cache_lock = getattr(self.hv, "td_allowed_tocs_cache_lock", None)
-        cache = getattr(self.hv, "td_allowed_tocs_cache", {})
+        cache = getattr(self.hv, "td_allowed_tocs_cache", None)
+        if cache is None:
+            cache = {}
+            self.hv.td_allowed_tocs_cache = cache
         if cache_lock:
             with cache_lock:
                 cached = cache.get(td_area)
@@ -358,7 +361,10 @@ class Listener(stomp.ConnectionListener):
         if not td_area or not tocs:
             return
         cache_lock = getattr(self.hv, "td_allowed_tocs_cache_lock", None)
-        cache = getattr(self.hv, "td_allowed_tocs_cache", {})
+        cache = getattr(self.hv, "td_allowed_tocs_cache", None)
+        if cache is None:
+            cache = {}
+            self.hv.td_allowed_tocs_cache = cache
         if cache_lock:
             with cache_lock:
                 cache[td_area] = set(tocs)
