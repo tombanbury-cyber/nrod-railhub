@@ -5,10 +5,14 @@ import argparse
 import json
 import tempfile
 import os
+import threading
+import time
+from unittest.mock import Mock
 
 from nrod_railhub.listener import Listener
 from nrod_railhub.views import HumanView
 from nrod_railhub.database import RailDB
+from nrod_railhub.models import TdState
 
 
 def test_signal_event_capture():
@@ -57,6 +61,7 @@ def test_signal_event_capture():
         
         # Process the message
         listener.on_message(frame)
+        assert listener.wait_for_td_work(timeout=2.0)
         
         # Verify signal event was inserted
         with db._conn:
@@ -134,6 +139,7 @@ def test_berth_events_still_work():
         
         # Process the message
         listener.on_message(frame)
+        assert listener.wait_for_td_work(timeout=2.0)
         
         # Verify berth event was inserted
         with db._conn:
@@ -203,6 +209,7 @@ def test_sclass_bit_changes_are_decoded_and_persisted():
 
         listener.on_message(MockFrame(json.dumps(snapshot_payload)))
         listener.on_message(MockFrame(json.dumps(change_payload)))
+        assert listener.wait_for_td_work(timeout=2.0)
 
         with db._conn:
             cursor = db._conn.execute(
@@ -235,6 +242,90 @@ def test_sclass_bit_changes_are_decoded_and_persisted():
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+
+
+def test_td_persistence_runs_off_receiver_thread():
+    """TD berth persistence should be queued so slow DB work does not block on_message."""
+
+    hv = Mock(spec=HumanView)
+    hv.upsert_td.return_value = TdState(
+        descr="2C90",
+        area_id="EK",
+        from_berth="0152",
+        to_berth="0154",
+        last_time_ms=1675354321000,
+    )
+    hv.get_timetable_fields.return_value = {
+        "uid": "C12345",
+        "dep": "12:30",
+        "arr": "12:45",
+        "origin": "Clapham Junction",
+        "dest": "Victoria",
+    }
+    hv.render_for_td.return_value = "rendered"
+    hv.headcode_by_uid = {}
+    hv.td_by_headcode = {}
+    hv.smart = None
+    hv.resolver = None
+
+    args = argparse.Namespace(
+        verbose=False,
+        width=96,
+        headcode=None,
+        uid=None,
+        td_area=None,
+        trace_headcode=False,
+        only_changes=True,
+        repeat_after=300,
+    )
+
+    db = Mock(spec=RailDB)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_insert_td_berth_event(**kwargs):
+        started.set()
+        release.wait(timeout=1.0)
+
+    db.insert_td_berth_event.side_effect = slow_insert_td_berth_event
+    db.get_tocs_for_td_area.return_value = ["SE", "SW"]
+
+    listener = Listener(hv, args, db, output_callback=lambda text: None)
+
+    class MockFrame:
+        def __init__(self, body):
+            self.body = body
+            self.headers = {"destination": "/topic/TD_ALL_SIG_AREA"}
+
+    frame = MockFrame(
+        json.dumps(
+            [
+                {
+                    "CA_MSG": {
+                        "msg_type": "CA",
+                        "area_id": "EK",
+                        "descr": "2C90",
+                        "from": "0152",
+                        "to": "0154",
+                        "time": "1675354321000",
+                    }
+                }
+            ]
+        )
+    )
+
+    start = time.monotonic()
+    listener.on_message(frame)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.1
+    assert started.wait(timeout=0.5)
+
+    release.set()
+    assert listener.wait_for_td_work(timeout=2.0)
+    db.insert_td_berth_event.assert_called_once()
+    db.upsert_td_state.assert_called_once()
+    assert hv.td_allowed_tocs_cache == {"EK": {"SE", "SW"}}
 
 
 def test_mapper_requires_matching_areas_and_preserves_signed_dt():
