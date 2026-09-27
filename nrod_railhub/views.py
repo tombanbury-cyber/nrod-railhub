@@ -7,6 +7,7 @@ import gzip
 import json
 import pathlib
 import datetime
+import threading
 from datetime import timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -69,6 +70,8 @@ class HumanView:
 
         # Area-scoped TRUST index for handling headcode reuse across regions
         self.trust_by_area_headcode: Dict[Tuple[str, str], TrustState] = {}
+        self.td_allowed_tocs_cache: Dict[str, set[str]] = {}
+        self.td_allowed_tocs_cache_lock = threading.Lock()
 
     @staticmethod
     def _normalize_tiploc(tiploc: str) -> str:
@@ -206,8 +209,14 @@ class HumanView:
         # Check for allowed TOCs from cache if not explicitly provided
         if allowed_tocs is None:
             cache = getattr(self, 'td_allowed_tocs_cache', {})
-            if cache and td_area and td_area in cache:
-                allowed_tocs = cache[td_area]
+            cache_lock = getattr(self, 'td_allowed_tocs_cache_lock', None)
+            if cache_lock:
+                with cache_lock:
+                    cached_tocs = cache.get(td_area) if (cache and td_area) else None
+            else:
+                cached_tocs = cache.get(td_area) if (cache and td_area) else None
+            if cached_tocs:
+                allowed_tocs = cached_tocs
                 if allowed_tocs:
                     # Ensure allowed_tocs is a set (converting a set to set is a no-op)
                     allowed_tocs = set(allowed_tocs)

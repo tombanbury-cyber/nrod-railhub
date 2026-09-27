@@ -81,6 +81,8 @@ class Listener(stomp.ConnectionListener):
 
         # Initialize TOC-TD area cache on HumanView for filtering candidates
         self.hv.td_allowed_tocs_cache = {}
+        if not hasattr(self.hv, "td_allowed_tocs_cache_lock"):
+            self.hv.td_allowed_tocs_cache_lock = threading.Lock()
 
         self.connected_at: Optional[str] = None
         self.last_message_at: Optional[str] = None
@@ -311,10 +313,10 @@ class Listener(stomp.ConnectionListener):
             uid=tten.get("uid"),
         )
 
-        if area_id and area_id not in self.hv.td_allowed_tocs_cache:
+        if area_id and not self._get_cached_tocs_for_td_area(area_id):
             tocs = self.db.get_tocs_for_td_area(area_id)
             if tocs:
-                self.hv.td_allowed_tocs_cache[area_id] = set(tocs)
+                self._set_cached_tocs_for_td_area(area_id, tocs)
                 logger.debug(f"Loaded TOC-TD mappings for area {area_id}: {tocs}")
 
     def _decode_td_location_snapshot(self, td_area: str, from_berth: str, to_berth: str) -> Dict[str, Any]:
@@ -342,6 +344,27 @@ class Listener(stomp.ConnectionListener):
             "raw": raw,
         }
 
+    def _get_cached_tocs_for_td_area(self, td_area: str) -> Optional[set[str]]:
+        cache_lock = getattr(self.hv, "td_allowed_tocs_cache_lock", None)
+        cache = getattr(self.hv, "td_allowed_tocs_cache", {})
+        if cache_lock:
+            with cache_lock:
+                cached = cache.get(td_area)
+        else:
+            cached = cache.get(td_area)
+        return set(cached) if cached else None
+
+    def _set_cached_tocs_for_td_area(self, td_area: str, tocs: list[str]) -> None:
+        if not td_area or not tocs:
+            return
+        cache_lock = getattr(self.hv, "td_allowed_tocs_cache_lock", None)
+        cache = getattr(self.hv, "td_allowed_tocs_cache", {})
+        if cache_lock:
+            with cache_lock:
+                cache.setdefault(td_area, set(tocs))
+        else:
+            cache.setdefault(td_area, set(tocs))
+
     def _log_td_worker_error(self, prefix: str, exc: Exception) -> None:
         try:
             self._db_err_count = getattr(self, "_db_err_count", 0) + 1
@@ -352,12 +375,10 @@ class Listener(stomp.ConnectionListener):
 
     def wait_for_td_work(self, timeout: float = 5.0) -> bool:
         """Best-effort helper for tests to wait until queued TD work is drained."""
-        deadline = time.time() + max(timeout, 0.0)
-        while time.time() < deadline:
-            if self._td_work_q.unfinished_tasks == 0:
-                return True
-            time.sleep(0.01)
-        return self._td_work_q.unfinished_tasks == 0
+        waiter = threading.Thread(target=self._td_work_q.join, daemon=True)
+        waiter.start()
+        waiter.join(max(timeout, 0.0))
+        return not waiter.is_alive()
 
     def on_message(self, frame) -> None:
         self.last_message_at = utc_now_iso()
