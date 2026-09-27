@@ -361,9 +361,9 @@ class Listener(stomp.ConnectionListener):
         cache = getattr(self.hv, "td_allowed_tocs_cache", {})
         if cache_lock:
             with cache_lock:
-                cache.setdefault(td_area, set(tocs))
+                cache[td_area] = set(tocs)
         else:
-            cache.setdefault(td_area, set(tocs))
+            cache[td_area] = set(tocs)
 
     def _log_td_worker_error(self, prefix: str, exc: Exception) -> None:
         try:
