@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from queue import Empty, Queue
 import sys
 import threading
 import time
@@ -91,6 +92,9 @@ class Listener(stomp.ConnectionListener):
         self._print_lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
         self._reconnect_count = 0
+        self._td_work_q: Queue[Dict[str, Any]] = Queue()
+        self._td_worker_stop = threading.Event()
+        self._td_worker_thread: Optional[threading.Thread] = None
 
 
 
@@ -186,6 +190,174 @@ class Listener(stomp.ConnectionListener):
         body = getattr(frame, "body", "")
         hdrs = getattr(frame, "headers", {})
         logger.error(f"STOMP ERROR headers={hdrs} body={body}")
+
+    def _ensure_td_worker(self) -> None:
+        """Start the background TD persistence worker on first use."""
+        if not self.db:
+            return
+        with self._lifecycle_lock:
+            if self._td_worker_thread and self._td_worker_thread.is_alive():
+                return
+            self._td_worker_stop.clear()
+            self._td_worker_thread = threading.Thread(
+                target=self._td_worker_loop,
+                name="td-persist-worker",
+                daemon=True,
+            )
+            self._td_worker_thread.start()
+
+    def _td_worker_loop(self) -> None:
+        while not self._td_worker_stop.is_set():
+            try:
+                work_item = self._td_work_q.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                self._process_td_work_item(work_item)
+            except Exception as e:
+                self._log_td_worker_error("TD background processing failed", e)
+            finally:
+                self._td_work_q.task_done()
+
+    def _queue_td_work(self, work_item: Dict[str, Any]) -> None:
+        """Queue heavier TD persistence/enrichment work off the receiver thread."""
+        if not self.db:
+            return
+        self._ensure_td_worker()
+        try:
+            self._td_work_q.put_nowait(work_item)
+        except Exception as e:
+            self._log_td_worker_error("TD work enqueue failed", e)
+
+    def _process_td_work_item(self, work_item: Dict[str, Any]) -> None:
+        if not self.db:
+            return
+
+        kind = work_item.get("kind")
+        if kind == "signal":
+            self._persist_td_signal_event(work_item.get("td_msg") or {})
+            return
+        if kind == "berth":
+            self._persist_td_berth_event(work_item)
+            return
+
+        logger.debug(f"Ignoring unknown TD work item kind={kind!r}")
+
+    def _persist_td_signal_event(self, td_msg: Dict[str, Any]) -> None:
+        if not self.db:
+            return
+        area_id = (td_msg.get("area_id") or "").strip()
+        address = td_msg.get("address", "")
+        msg_type = (td_msg.get("msg_type") or "").upper()
+        if not area_id or not address or msg_type not in ("SF", "SG", "SH"):
+            return
+
+        ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
+        ts_iso = ms_to_iso_utc(ts_ms)
+        self.db.insert_td_signal_event(
+            ts_ms=ts_ms,
+            ts_iso=ts_iso,
+            area=area_id,
+            msg_type=msg_type,
+            address=address,
+            data=td_msg.get("data", ""),
+        )
+
+    def _persist_td_berth_event(self, work_item: Dict[str, Any]) -> None:
+        if not self.db:
+            return
+
+        td_state = work_item.get("td_state") or {}
+        td_msg = work_item.get("td_msg") or {}
+        msg_type = (work_item.get("msg_type") or "").upper()
+
+        area_id = (td_state.get("area_id") or "").strip()
+        headcode = (td_state.get("descr") or "").strip()
+        if msg_type not in ("CA", "CB", "CC") or not area_id or not headcode:
+            return
+
+        ts_ms = safe_int(td_state.get("last_time_ms")) or safe_int(td_msg.get("time")) or utc_now_ms()
+        ts_iso = ms_to_iso_utc(ts_ms)
+        from_berth = (td_state.get("from_berth") or "").strip()
+        to_berth = (td_state.get("to_berth") or "").strip()
+
+        self.db.insert_td_berth_event(
+            ts_ms=ts_ms,
+            ts_iso=ts_iso,
+            area=area_id,
+            headcode=headcode,
+            msg_type=msg_type,
+            from_berth=from_berth,
+            to_berth=to_berth,
+            descr=headcode,
+        )
+
+        loc = self._decode_td_location_snapshot(area_id, from_berth, to_berth)
+        tten = self.hv.get_timetable_fields(headcode)
+        self.db.upsert_td_state(
+            area=area_id,
+            headcode=headcode,
+            last_time_ms=ts_ms,
+            last_time_iso=ts_iso,
+            from_berth=from_berth,
+            to_berth=to_berth,
+            stanox=loc.get("stanox"),
+            location_name=loc.get("name"),
+            platform=loc.get("platform"),
+            sched_dep=tten.get("dep"),
+            sched_arr=tten.get("arr"),
+            origin_name=tten.get("origin"),
+            dest_name=tten.get("dest"),
+            uid=tten.get("uid"),
+        )
+
+        if area_id and area_id not in self.hv.td_allowed_tocs_cache:
+            tocs = self.db.get_tocs_for_td_area(area_id)
+            if tocs:
+                self.hv.td_allowed_tocs_cache[area_id] = set(tocs)
+                logger.debug(f"Loaded TOC-TD mappings for area {area_id}: {tocs}")
+
+    def _decode_td_location_snapshot(self, td_area: str, from_berth: str, to_berth: str) -> Dict[str, Any]:
+        """Decode TD location details using a queued berth snapshot instead of live mutable state."""
+        berth = (to_berth or from_berth or "").strip()
+        if not berth:
+            return {"berth": None, "stanox": None, "name": None, "platform": None, "raw": f"{td_area}:?"}
+
+        if len(berth) == 4 and berth.isalpha():
+            return {"berth": berth, "stanox": None, "name": None, "platform": None, "raw": f"{td_area} text-berth {berth}"}
+
+        info = self.hv.smart.lookup(td_area, str(berth)) if self.hv.smart else None
+        if not info:
+            return {"berth": berth, "stanox": None, "name": None, "platform": None, "raw": f"{td_area}:{berth}"}
+
+        stanox = info.get("stanox") or info.get("STANOX") or info.get("Stanox")
+        platform = info.get("platform") or info.get("plat") or info.get("Platform")
+        name = self.hv.resolver.name_for_stanox(str(stanox)) if (stanox and self.hv.resolver) else None
+        raw = f"{name} ({stanox})" + (f" plat {platform}" if platform else "") if (name and stanox) else f"{td_area}:{berth}"
+        return {
+            "berth": berth,
+            "stanox": str(stanox) if stanox is not None else None,
+            "name": name,
+            "platform": str(platform) if platform is not None else None,
+            "raw": raw,
+        }
+
+    def _log_td_worker_error(self, prefix: str, exc: Exception) -> None:
+        try:
+            self._db_err_count = getattr(self, "_db_err_count", 0) + 1
+            if self._db_err_count <= 5:
+                logger.error(f"{prefix}: {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+
+    def wait_for_td_work(self, timeout: float = 5.0) -> bool:
+        """Best-effort helper for tests to wait until queued TD work is drained."""
+        deadline = time.time() + max(timeout, 0.0)
+        while time.time() < deadline:
+            if self._td_work_q.unfinished_tasks == 0:
+                return True
+            time.sleep(0.01)
+        return self._td_work_q.unfinished_tasks == 0
 
     def on_message(self, frame) -> None:
         self.last_message_at = utc_now_iso()
@@ -392,47 +564,11 @@ class Listener(stomp.ConnectionListener):
                 # Handle signal events (S-Class: SF, SG, SH) separately
                 # These don't have a descr field and don't update TD state
                 if msg_type in ("SF", "SG", "SH"):
+                    area_id = (td_msg.get("area_id") or "").strip()
+                    if self.args.td_area and area_id and area_id not in self.args.td_area:
+                        continue
                     if self.db:
-                      
-                      
-                        #logger.error(f"TD message: {msg_type}")
-                      
-                        try:
-                          
-                            #logger.error(f"TD message try: {msg_type}")
-                          
-                            area_id = (td_msg.get("area_id") or "").strip()
-                            address = td_msg.get("address", "")
-                            
-                            #logger.error(f"TD area_id: {area_id}")
-                            #logger.error(f"TD address: {address}")
-                            #logger.error(f"TD td_area filter: {self.args.td_area}")
-                            
-                            # Apply area filter if configured
-                            if self.args.td_area and area_id and area_id not in self.args.td_area:
-                                continue
-                            
-                            if area_id and address:
-                                ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
-                                ts_iso = ms_to_iso_utc(ts_ms)
-                                #logger.error(f"attempt td event insert: {td_msg}")
-                                self.db.insert_td_signal_event(
-                                    ts_ms=ts_ms,
-                                    ts_iso=ts_iso,
-                                    area=area_id,
-                                    msg_type=msg_type,
-                                    address=address,
-                                    data=td_msg.get("data", "")
-                                )
-                        except Exception as e:
-                            # Don't kill the receiver thread; log a few DB errors for diagnosis
-                            try:
-                                #logger.error(f"attempt td event insert failed: {area_id}")
-                                self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                                #if self._db_err_count <= 5:
-                                logger.error(f"DB: TD signal event persist failed: {type(e).__name__}: {e}")
-                            except Exception:
-                                pass
+                        self._queue_td_work({"kind": "signal", "td_msg": dict(td_msg)})
                     continue
                 
                 # Handle berth events (C-Class: CA, CB, CC)
@@ -466,67 +602,21 @@ class Listener(stomp.ConnectionListener):
                     
                 #logger.error(f"test: {td.area_id}")        
 
-                # Persist berth events and update TD state
                 if self.db:
-                    try:
-                        ts_ms = safe_int(td_msg.get("time")) or utc_now_ms()
-                        ts_iso = ms_to_iso_utc(ts_ms)
-                        
-                        # Insert berth event record
-                        if msg_type in ("CA", "CB", "CC"):
-                            if td.area_id and td.descr:
-                                #logger.error(f"Attempt Insert berth event record: {td.area_id, td.descr}")
-                                self.db.insert_td_berth_event(
-                                    ts_ms=ts_ms,
-                                    ts_iso=ts_iso,
-                                    area=td.area_id,
-                                    headcode=td.descr,
-                                    msg_type=msg_type,
-                                    from_berth=td.from_berth,
-                                    to_berth=td.to_berth,
-                                    descr=td.descr
-                                )
-                        
-                        # Update current TD state with enriched location/schedule data
-                        if msg_type in ("CA", "CB", "CC") and td.area_id and td.descr:
-                            # Enrich via HumanView render context
-                            loc = self.hv.decode_last_location(td.area_id, td.descr)
-                            tten = self.hv.get_timetable_fields(td.descr)
-                            self.db.upsert_td_state(
-                                area=td.area_id,
-                                headcode=td.descr,
-                                last_time_ms=ts_ms,
-                                last_time_iso=ts_iso,
-                                from_berth=td.from_berth,
-                                to_berth=td.to_berth,
-                                stanox=loc.get('stanox'),
-                                location_name=loc.get('name'),
-                                platform=loc.get('platform'),
-                                sched_dep=tten.get('dep'),
-                                sched_arr=tten.get('arr'),
-                                origin_name=tten.get('origin'),
-                                dest_name=tten.get('dest'),
-                                uid=tten.get('uid')
-                            )
-                    except Exception as e:
-                        # Don't kill the receiver thread; log a few DB errors for diagnosis
-                        try:
-                            self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                            if self._db_err_count <= 5:
-                                logger.error(f"DB: TD berth event persist failed: {type(e).__name__}: {e}")
-                        except Exception:
-                            pass
-
-                # Populate TOC-TD area cache for this area (used by match_td_to_schedule)
-                # Only query DB if area not already cached to avoid repeated queries
-                if self.db and td.area_id and td.area_id not in self.hv.td_allowed_tocs_cache:
-                    try:
-                        tocs = self.db.get_tocs_for_td_area(td.area_id)
-                        if tocs:
-                            self.hv.td_allowed_tocs_cache[td.area_id] = set(tocs)
-                            logger.debug(f"Loaded TOC-TD mappings for area {td.area_id}: {tocs}")
-                    except Exception as e:
-                        logger.debug(f"Failed to load TOC-TD mappings for area {td.area_id}: {e}")
+                    self._queue_td_work(
+                        {
+                            "kind": "berth",
+                            "msg_type": msg_type,
+                            "td_msg": dict(td_msg),
+                            "td_state": {
+                                "area_id": td.area_id,
+                                "descr": td.descr,
+                                "from_berth": td.from_berth,
+                                "to_berth": td.to_berth,
+                                "last_time_ms": td.last_time_ms,
+                            },
+                        }
+                    )
 
                 if self._print_train_update(td.area_id or '?', td.descr):
                     printed = True
