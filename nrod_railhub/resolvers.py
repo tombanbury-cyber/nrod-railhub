@@ -1108,26 +1108,30 @@ class ScheduleResolver:
                         # Look for TIPLOC records (various possible formats)
                         # Format 1: {"TiplocV1": {...}}
                         if "TiplocV1" in obj:
-                            tiploc_data = obj["TiplocV1"]
-                            tiploc_code = tiploc_data.get("tiploc_code", "").strip()
+                            tiploc_data = obj["TiplocV1"] or {}
+                            tiploc_code = (tiploc_data.get("tiploc_code") or "").strip()
                             if tiploc_code:
                                 record = {
                                     "tiploc": tiploc_code,
-                                    "name": tiploc_data.get("nlc_description", "").strip() or tiploc_data.get("tps_description", "").strip(),
-                                    "stanox": tiploc_data.get("stanox", "").strip(),
-                                    "crs": tiploc_data.get("three_alpha", "").strip() or tiploc_data.get("crs_code", "").strip(),
+                                    "name": (tiploc_data.get("nlc_description") or "").strip()
+                                            or (tiploc_data.get("tps_description") or "").strip(),
+                                    "stanox": (tiploc_data.get("stanox") or "").strip(),
+                                    "crs": (tiploc_data.get("three_alpha") or "").strip()
+                                           or (tiploc_data.get("crs_code") or "").strip(),
                                 }
                                 tiploc_records.append(record)
                         
                         # Format 2: Direct TIPLOC data (alternative format)
                         elif "tiploc_code" in obj:
-                            tiploc_code = obj.get("tiploc_code", "").strip()
+                            tiploc_code = (obj.get("tiploc_code") or "").strip()
                             if tiploc_code:
                                 record = {
                                     "tiploc": tiploc_code,
-                                    "name": obj.get("nlc_description", "").strip() or obj.get("tps_description", "").strip(),
-                                    "stanox": obj.get("stanox", "").strip(),
-                                    "crs": obj.get("three_alpha", "").strip() or obj.get("crs_code", "").strip(),
+                                    "name": (obj.get("nlc_description") or "").strip()
+                                            or (obj.get("tps_description") or "").strip(),
+                                    "stanox": (obj.get("stanox") or "").strip(),
+                                    "crs": (obj.get("three_alpha") or "").strip()
+                                           or (obj.get("crs_code") or "").strip(), 
                                 }
                                 tiploc_records.append(record)
                         
