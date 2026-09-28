@@ -3626,3 +3626,14 @@ class RailDB:
                 "max_depth": max_depth if start_node_id else None,
             }
     
+    def _log_lock_contention(self) -> None:
+        """Log stack traces of threads waiting on the database lock."""
+        import traceback
+        import sys
+        
+        if hasattr(sys, '_current_frames'):
+            for thread_id, frame in sys._current_frames().items():
+                # Simplistic check: if frame mentions `_lock`, likely waiting
+                if 'with self._lock' in str(frame):
+                    logger.error(f"Thread {thread_id} may be waiting on db._lock:")
+                    logger.error(''.join(traceback.format_stack(frame)))
