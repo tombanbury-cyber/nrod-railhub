@@ -698,3 +698,135 @@ def parse_args() -> argparse.Namespace:
         p.error("--db-path is required (either via command-line or config file)")
     
     return args
+
+
+
+
+
+
+def load_schedule_data(
+    args: argparse.Namespace,
+    hv: HumanView,
+    resolver: LocationResolver,
+    toc_resolver: TOCResolver,
+    db: Optional[RailDB],
+    startup_log_queue=None,
+) -> None:
+    """Download, load, and persist timetable data before STOMP connects."""
+    if not getattr(args, "use_schedule", True):
+        return
+
+    toc_filter = getattr(args, "toc_filter", None)
+
+    if not toc_filter:
+        logger.info("No TOC filter specified in configuration")
+        logger.info("Per-TOC schedule downloads are disabled")
+        return
+
+    logger.info(f"TOC filter configured: {', '.join(toc_filter)}")
+
+    schedule_resolver = ScheduleResolver()
+    cache_dir = str(pathlib.Path(args.schedule_cache).expanduser().parent)
+
+    downloaded_files = schedule_resolver.download_multiple_toc_schedules(
+        username=args.user,
+        password=args.password,
+        toc_filter=toc_filter,
+        toc_resolver=toc_resolver,
+        cache_dir=cache_dir,
+        update_mode=False,
+        day="toc-full",
+        quiet=False,
+        progress_callback=lambda message: _emit_startup_feedback(
+            message,
+            startup_log_queue,
+        ),
+    )
+
+    if not downloaded_files:
+        logger.warning("No TOC schedules downloaded")
+        return
+
+    total_schedules = 0
+    total_tiplocs = 0
+
+    for toc_code, file_path in downloaded_files:
+        tiploc_records = schedule_resolver.extract_tiploc_data(
+            file_path,
+            quiet=False,
+        )
+
+        if tiploc_records:
+            resolver.add_tiploc_data(
+                tiploc_records,
+                quiet=False,
+            )
+            total_tiplocs += len(tiploc_records)
+
+        hv.load_schedule_gz(
+            file_path,
+            service_date=datetime.now(timezone.utc).date().isoformat(),
+            headcode_filter=args.headcode,
+            uid_filter=args.uid,
+            quiet=False,
+        )
+
+        if not db:
+            continue
+
+        import gzip
+        import json
+
+        batch = []
+        batch_size = 250
+
+        with gzip.open(
+            file_path,
+            "rt",
+            encoding="utf-8",
+            errors="replace",
+        ) as schedule_file:
+            for line in schedule_file:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                schedule_data = obj.get("JsonScheduleV1")
+                if not isinstance(schedule_data, dict):
+                    continue
+
+                batch.append(schedule_data)
+
+                if len(batch) >= batch_size:
+                    total_schedules += db.insert_cif_schedules_batch(
+                        batch,
+                        toc_code,
+                    )
+                    batch.clear()
+
+                    if total_schedules % 1000 == 0:
+                        logger.info(
+                            f"Persisting {toc_code} schedules: "
+                            f"{total_schedules} records..."
+                        )
+
+        if batch:
+            total_schedules += db.insert_cif_schedules_batch(
+                batch,
+                toc_code,
+            )
+
+        logger.info(
+            f"Persisted schedules for {toc_code}"
+        )
+
+    logger.info(
+        f"SCHEDULE: loaded {len(downloaded_files)} TOC(s), "
+        f"{total_tiplocs} TIPLOC records, "
+        f"{total_schedules} schedules persisted"
+    )
