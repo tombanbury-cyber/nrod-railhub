@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 import sys
 import threading
 import time
@@ -98,11 +98,93 @@ class Listener(stomp.ConnectionListener):
         self._td_worker_stop = threading.Event()
         self._td_worker_thread: Optional[threading.Thread] = None
 
+        # Rendering/output is kept off the STOMP receiver thread.
+        # A bounded queue prevents an unexpectedly slow output callback
+        # from causing unbounded memory growth.
+        self._output_work_q: Queue[tuple[Optional[str], str]] = Queue(maxsize=256)
+        self._output_worker_stop = threading.Event()
+        self._output_worker_thread: Optional[threading.Thread] = None
 
+    def _ensure_output_worker(self) -> None:
+        """Start the background rendering/output worker on first use."""
+        with self._lifecycle_lock:
+            if (
+                self._output_worker_thread
+                and self._output_worker_thread.is_alive()
+            ):
+                return
 
-    def _print_train_update(self, td_area: str | None, headcode: str | None = None) -> bool:
+            self._output_worker_stop.clear()
+            self._output_worker_thread = threading.Thread(
+                target=self._output_worker_loop,
+                name="train-output-worker",
+                daemon=True,
+            )
+            self._output_worker_thread.start()
+
+    def _output_worker_loop(self) -> None:
+        """Render train updates and perform output callbacks off-thread."""
+        while not self._output_worker_stop.is_set():
+            try:
+                td_area, headcode = self._output_work_q.get(timeout=0.5)
+            except Empty:
+                continue
+
+            try:
+                self._render_and_print_train_update(td_area, headcode)
+            except Exception as exc:
+                logger.error(
+                    "Background train rendering/output failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            finally:
+                self._output_work_q.task_done()
+
+    def _queue_train_update(
+        self,
+        td_area: Optional[str],
+        headcode: Optional[str],
+    ) -> bool:
         """
-        Render + print an updated view of a train.
+        Queue a train update for background rendering.
+
+        If the queue is full, discard the oldest pending update and retain
+        the newest one. This is preferable for a live display because stale
+        train states are less useful than current ones.
+        """
+        if not headcode:
+            return False
+
+        self._ensure_output_worker()
+
+        work_item = (td_area, str(headcode))
+
+        try:
+            self._output_work_q.put_nowait(work_item)
+            return True
+        except Full:
+            pass
+
+        # Drop the oldest queued update to make room for the latest state.
+        try:
+            self._output_work_q.get_nowait()
+            self._output_work_q.task_done()
+        except Empty:
+            return False
+
+        try:
+            self._output_work_q.put_nowait(work_item)
+            return True
+        except Full:
+            return False
+
+    def _print_train_update(
+        self,
+        td_area: str | None,
+        headcode: str | None = None,
+    ) -> bool:
+        """
+        Queue rendering/output without blocking the STOMP receiver thread.
 
         Supports both call styles:
           * _print_train_update(td_area, headcode)  (TD)
@@ -110,47 +192,75 @@ class Listener(stomp.ConnectionListener):
         """
         # Back-compat: called as _print_train_update(headcode)
         if headcode is None:
-            headcode = td_area  # type: ignore[assignment]
+            headcode = td_area
             td_area = None
 
+        return self._queue_train_update(td_area, headcode)
+
+    def _render_and_print_train_update(
+        self,
+        td_area: Optional[str],
+        headcode: str,
+    ) -> bool:
+        """Render and emit one train update on the output worker."""
         if not headcode:
             return False
 
-        # Check if trace_headcode is enabled for this headcode
-        trace = getattr(self.args, 'trace_headcode', False) and (
-            (getattr(self.args, 'headcode', None) and str(headcode) == self.args.headcode) or
-            (getattr(self.args, 'uid', None) and self.hv.headcode_by_uid.get(self.args.uid) == str(headcode))
+        trace = getattr(self.args, "trace_headcode", False) and (
+            (
+                getattr(self.args, "headcode", None)
+                and str(headcode) == self.args.headcode
+            )
+            or (
+                getattr(self.args, "uid", None)
+                and self.hv.headcode_by_uid.get(self.args.uid) == str(headcode)
+            )
         )
 
-        # Choose renderer based on whether we have a TD area context.
         if td_area:
-            text = self.hv.render_for_td(td_area, str(headcode), width=self.args.width, trace=trace)
+            text = self.hv.render_for_td(
+                td_area,
+                str(headcode),
+                width=self.args.width,
+                trace=trace,
+            )
         else:
-            text = self.hv.render_for_headcode(str(headcode), width=self.args.width, trace=trace)
+            text = self.hv.render_for_headcode(
+                str(headcode),
+                width=self.args.width,
+                trace=trace,
+            )
 
         if not text:
             return False
 
         key = (td_area or "?", str(headcode))
-
         now = time.time()
+
         with self._print_lock:
             last = self._last_output.get(key)
             last_ts = self._last_output_ts.get(key, 0.0)
 
-            # De-dupe identical rendered output unless repeat-after has elapsed
-            if self.args.only_changes and last == text and (now - last_ts) < float(self.args.repeat_after):
+            if (
+                self.args.only_changes
+                and last == text
+                and (now - last_ts) < float(self.args.repeat_after)
+            ):
                 return False
 
             self._last_output[key] = text
             self._last_output_ts[key] = now
 
-        # Use output callback if provided, otherwise print to console
         if self.output_callback:
             self.output_callback(text)
         else:
             print(text)
+
         return True
+
+
+
+    
     def on_connecting(self, host_and_port):
         try:
             h, p = host_and_port
