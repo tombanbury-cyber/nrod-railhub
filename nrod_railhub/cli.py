@@ -227,7 +227,20 @@ def connect_and_run(args: argparse.Namespace) -> None:
     logger.info(f"TOC: loaded {len(toc_resolver.TOC_DATA)} TOC codes")
     _emit_startup_feedback("Startup: TOC reference data ready.", startup_log_queue)
     
-    hv = HumanView(resolver=resolver, smart=smart, toc_resolver=toc_resolver)
+    hv = HumanView(resolver=resolver, smart=smart, toc_resolver=toc_resolver)#
+ 
+    # Create the live database before starting background workers.
+    db = RailDB(
+        db_path,
+        enable_mapper=args.enable_mapper,
+        retain_trust_days=getattr(args, "retain_trust_days", None),
+        retain_vstp_days=getattr(args, "retain_vstp_days", None),
+        retain_cif_days=getattr(args, "retain_cif_days", None),
+        retention_check_interval_s=getattr(args, "retention_interval", 3600),
+        retention_batch_size=getattr(args, "retention_batch_size", 1000),
+        save_raw_json=getattr(args, "save_raw_json", True),
+    ) if db_path else None
+
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
     #
@@ -240,8 +253,22 @@ def connect_and_run(args: argparse.Namespace) -> None:
         import threading
 
         def _schedule_worker() -> None:
+            schedule_db = None
             try:
                 _emit_startup_feedback("Startup: loading timetable enrichment...", startup_log_queue)
+
+
+                if db_path:
+                    schedule_db = RailDB(
+                        db_path,
+                        enable_mapper=False,
+                        retain_trust_days=None,
+                        retain_vstp_days=None,
+                        retain_cif_days=None,
+                        save_raw_json=getattr(args, "save_raw_json", True),
+                    )
+
+                
                 # Check if toc_filter is configured
                 toc_filter = getattr(args, 'toc_filter', None)
                 
@@ -290,7 +317,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                         )
                         
                         # Persist schedules to database if DB is enabled
-                        if db:
+                        if schedule_db:
                             try:
                                 import gzip
                                 import json
@@ -308,7 +335,10 @@ def connect_and_run(args: argparse.Namespace) -> None:
                                             # Look for schedule records
                                             if "JsonScheduleV1" in obj:
                                                 schedule_data = obj["JsonScheduleV1"]
-                                                db.insert_cif_schedule(schedule_data, toc_code)
+                                                schedule_db.insert_cif_schedule(
+                                                    schedule_data,
+                                                    toc_code,
+                                                )
                                                 schedules_saved += 1
                                                 
                                                 # Log progress for large files (every 1000 records)
@@ -362,6 +392,13 @@ def connect_and_run(args: argparse.Namespace) -> None:
             except Exception as e:
                 logger.error(f"SCHEDULE: failed to load ({e}); continuing without timetable enrichment")
 
+            finally:
+                if schedule_db:
+                    try:
+                        schedule_db.close()
+                    except Exception:
+                        logger.debug("Failed to close schedule database connection", exc_info=True)
+
         threading.Thread(target=_schedule_worker, daemon=True).start()
     logger.info(f"Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
@@ -376,16 +413,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
         vhost=args.vhost,
     )
 
-    db = RailDB(
-        db_path,
-        enable_mapper=args.enable_mapper,
-        retain_trust_days=getattr(args, 'retain_trust_days', None),
-        retain_vstp_days=getattr(args, 'retain_vstp_days', None),
-        retain_cif_days=getattr(args, 'retain_cif_days', None),
-        retention_check_interval_s=getattr(args, 'retention_interval', 3600),
-        retention_batch_size=getattr(args, 'retention_batch_size', 1000),
-        save_raw_json=getattr(args, 'save_raw_json', True),
-    ) if db_path else None
+
     
     # Populate TOC reference data in database if available
     if db and toc_resolver:
