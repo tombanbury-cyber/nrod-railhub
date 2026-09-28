@@ -246,160 +246,31 @@ def connect_and_run(args: argparse.Namespace) -> None:
     #
     # Important: the daily schedule file can be large; we load it in a background thread
     # so TD/TRUST streaming starts immediately.
-    #
-    # With TOC filtering: downloads separate files per TOC and extracts TIPLOC data.
-    # Without TOC filtering: displays message and skips schedule downloads.
-    if getattr(args, "use_schedule", True):
-        import threading
+    
 
-        def _schedule_worker() -> None:
-            schedule_db = None
-            try:
-                _emit_startup_feedback("Startup: loading timetable enrichment...", startup_log_queue)
+    # Load schedules before connecting to STOMP.
+    # This avoids competing with the live listener for database and HumanView access.
+    try:
+        _emit_startup_feedback(
+            "Startup: loading timetable enrichment...",
+            startup_log_queue,
+        )
+        load_schedule_data(
+            args=args,
+            hv=hv,
+            resolver=resolver,
+            toc_resolver=toc_resolver,
+            db=db,
+            startup_log_queue=startup_log_queue,
+        )
+    except Exception:
+        logger.error(
+            "SCHEDULE: failed to load; continuing without timetable enrichment",
+            exc_info=True,
+        )
 
 
-                if db_path:
-                    schedule_db = RailDB(
-                        db_path,
-                        enable_mapper=False,
-                        retain_trust_days=None,
-                        retain_vstp_days=None,
-                        retain_cif_days=None,
-                        save_raw_json=getattr(args, "save_raw_json", True),
-                    )
-
-                
-                # Check if toc_filter is configured
-                toc_filter = getattr(args, 'toc_filter', None)
-                
-                if toc_filter and isinstance(toc_filter, list) and len(toc_filter) > 0:
-                    # TOC-filtered schedule downloads
-                    logger.info(f"TOC filter configured: {', '.join(toc_filter)}")
-                    
-                    schedule_resolver = ScheduleResolver()
-                    cache_dir = str(pathlib.Path(args.schedule_cache).expanduser().parent)
-                    
-                    # Download schedules for each filtered TOC
-                    downloaded_files = schedule_resolver.download_multiple_toc_schedules(
-                        username=args.user,
-                        password=args.password,
-                        toc_filter=toc_filter,
-                        toc_resolver=toc_resolver,
-                        cache_dir=cache_dir,
-                        update_mode=False,  # Use FULL_DAILY
-                        day="toc-full",
-                        quiet=False,
-                        progress_callback=lambda message: _emit_startup_feedback(message, startup_log_queue),
-                    )
-                    
-                    if not downloaded_files:
-                        logger.warning("No TOC schedules downloaded, continuing without timetable enrichment")
-                        return
-                    
-                    # Load and merge schedules from all downloaded files
-                    total_schedules = 0
-                    total_tiplocs = 0
-                    
-                    for toc_code, file_path in downloaded_files:
-                        # Extract TIPLOC data from this schedule file
-                        tiploc_records = schedule_resolver.extract_tiploc_data(file_path, quiet=False)
-                        if tiploc_records:
-                            added = resolver.add_tiploc_data(tiploc_records, quiet=False)
-                            total_tiplocs += len(tiploc_records)
-                        
-                        # Load schedule data into HumanView for enrichment
-                        hv.load_schedule_gz(
-                            file_path,
-                            service_date=datetime.now(timezone.utc).date().isoformat(),
-                            headcode_filter=args.headcode,
-                            uid_filter=args.uid,
-                            quiet=False,
-                        )
-                        
-                        # Persist schedules to database if DB is enabled
-                        if schedule_db:
-                            try:
-                                import gzip
-                                import json
-                                
-                                schedules_saved = 0
-                                with gzip.open(file_path, 'rt', encoding='utf-8', errors='replace') as f:
-                                    for line in f:
-                                        line = line.strip()
-                                        if not line:
-                                            continue
-                                        
-                                        try:
-                                            obj = json.loads(line)
-                                            
-                                            # Look for schedule records
-                                            if "JsonScheduleV1" in obj:
-                                                schedule_data = obj["JsonScheduleV1"]
-                                                schedule_db.insert_cif_schedule(
-                                                    schedule_data,
-                                                    toc_code,
-                                                )
-                                                schedules_saved += 1
-                                                
-                                                # Log progress for large files (every 1000 records)
-                                                if schedules_saved % 1000 == 0:
-                                                    logger.info(f"Persisting {toc_code} schedules: {schedules_saved} records...")
-                                        
-                                        except json.JSONDecodeError:
-                                            # Skip invalid JSON lines
-                                            continue
-                                        except Exception as e:
-                                            # Log but continue on individual record errors
-                                            logger.debug(f"Error persisting schedule record: {e}")
-                                            continue
-                                
-                                if schedules_saved > 0:
-                                    logger.info(f"Persisted {schedules_saved} {toc_code} schedules to database")
-                                    total_schedules += schedules_saved
-                            
-                            except Exception as e:
-                                logger.error(f"Failed to persist {toc_code} schedules to database: {e}")
-                                # Continue with other TOCs even if one fails
-                    
-                    # Calculate total size, handling missing files gracefully
-                    total_size_mb = 0
-                    for _, fp in downloaded_files:
-                        try:
-                            if os.path.exists(fp):
-                                total_size_mb += os.path.getsize(fp) / (1024 * 1024)
-                        except (OSError, IOError):
-                            # Silently skip if file can't be accessed
-                            pass
-                    
-                    if db and total_schedules > 0:
-                        logger.info(
-                            f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
-                            f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records, {total_schedules} schedules persisted)"
-                        )
-                    else:
-                        logger.info(
-                            f"SCHEDULE: loaded {len(downloaded_files)} TOC(s) "
-                            f"({total_size_mb:.1f}MB total, {total_tiplocs} TIPLOC records)"
-                        )
-                    
-                else:
-                    # No TOC filter - display informative message
-                    logger.info("No TOC filter specified in configuration")
-                    logger.info("Per-TOC schedule downloads are disabled")
-                    logger.info("To enable schedule downloads, configure toc_filter in settings")
-                    logger.info("Continuing without timetable enrichment")
-                    
-            except Exception as e:
-                logger.error(f"SCHEDULE: failed to load ({e}); continuing without timetable enrichment")
-
-            finally:
-                if schedule_db:
-                    try:
-                        schedule_db.close()
-                    except Exception:
-                        logger.debug("Failed to close schedule database connection", exc_info=True)
-
-        threading.Thread(target=_schedule_worker, daemon=True).start()
+    
     logger.info(f"Starting. stomp.py version={getattr(stomp, '__version__', '?')}")
     logger.info(f"Broker: {args.host}:{args.port}  (plain STOMP)  vhost={args.vhost}")
     _emit_startup_feedback("Startup: connecting to broker...", startup_log_queue)
