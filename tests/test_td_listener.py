@@ -53,6 +53,34 @@ def test_td_event_db_creates_schema_and_indexes():
         db.close()
 
 
+def test_td_event_db_creates_domain_tables_and_indexes():
+    """TdEventDB should also create td_berth_events and td_signal_events with indexes."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    try:
+        for table, indexes in (
+            ("td_berth_events", {"idx_td_berth_ts", "idx_td_berth_area_hc_ts"}),
+            ("td_signal_events", {"idx_td_signal_ts", "idx_td_signal_area_ts"}),
+        ):
+            cur = db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+            assert cur.fetchone() is not None
+
+            idx_names = {
+                row[0]
+                for row in db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?",
+                    (table,),
+                ).fetchall()
+            }
+            assert indexes <= idx_names
+    finally:
+        db.close()
+
+
 def test_berth_event_is_parsed_and_persisted():
     """A CA berth-stepping message should be persisted with the right fields."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
@@ -79,6 +107,11 @@ def test_berth_event_is_parsed_and_persisted():
         "SELECT area, msg_type, headcode, from_berth, to_berth FROM td_events"
     ).fetchall()
     assert rows == [("EK", "CA", "2C90", "0001", "0002")]
+
+    berth_rows = db._conn.execute(
+        "SELECT td_area, msg_type, headcode, from_berth, to_berth FROM td_berth_events"
+    ).fetchall()
+    assert berth_rows == [("EK", "CA", "2C90", "0001", "0002")]
     db.close()
 
 
@@ -107,6 +140,11 @@ def test_signal_event_is_parsed_and_persisted():
         "SELECT area, msg_type, address, data FROM td_events"
     ).fetchall()
     assert rows == [("EK", "SF", "01", "AA")]
+
+    signal_rows = db._conn.execute(
+        "SELECT td_area, msg_type, address, data FROM td_signal_events"
+    ).fetchall()
+    assert signal_rows == [("EK", "SF", "01", "AA")]
     db.close()
 
 
@@ -147,12 +185,35 @@ def test_malformed_and_unrelated_messages_are_ignored():
 
     rows = db._conn.execute("SELECT * FROM td_events").fetchall()
     assert rows == []
+    berth_rows = db._conn.execute("SELECT * FROM td_berth_events").fetchall()
+    assert berth_rows == []
+    signal_rows = db._conn.execute("SELECT * FROM td_signal_events").fetchall()
+    assert signal_rows == []
     db.close()
 
     # Non-JSON body should also be handled gracefully.
     bad_frame = Mock()
     bad_frame.body = "not json {"
     listener.on_message(bad_frame)  # should not raise
+
+
+def test_unknown_msg_type_is_skipped_without_crashing():
+    """Unrecognised TD msg_type values should be skipped, logged, and not crash the listener."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db, verbose=True)
+
+    payload = [
+        {"XX_MSG": {"msg_type": "XX", "area_id": "EK", "descr": "2C90"}},
+    ]
+    listener.on_message(_make_frame(payload))
+
+    assert db._conn.execute("SELECT * FROM td_events").fetchall() == []
+    assert db._conn.execute("SELECT * FROM td_berth_events").fetchall() == []
+    assert db._conn.execute("SELECT * FROM td_signal_events").fetchall() == []
+    db.close()
 
 
 def test_parse_args_loads_yaml_config(tmp_path):

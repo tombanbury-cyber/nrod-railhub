@@ -7,6 +7,13 @@ stepping (CA/CB/CC) and signalling S-class (SF/SG/SH) events, and persists
 them to a SQLite database. VSTP and TRUST processing are intentionally
 omitted to keep this script minimal.
 
+Storage: each parsed event is written to the generic `td_events` table (kept
+for backwards compatibility) and additionally to the domain-specific tables
+used elsewhere in the project - berth stepping events go to
+`td_berth_events` and signalling/S-class events go to `td_signal_events`
+(schema compatible with `nrod_railhub.database.RailDB`). Unrecognised
+message types are skipped and logged, never crash the listener.
+
 It reads the same YAML configuration file format used by `nrod_railhub.py`
 (see `config.sample.yaml`), reusing the config loading/merging logic from
 `nrod_railhub.cli` so the two tools stay in sync.
@@ -122,10 +129,41 @@ class TdEventDB:
                 CREATE INDEX IF NOT EXISTS idx_td_events_area_ts ON td_events(area, ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_events_area_headcode_ts
                     ON td_events(area, headcode, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_berth_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    td_area TEXT,
+                    headcode TEXT,
+                    msg_type TEXT NOT NULL,
+                    from_berth TEXT,
+                    to_berth TEXT,
+                    descr TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_berth_ts ON td_berth_events(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_berth_area_hc_ts
+                    ON td_berth_events(td_area, headcode, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_signal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
+                    td_area TEXT,
+                    msg_type TEXT NOT NULL,
+                    address TEXT,
+                    data TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
                 """
             )
 
-    def insert_event(
+    def _insert_row(self, table: str, columns: str, placeholders: str, values: tuple) -> None:
+        """Execute a single parameterized INSERT under the connection lock."""
+        self._conn.execute(f"INSERT INTO {table}({columns}) VALUES ({placeholders})", values)
+
+    def insert_berth_event(
         self,
         ts_ms: int,
         ts_iso: str,
@@ -134,22 +172,51 @@ class TdEventDB:
         headcode: str = "",
         from_berth: str = "",
         to_berth: str = "",
-        address: str = "",
-        data: str = "",
     ) -> None:
-        """Insert a single TD event row. Never raises; logs on failure."""
+        """Atomically persist a berth stepping event (CA/CB/CC) to td_events and td_berth_events."""
         try:
             with self._lock, self._conn:
-                self._conn.execute(
-                    """
-                    INSERT INTO td_events(ts_ms, ts_iso, area, msg_type, headcode,
-                                           from_berth, to_berth, address, data)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                    """,
-                    (ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, address, data),
+                self._insert_row(
+                    "td_events",
+                    "ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, address, data",
+                    "?,?,?,?,?,?,?,?,?",
+                    (ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, "", ""),
+                )
+                self._insert_row(
+                    "td_berth_events",
+                    "ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr",
+                    "?,?,?,?,?,?,?,?",
+                    (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, ""),
                 )
         except Exception as e:
-            logger.error(f"DB: failed to insert TD event area={area} msg_type={msg_type}: {e!r}")
+            logger.error(f"DB: failed to insert berth event area={area} msg_type={msg_type}: {e!r}")
+
+    def insert_signal_event(
+        self,
+        ts_ms: int,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str = "",
+    ) -> None:
+        """Atomically persist a signal/S-class event (SF/SG/SH) to td_events and td_signal_events."""
+        try:
+            with self._lock, self._conn:
+                self._insert_row(
+                    "td_events",
+                    "ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, address, data",
+                    "?,?,?,?,?,?,?,?,?",
+                    (ts_ms, ts_iso, area, msg_type, "", "", "", address, data or ""),
+                )
+                self._insert_row(
+                    "td_signal_events",
+                    "ts_ms, ts_iso, td_area, msg_type, address, data",
+                    "?,?,?,?,?,?",
+                    (ts_ms, ts_iso, area, msg_type, address, data or ""),
+                )
+        except Exception as e:
+            logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
 
     def close(self) -> None:
         try:
@@ -230,6 +297,8 @@ class TdListener(stomp.ConnectionListener):
 
         msg_type = (td_msg.get("msg_type") or "").upper()
         if msg_type not in BERTH_MSG_TYPES and msg_type not in SIGNAL_MSG_TYPES:
+            if msg_type:
+                logger.debug(f"Skipping unhandled TD msg_type={msg_type}")
             return
 
         area = (td_msg.get("area_id") or "").strip()
@@ -245,7 +314,7 @@ class TdListener(stomp.ConnectionListener):
             address = td_msg.get("address", "")
             if not address:
                 return
-            self.db.insert_event(
+            self.db.insert_signal_event(
                 ts_ms=ts_ms,
                 ts_iso=ts_iso,
                 area=area,
@@ -262,7 +331,7 @@ class TdListener(stomp.ConnectionListener):
         from_berth = (td_msg.get("from") or "").strip()
         to_berth = (td_msg.get("to") or "").strip()
 
-        self.db.insert_event(
+        self.db.insert_berth_event(
             ts_ms=ts_ms,
             ts_iso=ts_iso,
             area=area,
