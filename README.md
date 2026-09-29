@@ -278,6 +278,23 @@ The extractor is deterministic and de-duplicates repeated activity, while safely
 
 Historical backfill is repeatable using `RailDB.rebuild_td_berth_movements()`, which rebuilds normalized transitions from existing `td_berth_events` without requiring fresh live traffic.
 
+## TD-Only Listener
+
+`td_listener.py` is a minimal, TD-only companion script in the repository root. It subscribes to the TD feed only (no VSTP/TRUST processing), parses berth stepping (`CA`/`CB`/`CC`) and signalling S-class (`SF`/`SG`/`SH`) events, and stores them in a dedicated `td_events` SQLite table (indexed by area/headcode/time).
+
+It reads the same YAML config file format as `nrod_railhub.py`:
+
+```bash
+# Using command-line args
+python3 td_listener.py --user you@example.com --password secret --db-path td_events.db
+
+# Using the same config.yaml used by nrod_railhub.py
+python3 td_listener.py --config config.yaml
+
+# Filter to specific TD area(s), repeatable
+python3 td_listener.py --config config.yaml --td-area EK --td-area WR
+```
+
 ## Architecture
 
 ```
