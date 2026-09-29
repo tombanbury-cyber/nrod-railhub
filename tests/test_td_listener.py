@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Unit tests for the standalone TD-only listener (td_listener.py)."""
+
+import json
+import sqlite3
+import tempfile
+from unittest.mock import Mock
+
+import td_listener
+
+
+def _make_frame(payload):
+    frame = Mock()
+    frame.body = json.dumps(payload)
+    frame.headers = {"destination": "/topic/TD_ALL_SIG_AREA"}
+    return frame
+
+
+def test_unwrap_td_item_handles_wrapped_and_unwrapped():
+    """_MSG-wrapped and already-unwrapped TD items should both unwrap correctly."""
+    wrapped = {"CA_MSG": {"msg_type": "CA", "area_id": "EK"}}
+    assert td_listener.unwrap_td_item(wrapped) == {"msg_type": "CA", "area_id": "EK"}
+
+    unwrapped = {"msg_type": "CA", "area_id": "EK"}
+    assert td_listener.unwrap_td_item(unwrapped) == unwrapped
+
+    assert td_listener.unwrap_td_item({"unrelated": "value"}) is None
+    assert td_listener.unwrap_td_item("not-a-dict") is None
+
+
+def test_td_event_db_creates_schema_and_indexes():
+    """TdEventDB should create the td_events table and expected indexes."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    try:
+        cur = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='td_events'"
+        )
+        assert cur.fetchone() is not None
+
+        idx_names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='td_events'"
+            ).fetchall()
+        }
+        assert "idx_td_events_ts" in idx_names
+        assert "idx_td_events_area_ts" in idx_names
+        assert "idx_td_events_area_headcode_ts" in idx_names
+    finally:
+        db.close()
+
+
+def test_berth_event_is_parsed_and_persisted():
+    """A CA berth-stepping message should be persisted with the right fields."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db)
+
+    payload = [
+        {
+            "CA_MSG": {
+                "msg_type": "CA",
+                "area_id": "EK",
+                "time": "1700000000000",
+                "from": "0001",
+                "to": "0002",
+                "descr": "2C90",
+            }
+        }
+    ]
+    listener.on_message(_make_frame(payload))
+
+    rows = db._conn.execute(
+        "SELECT area, msg_type, headcode, from_berth, to_berth FROM td_events"
+    ).fetchall()
+    assert rows == [("EK", "CA", "2C90", "0001", "0002")]
+    db.close()
+
+
+def test_signal_event_is_parsed_and_persisted():
+    """An SF signal (S-class) message should be persisted with address/data."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db)
+
+    payload = [
+        {
+            "SF_MSG": {
+                "msg_type": "SF",
+                "area_id": "EK",
+                "time": "1700000000000",
+                "address": "01",
+                "data": "AA",
+            }
+        }
+    ]
+    listener.on_message(_make_frame(payload))
+
+    rows = db._conn.execute(
+        "SELECT area, msg_type, address, data FROM td_events"
+    ).fetchall()
+    assert rows == [("EK", "SF", "01", "AA")]
+    db.close()
+
+
+def test_td_area_filter_excludes_other_areas():
+    """Messages outside the configured td_area filter should be skipped."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db, td_area=["EK"])
+
+    payload = [
+        {"CA_MSG": {"msg_type": "CA", "area_id": "EK", "descr": "2C90", "from": "1", "to": "2"}},
+        {"CA_MSG": {"msg_type": "CA", "area_id": "XX", "descr": "2C91", "from": "1", "to": "2"}},
+    ]
+    listener.on_message(_make_frame(payload))
+
+    rows = db._conn.execute("SELECT area FROM td_events").fetchall()
+    assert rows == [("EK",)]
+    db.close()
+
+
+def test_malformed_and_unrelated_messages_are_ignored():
+    """Malformed/unrelated messages must not crash the listener or be persisted."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db)
+
+    payload = [
+        {"msg_type": "CA"},  # missing area_id/descr
+        {"VSTPCIFMsgV1": {"foo": "bar"}},  # unrelated feed, no msg_type wrapper
+        "not-a-dict",
+        {"unrelated_key": "value"},
+    ]
+    listener.on_message(_make_frame(payload))
+
+    rows = db._conn.execute("SELECT * FROM td_events").fetchall()
+    assert rows == []
+    db.close()
+
+    # Non-JSON body should also be handled gracefully.
+    bad_frame = Mock()
+    bad_frame.body = "not json {"
+    listener.on_message(bad_frame)  # should not raise
+
+
+def test_parse_args_loads_yaml_config(tmp_path):
+    """parse_args should merge values from a YAML config file, same format as nrod_railhub.py."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "user: cfguser@example.com\n"
+        "password: cfgpass\n"
+        "td_area:\n"
+        "  - EK\n"
+        f"db_path: {tmp_path / 'events.db'}\n"
+    )
+
+    args = td_listener.parse_args(["--config", str(config_file)])
+
+    assert args.user == "cfguser@example.com"
+    assert args.password == "cfgpass"
+    assert args.td_area == ["EK"]
+    assert args.db_path == str(tmp_path / "events.db")
+
+
+def test_parse_args_cli_overrides_and_normalizes_td_area():
+    """Comma-separated and repeated --td-area values should normalize to a clean list."""
+    args = td_listener.parse_args(
+        ["--user", "u", "--password", "p", "--td-area", "EK,WR", "--db-path", "x.db"]
+    )
+    assert args.td_area == ["EK", "WR"]
