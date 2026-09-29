@@ -280,7 +280,7 @@ Historical backfill is repeatable using `RailDB.rebuild_td_berth_movements()`, w
 
 ## TD-Only Listener
 
-`td_listener.py` is a minimal, TD-only companion script in the repository root. It subscribes to the TD feed only (no VSTP/TRUST processing), parses berth stepping (`CA`/`CB`/`CC`) and signalling S-class (`SF`/`SG`/`SH`) events, and stores them in a dedicated `td_events` SQLite table (indexed by area/headcode/time).
+`td_listener.py` is a minimal, TD-only companion script in the repository root. It subscribes to the TD feed only (no VSTP/TRUST processing), parses berth stepping (`CA`/`CB`/`CC`) and signalling S-class (`SF`/`SG`/`SH`) events, and stores them in SQLite. Berth events are written to `td_berth_events` and signal events to `td_signal_events` (schema compatible with the main `RailDB` tables), in addition to a generic `td_events` table kept for backwards compatibility. All tables are indexed by area/headcode/time.
 
 It reads the same YAML config file format as `nrod_railhub.py`:
 
