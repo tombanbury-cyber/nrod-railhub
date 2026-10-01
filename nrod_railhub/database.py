@@ -1099,9 +1099,6 @@ class RailDB:
 
         return {"scanned": scanned, "inserted": len(all_rows)}
 
-
-        return {"scanned": scanned, "inserted": inserted}
-
     def insert_observation(self, obs_row: tuple) -> bool:
         """Insert a berth-signal observation from mapper.
         
