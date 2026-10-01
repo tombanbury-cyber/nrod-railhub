@@ -70,6 +70,44 @@ def hhmmss_to_hhmm(x: str) -> str:
     return ""
 
 
+def expand_td_signal_bytes(address: str, data: str) -> List[Tuple[int, int, str, str]]:
+    """Expand an SG/SH S-class message into its individual byte addresses/values.
+
+    SG/SH messages carry a starting hex `address` and a hex `data` string
+    representing one or more consecutive bytes starting at that address, e.g.
+    address="88", data="41689559" expands to:
+        (0x88, 0x41, "88", "41")
+        (0x89, 0x68, "89", "68")
+        (0x8A, 0x95, "8A", "95")
+        (0x8B, 0x59, "8B", "59")
+
+    Returns a list of (address_int, value_int, address_hex, value_hex) tuples,
+    or an empty list if `address`/`data` cannot be parsed.
+    """
+    addr_text = (address or "").strip()
+    if not addr_text:
+        return []
+    try:
+        start_addr = int(addr_text, 16)
+    except ValueError:
+        return []
+
+    cleaned = (data or "").strip().replace(" ", "")
+    if not cleaned or len(cleaned) % 2 != 0:
+        return []
+    try:
+        payload = bytes.fromhex(cleaned)
+    except ValueError:
+        return []
+
+    addr_width = max(2, len(addr_text))
+    results: List[Tuple[int, int, str, str]] = []
+    for offset, value in enumerate(payload):
+        addr_int = start_addr + offset
+        results.append((addr_int, value, f"{addr_int:0{addr_width}X}", f"{value:02X}"))
+    return results
+
+
 # Dataclasses
 @dataclass
 class VstpSchedule:

@@ -11,7 +11,7 @@ import time
 from statistics import median, pvariance
 from typing import Optional, Any, Dict, Tuple
 
-from .models import safe_int
+from .models import expand_td_signal_bytes, safe_int
 
 
 class RailDB:
@@ -152,6 +152,20 @@ class RailDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_signal_bytes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    area_id TEXT NOT NULL,
+                    address_int INTEGER NOT NULL,
+                    value_int INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    raw_message_id INTEGER REFERENCES td_signal_events(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_signal_bytes_lookup
+                    ON td_signal_bytes(area_id, address, timestamp);
 
                 CREATE TABLE IF NOT EXISTS td_sclass_state (
                     td_area TEXT NOT NULL,
@@ -956,12 +970,17 @@ class RailDB:
         from .logging_config import get_logger
         logger = get_logger("database")
         
+        raw_message_id: Optional[int] = None
         with self._lock, self._conn:
             #logger.error(f"insert_td_signal_event: {ts_ms, ts_iso, area, msg_type, address, data}")
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, msg_type, address, data or ""),
             )
+            raw_message_id = cursor.lastrowid
+
+            if msg_type in ("SG", "SH"):
+                self._insert_td_signal_bytes(ts_iso, area, msg_type, address, data or "", raw_message_id)
 
         if msg_type in ("SF", "SG", "SH"):
             try:
@@ -985,6 +1004,67 @@ class RailDB:
                 'to_berth': None,
                 'descr': None
             })
+
+    def _insert_td_signal_bytes(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> int:
+        """Expand an SG/SH message into per-byte rows in td_signal_bytes.
+
+        Must be called while holding self._lock within an active transaction
+        on self._conn (e.g. from inside `insert_td_signal_event`).
+        """
+        bytes_expanded = expand_td_signal_bytes(address, data)
+        for address_int, value_int, address_hex, value_hex in bytes_expanded:
+            self._conn.execute(
+                """
+                INSERT INTO td_signal_bytes(
+                    timestamp, area_id, address_int, value_int, address, value,
+                    source_type, raw_message_id
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
+            )
+        return len(bytes_expanded)
+
+    def rebuild_td_signal_bytes(self, td_area: Optional[str] = None) -> dict:
+        """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
+        scanned = 0
+        inserted = 0
+        td_area_filter = self._norm_text(td_area, upper=True)
+
+        with self._lock, self._conn:
+            if td_area_filter:
+                self._conn.execute(
+                    "DELETE FROM td_signal_bytes WHERE area_id=?", (td_area_filter,)
+                )
+            else:
+                self._conn.execute("DELETE FROM td_signal_bytes")
+
+            query = """
+                SELECT id, ts_iso, td_area, msg_type, address, data
+                FROM td_signal_events
+                WHERE msg_type IN ('SG', 'SH')
+            """
+            params: tuple[Any, ...] = ()
+            if td_area_filter:
+                query += " AND UPPER(COALESCE(td_area, '')) = ?"
+                params = (td_area_filter,)
+            query += " ORDER BY ts_ms ASC, id ASC"
+
+            for row in self._conn.execute(query, params):
+                scanned += 1
+                raw_id, ts_iso, area, msg_type, address, data = row
+                inserted += self._insert_td_signal_bytes(
+                    ts_iso, area, msg_type, address, data or "", raw_id
+                )
+
+        return {"scanned": scanned, "inserted": inserted}
 
     def insert_observation(self, obs_row: tuple) -> bool:
         """Insert a berth-signal observation from mapper.

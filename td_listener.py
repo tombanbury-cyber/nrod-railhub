@@ -44,7 +44,7 @@ import stomp
 
 from nrod_railhub.cli import load_config_file, merge_config_with_args
 from nrod_railhub.logging_config import setup_logger, get_logger
-from nrod_railhub.models import NR_HOST, NR_PORT, TOPIC_TD, ms_to_iso_utc, safe_int, utc_now_iso, utc_now_ms
+from nrod_railhub.models import NR_HOST, NR_PORT, TOPIC_TD, expand_td_signal_bytes, ms_to_iso_utc, safe_int, utc_now_iso, utc_now_ms
 
 logger = get_logger("td_listener")
 
@@ -156,6 +156,20 @@ class TdEventDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_signal_bytes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    area_id TEXT NOT NULL,
+                    address_int INTEGER NOT NULL,
+                    value_int INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    raw_message_id INTEGER REFERENCES td_signal_events(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_signal_bytes_lookup
+                    ON td_signal_bytes(area_id, address, timestamp);
                 """
             )
 
@@ -209,14 +223,54 @@ class TdEventDB:
                     "?,?,?,?,?,?,?,?,?",
                     (ts_ms, ts_iso, area, msg_type, "", "", "", address, data or ""),
                 )
-                self._insert_row(
-                    "td_signal_events",
-                    "ts_ms, ts_iso, td_area, msg_type, address, data",
-                    "?,?,?,?,?,?",
+                cursor = self._conn.execute(
+                    "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                     (ts_ms, ts_iso, area, msg_type, address, data or ""),
                 )
+                if msg_type in ("SG", "SH"):
+                    raw_message_id = cursor.lastrowid
+                    for address_int, value_int, address_hex, value_hex in expand_td_signal_bytes(address, data or ""):
+                        self._insert_row(
+                            "td_signal_bytes",
+                            "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
+                            "?,?,?,?,?,?,?,?",
+                            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
+                        )
         except Exception as e:
             logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
+
+    def rebuild_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
+        """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
+        scanned = 0
+        inserted = 0
+        area_filter = (td_area or "").strip().upper()
+
+        with self._lock, self._conn:
+            if area_filter:
+                self._conn.execute("DELETE FROM td_signal_bytes WHERE area_id=?", (area_filter,))
+            else:
+                self._conn.execute("DELETE FROM td_signal_bytes")
+
+            query = "SELECT id, ts_iso, td_area, msg_type, address, data FROM td_signal_events WHERE msg_type IN ('SG', 'SH')"
+            params: tuple = ()
+            if area_filter:
+                query += " AND UPPER(COALESCE(td_area, '')) = ?"
+                params = (area_filter,)
+            query += " ORDER BY ts_ms ASC, id ASC"
+
+            for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
+                scanned += 1
+                bytes_expanded = expand_td_signal_bytes(address, data or "")
+                for address_int, value_int, address_hex, value_hex in bytes_expanded:
+                    self._insert_row(
+                        "td_signal_bytes",
+                        "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
+                        "?,?,?,?,?,?,?,?",
+                        (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_id),
+                    )
+                    inserted += 1
+
+        return {"scanned": scanned, "inserted": inserted}
 
     def close(self) -> None:
         try:
