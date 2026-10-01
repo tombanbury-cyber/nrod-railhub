@@ -38,13 +38,13 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import stomp
 
 from nrod_railhub.cli import load_config_file, merge_config_with_args
 from nrod_railhub.logging_config import setup_logger, get_logger
-from nrod_railhub.models import NR_HOST, NR_PORT, TOPIC_TD, ms_to_iso_utc, safe_int, utc_now_iso, utc_now_ms
+from nrod_railhub.models import NR_HOST, NR_PORT, TOPIC_TD, expand_td_signal_bytes, ms_to_iso_utc, safe_int, utc_now_iso, utc_now_ms
 
 logger = get_logger("td_listener")
 
@@ -156,6 +156,20 @@ class TdEventDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
+
+                CREATE TABLE IF NOT EXISTS td_signal_bytes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    area_id TEXT NOT NULL,
+                    address_int INTEGER NOT NULL,
+                    value_int INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    raw_message_id INTEGER REFERENCES td_signal_events(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_td_signal_bytes_lookup
+                    ON td_signal_bytes(area_id, address, timestamp);
                 """
             )
 
@@ -191,6 +205,51 @@ class TdEventDB:
         except Exception as e:
             logger.error(f"DB: failed to insert berth event area={area} msg_type={msg_type}: {e!r}")
 
+    def _expand_signal_bytes_rows(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> List[Tuple[str, str, int, int, str, str, str, Optional[int]]]:
+        """Expand an SG/SH message into td_signal_bytes row tuples (not yet inserted)."""
+        bytes_expanded = expand_td_signal_bytes(address, data)
+        if not bytes_expanded and data:
+            logger.warning(
+                f"_expand_signal_bytes_rows: could not expand {msg_type} message "
+                f"area={area} address={address!r} data={data!r}"
+            )
+        return [
+            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id)
+            for address_int, value_int, address_hex, value_hex in bytes_expanded
+        ]
+
+    def _insert_signal_bytes(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> int:
+        """Expand an SG/SH message into per-byte rows and insert them into td_signal_bytes.
+
+        Must be called while holding self._lock within an active transaction
+        on self._conn (e.g. from `insert_signal_event` or `rebuild_signal_bytes`).
+        """
+        rows = self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data, raw_message_id)
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO td_signal_bytes("
+                "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+                ") VALUES (?,?,?,?,?,?,?,?)",
+                rows,
+            )
+        return len(rows)
+
     def insert_signal_event(
         self,
         ts_ms: int,
@@ -209,14 +268,56 @@ class TdEventDB:
                     "?,?,?,?,?,?,?,?,?",
                     (ts_ms, ts_iso, area, msg_type, "", "", "", address, data or ""),
                 )
-                self._insert_row(
-                    "td_signal_events",
-                    "ts_ms, ts_iso, td_area, msg_type, address, data",
-                    "?,?,?,?,?,?",
+                cursor = self._conn.execute(
+                    "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                     (ts_ms, ts_iso, area, msg_type, address, data or ""),
                 )
+                if msg_type in ("SG", "SH"):
+                    self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", cursor.lastrowid)
         except Exception as e:
             logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
+
+    def rebuild_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
+        """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
+        scanned = 0
+        inserted = 0
+        batch_size = 1000
+        pending: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
+        insert_sql = (
+            "INSERT INTO td_signal_bytes("
+            "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+            ") VALUES (?,?,?,?,?,?,?,?)"
+        )
+        area_filter = (td_area or "").strip().upper()
+
+        with self._lock, self._conn:
+            if area_filter:
+                self._conn.execute("DELETE FROM td_signal_bytes WHERE area_id=?", (area_filter,))
+            else:
+                self._conn.execute("DELETE FROM td_signal_bytes")
+
+            query = "SELECT id, ts_iso, td_area, msg_type, address, data FROM td_signal_events WHERE msg_type IN ('SG', 'SH')"
+            params: tuple = ()
+            if area_filter:
+                query += " AND UPPER(COALESCE(td_area, '')) = ?"
+                params = (area_filter,)
+            query += " ORDER BY ts_ms ASC, id ASC"
+
+            for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
+                scanned += 1
+                pending.extend(
+                    self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data or "", raw_id)
+                )
+                if len(pending) >= batch_size:
+                    self._conn.executemany(insert_sql, pending)
+                    inserted += len(pending)
+                    pending = []
+
+            if pending:
+                self._conn.executemany(insert_sql, pending)
+                inserted += len(pending)
+
+        return {"scanned": scanned, "inserted": inserted}
 
     def close(self) -> None:
         try:

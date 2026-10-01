@@ -12,7 +12,7 @@ from unittest.mock import Mock
 from nrod_railhub.listener import Listener
 from nrod_railhub.views import HumanView
 from nrod_railhub.database import RailDB
-from nrod_railhub.models import TdState
+from nrod_railhub.models import TdState, expand_td_signal_bytes
 
 
 def test_signal_event_capture():
@@ -477,10 +477,123 @@ def test_sclass_movement_correlations_rebuild_and_dedupe():
             os.unlink(db_path)
 
 
+def test_sg_message_expands_into_td_signal_bytes():
+    """SG messages should be expanded into per-byte rows in td_signal_bytes."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+
+        db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SG', '88', '41689559')
+
+        with db._conn:
+            raw_message_id = db._conn.execute(
+                "SELECT id FROM td_signal_events WHERE address='88'"
+            ).fetchone()[0]
+            byte_rows = db._conn.execute(
+                "SELECT area_id, address_int, value_int, address, value, source_type, raw_message_id "
+                "FROM td_signal_bytes ORDER BY address_int"
+            ).fetchall()
+
+        assert byte_rows == [
+            ('EK', 0x88, 0x41, '88', '41', 'SG', raw_message_id),
+            ('EK', 0x89, 0x68, '89', '68', 'SG', raw_message_id),
+            ('EK', 0x8A, 0x95, '8A', '95', 'SG', raw_message_id),
+            ('EK', 0x8B, 0x59, '8B', '59', 'SG', raw_message_id),
+        ]
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+def test_sf_messages_do_not_populate_td_signal_bytes():
+    """Only SG/SH messages should be expanded; plain SF updates should not be."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SF', '01', 'AA')
+
+        with db._conn:
+            count = db._conn.execute("SELECT COUNT(*) FROM td_signal_bytes").fetchone()[0]
+
+        assert count == 0
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+def test_expand_td_signal_bytes_handles_malformed_input():
+    """expand_td_signal_bytes() should return [] for unparseable address/data."""
+    assert expand_td_signal_bytes("", "41689559") == []
+    assert expand_td_signal_bytes("88", "") == []
+    assert expand_td_signal_bytes("ZZ", "41689559") == []
+    assert expand_td_signal_bytes("88", "ABC") == []  # odd-length hex
+    assert expand_td_signal_bytes("88", "ZZZZZZZZ") == []  # non-hex data
+
+
+def test_malformed_sg_message_logs_warning_and_skips_bytes(caplog):
+    """A malformed SG message should log a warning and not populate td_signal_bytes."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        with caplog.at_level("WARNING", logger="nrod_railhub.database"):
+            db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SG', '88', 'ZZZZZZZZ')
+
+        with db._conn:
+            count = db._conn.execute("SELECT COUNT(*) FROM td_signal_bytes").fetchone()[0]
+
+        assert count == 0
+        assert any("could not expand" in rec.message for rec in caplog.records)
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+def test_rebuild_td_signal_bytes_backfills_from_existing_events():
+    """rebuild_td_signal_bytes() should backfill td_signal_bytes from td_signal_events."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SH', '04', '35000000')
+
+        with db._conn:
+            db._conn.execute("DELETE FROM td_signal_bytes")
+
+        result = db.rebuild_td_signal_bytes()
+        assert result == {"scanned": 1, "inserted": 4}
+
+        with db._conn:
+            byte_rows = db._conn.execute(
+                "SELECT area_id, address_int, value_int, address, value, source_type "
+                "FROM td_signal_bytes ORDER BY address_int"
+            ).fetchall()
+
+        assert byte_rows == [
+            ('EK', 0x04, 0x35, '04', '35', 'SH'),
+            ('EK', 0x05, 0x00, '05', '00', 'SH'),
+            ('EK', 0x06, 0x00, '06', '00', 'SH'),
+            ('EK', 0x07, 0x00, '07', '00', 'SH'),
+        ]
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_signal_event_capture()
     test_berth_events_still_work()
     test_sclass_bit_changes_are_decoded_and_persisted()
     test_mapper_requires_matching_areas_and_preserves_signed_dt()
     test_mapper_rebuilds_across_batch_boundaries()
+    test_sg_message_expands_into_td_signal_bytes()
+    test_sf_messages_do_not_populate_td_signal_bytes()
+    test_expand_td_signal_bytes_handles_malformed_input()
+    test_rebuild_td_signal_bytes_backfills_from_existing_events()
     print("\nAll tests passed! ✓")

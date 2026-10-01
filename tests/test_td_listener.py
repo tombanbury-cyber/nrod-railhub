@@ -148,6 +148,70 @@ def test_signal_event_is_parsed_and_persisted():
     db.close()
 
 
+def test_sg_message_is_expanded_into_signal_bytes():
+    """An SG message should be expanded into per-byte rows in td_signal_bytes."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    listener = td_listener.TdListener(db)
+
+    payload = [
+        {
+            "SG_MSG": {
+                "msg_type": "SG",
+                "area_id": "EK",
+                "time": "1700000000000",
+                "address": "88",
+                "data": "41689559",
+            }
+        }
+    ]
+    listener.on_message(_make_frame(payload))
+
+    raw_message_id = db._conn.execute(
+        "SELECT id FROM td_signal_events WHERE address='88'"
+    ).fetchone()[0]
+
+    byte_rows = db._conn.execute(
+        "SELECT area_id, address_int, value_int, address, value, source_type, raw_message_id "
+        "FROM td_signal_bytes ORDER BY address_int"
+    ).fetchall()
+    assert byte_rows == [
+        ("EK", 0x88, 0x41, "88", "41", "SG", raw_message_id),
+        ("EK", 0x89, 0x68, "89", "68", "SG", raw_message_id),
+        ("EK", 0x8A, 0x95, "8A", "95", "SG", raw_message_id),
+        ("EK", 0x8B, 0x59, "8B", "59", "SG", raw_message_id),
+    ]
+    db.close()
+
+
+def test_rebuild_signal_bytes_backfills_from_existing_events():
+    """rebuild_signal_bytes() should backfill td_signal_bytes from td_signal_events."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    db.insert_signal_event(1000, "2024-01-01T00:00:01.000Z", "EK", "SH", "04", "35000000")
+
+    db._conn.execute("DELETE FROM td_signal_bytes")
+
+    result = db.rebuild_signal_bytes()
+    assert result == {"scanned": 1, "inserted": 4}
+
+    byte_rows = db._conn.execute(
+        "SELECT area_id, address_int, value_int, address, value, source_type "
+        "FROM td_signal_bytes ORDER BY address_int"
+    ).fetchall()
+    assert byte_rows == [
+        ("EK", 0x04, 0x35, "04", "35", "SH"),
+        ("EK", 0x05, 0x00, "05", "00", "SH"),
+        ("EK", 0x06, 0x00, "06", "00", "SH"),
+        ("EK", 0x07, 0x00, "07", "00", "SH"),
+    ]
+    db.close()
+
+
 def test_td_area_filter_excludes_other_areas():
     """Messages outside the configured td_area filter should be skipped."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
