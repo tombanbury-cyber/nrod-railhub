@@ -100,6 +100,8 @@ def expand_td_signal_bytes(address: str, data: str) -> List[Tuple[int, int, str,
     except ValueError:
         return []
 
+    # Addresses are byte-aligned, so pad to a minimum of 2 and always an even
+    # number of hex digits (e.g. "08", "88", "0123" -> width 4, not 3).
     raw_width = max(2, len(f"{start_addr:X}"))
     addr_width = raw_width + (raw_width % 2)
     results: List[Tuple[int, int, str, str]] = []

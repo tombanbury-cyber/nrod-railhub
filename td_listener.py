@@ -280,7 +280,14 @@ class TdEventDB:
     def rebuild_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
         """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
         scanned = 0
-        all_rows: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
+        inserted = 0
+        batch_size = 1000
+        pending: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
+        insert_sql = (
+            "INSERT INTO td_signal_bytes("
+            "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+            ") VALUES (?,?,?,?,?,?,?,?)"
+        )
         area_filter = (td_area or "").strip().upper()
 
         with self._lock, self._conn:
@@ -298,19 +305,19 @@ class TdEventDB:
 
             for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
                 scanned += 1
-                all_rows.extend(
+                pending.extend(
                     self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data or "", raw_id)
                 )
+                if len(pending) >= batch_size:
+                    self._conn.executemany(insert_sql, pending)
+                    inserted += len(pending)
+                    pending = []
 
-            if all_rows:
-                self._conn.executemany(
-                    "INSERT INTO td_signal_bytes("
-                    "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
-                    ") VALUES (?,?,?,?,?,?,?,?)",
-                    all_rows,
-                )
+            if pending:
+                self._conn.executemany(insert_sql, pending)
+                inserted += len(pending)
 
-        return {"scanned": scanned, "inserted": len(all_rows)}
+        return {"scanned": scanned, "inserted": inserted}
 
     def close(self) -> None:
         try:
