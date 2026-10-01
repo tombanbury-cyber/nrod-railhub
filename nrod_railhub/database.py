@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from statistics import median, pvariance
-from typing import Optional, Any, Dict, Tuple
+from typing import Optional, Any, Dict, List, Tuple
 
 from .models import expand_td_signal_bytes, safe_int
 
@@ -1005,6 +1005,28 @@ class RailDB:
                 'descr': None
             })
 
+    def _expand_td_signal_bytes_rows(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> List[Tuple[str, str, int, int, str, str, str, Optional[int]]]:
+        """Expand an SG/SH message into td_signal_bytes row tuples (not yet inserted)."""
+        bytes_expanded = expand_td_signal_bytes(address, data)
+        if not bytes_expanded and data:
+            from .logging_config import get_logger
+            get_logger("database").warning(
+                f"_expand_td_signal_bytes_rows: could not expand {msg_type} message "
+                f"area={area} address={address!r} data={data!r}"
+            )
+        return [
+            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id)
+            for address_int, value_int, address_hex, value_hex in bytes_expanded
+        ]
+
     def _insert_td_signal_bytes(
         self,
         ts_iso: str,
@@ -1014,34 +1036,28 @@ class RailDB:
         data: str,
         raw_message_id: Optional[int],
     ) -> int:
-        """Expand an SG/SH message into per-byte rows in td_signal_bytes.
+        """Expand an SG/SH message into per-byte rows and insert them into td_signal_bytes.
 
         Must be called while holding self._lock within an active transaction
         on self._conn (e.g. from inside `insert_td_signal_event`).
         """
-        bytes_expanded = expand_td_signal_bytes(address, data)
-        if not bytes_expanded and data:
-            from .logging_config import get_logger
-            get_logger("database").warning(
-                f"_insert_td_signal_bytes: could not expand {msg_type} message "
-                f"area={area} address={address!r} data={data!r}"
-            )
-        for address_int, value_int, address_hex, value_hex in bytes_expanded:
-            self._conn.execute(
+        rows = self._expand_td_signal_bytes_rows(ts_iso, area, msg_type, address, data, raw_message_id)
+        if rows:
+            self._conn.executemany(
                 """
                 INSERT INTO td_signal_bytes(
                     timestamp, area_id, address_int, value_int, address, value,
                     source_type, raw_message_id
                 ) VALUES (?,?,?,?,?,?,?,?)
                 """,
-                (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
+                rows,
             )
-        return len(bytes_expanded)
+        return len(rows)
 
-    def rebuild_td_signal_bytes(self, td_area: Optional[str] = None) -> dict:
+    def rebuild_td_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
         """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
         scanned = 0
-        inserted = 0
+        all_rows: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
         td_area_filter = self._norm_text(td_area, upper=True)
 
         with self._lock, self._conn:
@@ -1066,9 +1082,23 @@ class RailDB:
             for row in self._conn.execute(query, params):
                 scanned += 1
                 raw_id, ts_iso, area, msg_type, address, data = row
-                inserted += self._insert_td_signal_bytes(
-                    ts_iso, area, msg_type, address, data or "", raw_id
+                all_rows.extend(
+                    self._expand_td_signal_bytes_rows(ts_iso, area, msg_type, address, data or "", raw_id)
                 )
+
+            if all_rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO td_signal_bytes(
+                        timestamp, area_id, address_int, value_int, address, value,
+                        source_type, raw_message_id
+                    ) VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    all_rows,
+                )
+
+        return {"scanned": scanned, "inserted": len(all_rows)}
+
 
         return {"scanned": scanned, "inserted": inserted}
 

@@ -38,7 +38,7 @@ import sqlite3
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import stomp
 
@@ -205,6 +205,27 @@ class TdEventDB:
         except Exception as e:
             logger.error(f"DB: failed to insert berth event area={area} msg_type={msg_type}: {e!r}")
 
+    def _expand_signal_bytes_rows(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> List[Tuple[str, str, int, int, str, str, str, Optional[int]]]:
+        """Expand an SG/SH message into td_signal_bytes row tuples (not yet inserted)."""
+        bytes_expanded = expand_td_signal_bytes(address, data)
+        if not bytes_expanded and data:
+            logger.warning(
+                f"_expand_signal_bytes_rows: could not expand {msg_type} message "
+                f"area={area} address={address!r} data={data!r}"
+            )
+        return [
+            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id)
+            for address_int, value_int, address_hex, value_hex in bytes_expanded
+        ]
+
     def _insert_signal_bytes(
         self,
         ts_iso: str,
@@ -214,25 +235,20 @@ class TdEventDB:
         data: str,
         raw_message_id: Optional[int],
     ) -> int:
-        """Expand an SG/SH message into per-byte rows in td_signal_bytes.
+        """Expand an SG/SH message into per-byte rows and insert them into td_signal_bytes.
 
         Must be called while holding self._lock within an active transaction
         on self._conn (e.g. from `insert_signal_event` or `rebuild_signal_bytes`).
         """
-        bytes_expanded = expand_td_signal_bytes(address, data)
-        if not bytes_expanded and data:
-            logger.warning(
-                f"_insert_signal_bytes: could not expand {msg_type} message "
-                f"area={area} address={address!r} data={data!r}"
+        rows = self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data, raw_message_id)
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO td_signal_bytes("
+                "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+                ") VALUES (?,?,?,?,?,?,?,?)",
+                rows,
             )
-        for address_int, value_int, address_hex, value_hex in bytes_expanded:
-            self._insert_row(
-                "td_signal_bytes",
-                "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
-                "?,?,?,?,?,?,?,?",
-                (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
-            )
-        return len(bytes_expanded)
+        return len(rows)
 
     def insert_signal_event(
         self,
@@ -264,7 +280,7 @@ class TdEventDB:
     def rebuild_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
         """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
         scanned = 0
-        inserted = 0
+        all_rows: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
         area_filter = (td_area or "").strip().upper()
 
         with self._lock, self._conn:
@@ -282,9 +298,19 @@ class TdEventDB:
 
             for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
                 scanned += 1
-                inserted += self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", raw_id)
+                all_rows.extend(
+                    self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data or "", raw_id)
+                )
 
-        return {"scanned": scanned, "inserted": inserted}
+            if all_rows:
+                self._conn.executemany(
+                    "INSERT INTO td_signal_bytes("
+                    "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+                    ") VALUES (?,?,?,?,?,?,?,?)",
+                    all_rows,
+                )
+
+        return {"scanned": scanned, "inserted": len(all_rows)}
 
     def close(self) -> None:
         try:

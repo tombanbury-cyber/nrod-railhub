@@ -100,7 +100,7 @@ def expand_td_signal_bytes(address: str, data: str) -> List[Tuple[int, int, str,
     except ValueError:
         return []
 
-    addr_width = max(2, len(addr_text))
+    addr_width = max(2, len(f"{start_addr:X}"))
     results: List[Tuple[int, int, str, str]] = []
     for offset, value in enumerate(payload):
         addr_int = start_addr + offset
