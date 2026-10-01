@@ -205,6 +205,35 @@ class TdEventDB:
         except Exception as e:
             logger.error(f"DB: failed to insert berth event area={area} msg_type={msg_type}: {e!r}")
 
+    def _insert_signal_bytes(
+        self,
+        ts_iso: str,
+        area: str,
+        msg_type: str,
+        address: str,
+        data: str,
+        raw_message_id: Optional[int],
+    ) -> int:
+        """Expand an SG/SH message into per-byte rows in td_signal_bytes.
+
+        Must be called while holding self._lock within an active transaction
+        on self._conn (e.g. from `insert_signal_event` or `rebuild_signal_bytes`).
+        """
+        bytes_expanded = expand_td_signal_bytes(address, data)
+        if not bytes_expanded and data:
+            logger.warning(
+                f"_insert_signal_bytes: could not expand {msg_type} message "
+                f"area={area} address={address!r} data={data!r}"
+            )
+        for address_int, value_int, address_hex, value_hex in bytes_expanded:
+            self._insert_row(
+                "td_signal_bytes",
+                "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
+                "?,?,?,?,?,?,?,?",
+                (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
+            )
+        return len(bytes_expanded)
+
     def insert_signal_event(
         self,
         ts_ms: int,
@@ -228,14 +257,7 @@ class TdEventDB:
                     (ts_ms, ts_iso, area, msg_type, address, data or ""),
                 )
                 if msg_type in ("SG", "SH"):
-                    raw_message_id = cursor.lastrowid
-                    for address_int, value_int, address_hex, value_hex in expand_td_signal_bytes(address, data or ""):
-                        self._insert_row(
-                            "td_signal_bytes",
-                            "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
-                            "?,?,?,?,?,?,?,?",
-                            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id),
-                        )
+                    self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", cursor.lastrowid)
         except Exception as e:
             logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
 
@@ -260,15 +282,7 @@ class TdEventDB:
 
             for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
                 scanned += 1
-                bytes_expanded = expand_td_signal_bytes(address, data or "")
-                for address_int, value_int, address_hex, value_hex in bytes_expanded:
-                    self._insert_row(
-                        "td_signal_bytes",
-                        "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id",
-                        "?,?,?,?,?,?,?,?",
-                        (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_id),
-                    )
-                    inserted += 1
+                inserted += self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", raw_id)
 
         return {"scanned": scanned, "inserted": inserted}
 

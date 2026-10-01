@@ -1020,6 +1020,12 @@ class RailDB:
         on self._conn (e.g. from inside `insert_td_signal_event`).
         """
         bytes_expanded = expand_td_signal_bytes(address, data)
+        if not bytes_expanded and data:
+            from .logging_config import get_logger
+            get_logger("database").warning(
+                f"_insert_td_signal_bytes: could not expand {msg_type} message "
+                f"area={area} address={address!r} data={data!r}"
+            )
         for address_int, value_int, address_hex, value_hex in bytes_expanded:
             self._conn.execute(
                 """

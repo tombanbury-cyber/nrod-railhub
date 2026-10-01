@@ -12,7 +12,7 @@ from unittest.mock import Mock
 from nrod_railhub.listener import Listener
 from nrod_railhub.views import HumanView
 from nrod_railhub.database import RailDB
-from nrod_railhub.models import TdState
+from nrod_railhub.models import TdState, expand_td_signal_bytes
 
 
 def test_signal_event_capture():
@@ -525,6 +525,35 @@ def test_sf_messages_do_not_populate_td_signal_bytes():
             os.unlink(db_path)
 
 
+def test_expand_td_signal_bytes_handles_malformed_input():
+    """expand_td_signal_bytes() should return [] for unparseable address/data."""
+    assert expand_td_signal_bytes("", "41689559") == []
+    assert expand_td_signal_bytes("88", "") == []
+    assert expand_td_signal_bytes("ZZ", "41689559") == []
+    assert expand_td_signal_bytes("88", "ABC") == []  # odd-length hex
+    assert expand_td_signal_bytes("88", "ZZZZZZZZ") == []  # non-hex data
+
+
+def test_malformed_sg_message_logs_warning_and_skips_bytes(caplog):
+    """A malformed SG message should log a warning and not populate td_signal_bytes."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        with caplog.at_level("WARNING", logger="nrod_railhub.database"):
+            db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SG', '88', 'ZZZZZZZZ')
+
+        with db._conn:
+            count = db._conn.execute("SELECT COUNT(*) FROM td_signal_bytes").fetchone()[0]
+
+        assert count == 0
+        assert any("could not expand" in rec.message for rec in caplog.records)
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 def test_rebuild_td_signal_bytes_backfills_from_existing_events():
     """rebuild_td_signal_bytes() should backfill td_signal_bytes from td_signal_events."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
@@ -565,5 +594,6 @@ if __name__ == "__main__":
     test_mapper_rebuilds_across_batch_boundaries()
     test_sg_message_expands_into_td_signal_bytes()
     test_sf_messages_do_not_populate_td_signal_bytes()
+    test_expand_td_signal_bytes_handles_malformed_input()
     test_rebuild_td_signal_bytes_backfills_from_existing_events()
     print("\nAll tests passed! ✓")
