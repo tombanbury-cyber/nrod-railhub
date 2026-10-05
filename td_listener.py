@@ -122,6 +122,49 @@ def unwrap_td_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def import_smart_serial_outputs(self, csv_path: str) -> int:
+    """Import smart_serial_outputs.csv into smart_serial_bit_map (upsert). Returns rows imported."""
+    path = pathlib.Path(csv_path).expanduser()
+    if not path.is_file():
+        logger.info(f"SMART CSV not found, skipping import: {path}")
+        return 0
+
+    rows = []
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            for n, r in enumerate(csv.DictReader(f), start=2):
+                try:
+                    rows.append((
+                        (r["td_area"] or "").strip().upper(),
+                        int(r["interlocking"]),
+                        int(r["byte_dec"]),
+                        (r["byte_hex"] or "").strip().upper(),
+                        int(r["bit"]),
+                        (r["bit_mask_hex"] or "").strip().upper(),
+                        (r["section"] or "").strip(),
+                        (r["function_type"] or "").strip(),
+                        (r["function"] or "").strip(),
+                        (r["location_context"] or "").strip(),
+                    ))
+                except (KeyError, ValueError, TypeError, AttributeError) as e:
+                    logger.warning(f"SMART CSV line {n}: skipped bad row ({e!r})")
+
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO smart_serial_bit_map("
+                "td_area, interlocking, byte_dec, byte_hex, bit, bit_mask_hex, "
+                "section, function_type, function, location_context"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+    except Exception as e:
+        logger.error(f"SMART CSV import failed for {path}: {e!r}")
+        return 0
+
+    logger.info(f"SMART CSV: imported {len(rows)} rows from {path}")
+    return len(rows)
+
+
 class TdEventDB:
     """Minimal thread-safe SQLite persistence for TD-only events."""
 
@@ -146,14 +189,17 @@ class TdEventDB:
                 );
                 
                 create table smart_serial_bit_map (
-                    byte_dec         INTEGER                                                   not null,
-                    bit              INTEGER                                                   not null,
+                    td_area          TEXT not null,
                     interlocking     INTEGER,
+                    byte_dec         INTEGER not null,
+                    byte_hex         TEXT not null,
+                    bit              INTEGER not null,
+                    bit_mask         INTEGER not null,
                     section          TEXT,
                     function_type    TEXT,
                     function         TEXT,
                     location_context TEXT,
-                    source_document  TEXT default 'SMART 1 Serial Signalling Outputs' not null,
+                    source_document  TEXT default 'Serial Signalling Outputs' not null,
                     primary key (byte_dec, bit),
                     check (bit BETWEEN 0 AND 7),
                     check (byte_dec BETWEEN 0 AND 255)
