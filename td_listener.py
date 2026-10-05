@@ -62,21 +62,6 @@ def _hex_to_int(address: Optional[str]) -> Optional[int]:
         logger.warning(f"Could not convert address to int: {address!r}")
         return None
 
-HEX_BYTE_ROWS = 256
-
-def _ensure_hex_byte_table(self) -> None:
-    """Truncate and repopulate hex_byte (00..FF) if it has fewer than 256 rows."""
-    with self._lock, self._conn:
-        count = self._conn.execute("SELECT COUNT(*) FROM hex_byte").fetchone()[0]
-        if count >= self.HEX_BYTE_ROWS:
-            return
-        logger.info(f"hex_byte has {count} rows (expected {self.HEX_BYTE_ROWS}); repopulating")
-        self._conn.execute("DELETE FROM hex_byte")  # SQLite has no TRUNCATE
-        self._conn.executemany(
-            "INSERT INTO hex_byte(hex, value) VALUES (?, ?)",
-            [(f"{i:02X}", i) for i in range(self.HEX_BYTE_ROWS)],
-        )
-
 
 def _normalize_area_list(val: Any) -> Optional[List[str]]:
     """Accept None, list, or comma-separated string; return None or list[str]."""
@@ -421,6 +406,21 @@ class TdEventDB:
 
         logger.info(f"SMART CSV: imported {len(rows)} rows from {path}")
         return len(rows)
+
+    HEX_BYTE_ROWS = 256
+    
+    def _ensure_hex_byte_table(self) -> None:
+        """Truncate and repopulate hex_byte (00..FF) if it has fewer than 256 rows."""
+        with self._lock, self._conn:
+            count = self._conn.execute("SELECT COUNT(*) FROM hex_byte").fetchone()[0]
+            if count >= self.HEX_BYTE_ROWS:
+                return
+            logger.info(f"hex_byte has {count} rows (expected {self.HEX_BYTE_ROWS}); repopulating")
+            self._conn.execute("DELETE FROM hex_byte")  # SQLite has no TRUNCATE
+            self._conn.executemany(
+                "INSERT INTO hex_byte(hex, value) VALUES (?, ?)",
+                [(f"{i:02X}", i) for i in range(self.HEX_BYTE_ROWS)],
+            )
     
 
     def close(self) -> None:
