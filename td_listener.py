@@ -163,10 +163,10 @@ class TdEventDB:
                     check (byte_dec BETWEEN 0 AND 255)
                 );
                 
-                create index idx_smart_serial_bit_map_function
+                create index IF NOT EXISTS idx_smart_serial_bit_map_function
                     on smart_serial_bit_map (function);
                 
-                create index idx_smart_serial_bit_map_interlocking_section
+                create index IF NOT EXISTS idx_smart_serial_bit_map_interlocking_section
                     on smart_serial_bit_map (interlocking, section);
                 
                 CREATE TABLE IF NOT EXISTS td_events (
