@@ -123,6 +123,7 @@ class TdEventDB:
                     from_berth TEXT,
                     to_berth TEXT,
                     address TEXT,
+                    address_int INT,
                     data TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_events_ts ON td_events(ts_ms);
@@ -152,6 +153,7 @@ class TdEventDB:
                     td_area TEXT,
                     msg_type TEXT NOT NULL,
                     address TEXT,
+                    address_int INT,
                     data TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_signal_ts ON td_signal_events(ts_ms);
