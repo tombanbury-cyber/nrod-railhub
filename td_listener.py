@@ -141,12 +141,12 @@ class TdEventDB:
             self._conn.executescript(
                 """
 
-                create table hex_byte (
+                create table IF NOT EXISTS hex_byte (
                     hex   TEXT primary key,
                     value INTEGER not null
                 );
                 
-                create table smart_serial_bit_map (
+                create table IF NOT EXISTS smart_serial_bit_map (
                     td_area          TEXT not null,
                     interlocking     INTEGER,
                     byte_dec         INTEGER not null,
