@@ -51,6 +51,16 @@ logger = get_logger("td_listener")
 BERTH_MSG_TYPES = ("CA", "CB", "CC")
 SIGNAL_MSG_TYPES = ("SF", "SG", "SH")
 
+def _hex_to_int(address: Optional[str]) -> Optional[int]:
+    """Convert a hex address string (e.g. '0A', '0x1F') to int; None if empty/invalid."""
+    if not address:
+        return None
+    try:
+        return int(str(address).strip(), 16)  # int(..., 16) accepts an optional '0x' prefix
+    except ValueError:
+        logger.warning(f"Could not convert address to int: {address!r}")
+        return None
+
 
 def _normalize_area_list(val: Any) -> Optional[List[str]]:
     """Accept None, list, or comma-separated string; return None or list[str]."""
@@ -123,8 +133,9 @@ class TdEventDB:
                     from_berth TEXT,
                     to_berth TEXT,
                     address TEXT,
-                    address_int INT,
-                    data TEXT
+                    address_int INTEGER,
+                    data TEXT,
+                    data_int INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_events_ts ON td_events(ts_ms);
                 CREATE INDEX IF NOT EXISTS idx_td_events_area_ts ON td_events(area, ts_ms);
@@ -262,23 +273,25 @@ class TdEventDB:
         data: str = "",
     ) -> None:
         """Atomically persist a signal/S-class event (SF/SG/SH) to td_events and td_signal_events."""
+        address_int = _hex_to_int(address)
         try:
             with self._lock, self._conn:
                 self._insert_row(
                     "td_events",
-                    "ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, address, data",
-                    "?,?,?,?,?,?,?,?,?",
-                    (ts_ms, ts_iso, area, msg_type, "", "", "", address, data or ""),
+                    "ts_ms, ts_iso, area, msg_type, headcode, from_berth, to_berth, address, address_int, data",
+                    "?,?,?,?,?,?,?,?,?,?",
+                    (ts_ms, ts_iso, area, msg_type, "", "", "", address, address_int, data or ""),
                 )
                 cursor = self._conn.execute(
-                    "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
-                    (ts_ms, ts_iso, area, msg_type, address, data or ""),
+                    "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, address_int, data) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (ts_ms, ts_iso, area, msg_type, address, address_int, data or ""),
                 )
                 if msg_type in ("SG", "SH"):
                     self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", cursor.lastrowid)
         except Exception as e:
             logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
-
+            
     def rebuild_signal_bytes(self, td_area: Optional[str] = None) -> Dict[str, int]:
         """Backfill td_signal_bytes from existing SG/SH rows in td_signal_events."""
         scanned = 0
