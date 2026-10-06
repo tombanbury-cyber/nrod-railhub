@@ -242,6 +242,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
     ) if db_path else None
 
 
+    db.import_smart_serial_outputs("smart_serial_outputs.csv")
+
+
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
     #
     # Important: the daily schedule file can be large; we load it in a background thread
