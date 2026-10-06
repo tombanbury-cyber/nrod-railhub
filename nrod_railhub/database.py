@@ -91,6 +91,36 @@ class RailDB:
         with self._conn:
             self._conn.executescript(
                 """
+
+                create table IF NOT EXISTS hex_byte (
+                    hex   TEXT primary key,
+                    value INTEGER not null
+                );
+                
+                create table IF NOT EXISTS smart_serial_bit_map (
+                    td_area          TEXT not null,
+                    interlocking     INTEGER,
+                    byte_dec         INTEGER not null,
+                    byte_hex         TEXT not null,
+                    bit              INTEGER not null,
+                    bit_mask         INTEGER not null,
+                    section          TEXT,
+                    function_type    TEXT,
+                    function         TEXT,
+                    location_context TEXT,
+                    source_document  TEXT default 'Serial Signalling Outputs' not null,
+                    primary key (byte_dec, bit),
+                    check (bit BETWEEN 0 AND 7),
+                    check (byte_dec BETWEEN 0 AND 255)
+                );
+                
+                create index IF NOT EXISTS idx_smart_serial_bit_map_function
+                    on smart_serial_bit_map (function);
+                
+                create index IF NOT EXISTS idx_smart_serial_bit_map_interlocking_section
+                    on smart_serial_bit_map (interlocking, section);
+
+                
                 CREATE TABLE IF NOT EXISTS td_state (
                     td_area TEXT NOT NULL,
                     headcode TEXT NOT NULL,
