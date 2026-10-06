@@ -59,6 +59,8 @@ class RailDB:
         self.ensure_sclass_correlation_schema()
         self.ensure_physical_signal_schema()
         self.ensure_topology_schema()
+        self._ensure_hex_byte_table()
+        
 
         # Retention settings
         self.retain_trust_days = retain_trust_days
@@ -2128,6 +2130,65 @@ class RailDB:
         suffix = f"+{byte_offset}" if int(byte_offset or 0) else ""
         return f"{address}{suffix}.{bit}"
 
+
+    HEX_BYTE_ROWS = 256
+    
+    def _ensure_hex_byte_table(self) -> None:
+        """Truncate and repopulate hex_byte (00..FF) if it has fewer than 256 rows."""
+        with self._lock, self._conn:
+            count = self._conn.execute("SELECT COUNT(*) FROM hex_byte").fetchone()[0]
+            if count >= self.HEX_BYTE_ROWS:
+                return
+            logger.info(f"hex_byte has {count} rows (expected {self.HEX_BYTE_ROWS}); repopulating")
+            self._conn.execute("DELETE FROM hex_byte")  # SQLite has no TRUNCATE
+            self._conn.executemany(
+                "INSERT INTO hex_byte(hex, value) VALUES (?, ?)",
+                [(f"{i:02X}", i) for i in range(self.HEX_BYTE_ROWS)],
+            )
+
+    def import_smart_serial_outputs(self, csv_path: str) -> int:
+        """Import smart_serial_outputs.csv into smart_serial_bit_map (upsert). Returns rows imported."""
+        path = pathlib.Path(csv_path).expanduser()
+        if not path.is_file():
+            logger.info(f"SMART CSV not found, skipping import: {path}")
+            return 0
+
+        rows = []
+        try:
+            with path.open(newline="", encoding="utf-8-sig") as f:
+                for n, r in enumerate(csv.DictReader(f), start=2):
+                    try:
+                        rows.append((
+                            (r["td_area"] or "").strip().upper(),
+                            int(r["interlocking"]),
+                            int(r["byte_dec"]),
+                            (r["byte_hex"] or "").strip().upper(),
+                            int(r["bit"]),
+                            (r["bit_mask_hex"] or "").strip().upper(),
+                            (r["section"] or "").strip(),
+                            (r["function_type"] or "").strip(),
+                            (r["function"] or "").strip(),
+                            (r["location_context"] or "").strip(),
+                        ))
+                    except (KeyError, ValueError, TypeError, AttributeError) as e:
+                        logger.warning(f"SMART CSV line {n}: skipped bad row ({e!r})")
+
+            with self._lock, self._conn:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO smart_serial_bit_map("
+                    "td_area, interlocking, byte_dec, byte_hex, bit, bit_mask_hex, "
+                    "section, function_type, function, location_context"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    rows,
+                )
+        except Exception as e:
+            logger.error(f"SMART CSV import failed for {path}: {e!r}")
+            return 0
+
+        logger.info(f"SMART CSV: imported {len(rows)} rows from {path}")
+        return len(rows)
+
+    
     def ensure_sclass_correlation_schema(self) -> None:
         """Create S-class/berth correlation tables and defaults."""
         with self._conn:
