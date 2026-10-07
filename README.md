@@ -335,6 +335,8 @@ Network Rail STOMP Feeds
 
 ### Reference Data Updates
 
+When `--db-path` is set and `--user`/`--password` are supplied, startup automatically creates the CORPUS/SMART tables (`corpus_tiploc`, `smart_steps`, ...) and imports them if missing, so no separate `nrod_ref_import.py` run is needed. If credentials or network are unavailable, a warning/error is logged and startup continues.
+
 Reference data (CORPUS and SMART) can be refreshed periodically:
 
 ```bash

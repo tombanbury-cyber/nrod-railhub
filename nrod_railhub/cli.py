@@ -199,6 +199,11 @@ def connect_and_run(args: argparse.Namespace) -> None:
         queue_handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
         logging.getLogger("nrod_railhub").addHandler(queue_handler)
 
+    if db_path:
+        from .ref_bootstrap import ensure_reference_data
+        _emit_startup_feedback("Startup: ensuring reference data tables...", startup_log_queue)
+        ensure_reference_data(db_path, args.user, args.password)
+
     _emit_startup_feedback("Startup: loading CORPUS reference data...", startup_log_queue)
     resolver = LocationResolver(db_path=db_path)
     resolver.load_or_download(
