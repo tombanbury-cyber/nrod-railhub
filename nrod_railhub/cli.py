@@ -242,7 +242,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
     ) if db_path else None
 
 
-    db.import_smart_serial_outputs("smart_serial_outputs.csv")
+    db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
 
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
