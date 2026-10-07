@@ -94,9 +94,9 @@ class Listener(stomp.ConnectionListener):
         self._print_lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
         self._reconnect_count = 0
-        self._td_work_q: Queue[Dict[str, Any]] = Queue()
-        self._td_worker_stop = threading.Event()
-        self._td_worker_thread: Optional[threading.Thread] = None
+        self._db_work_q: Queue[Dict[str, Any]] = Queue()
+        self._db_worker_stop = threading.Event()
+        self._db_worker_thread: Optional[threading.Thread] = None
 
         # Rendering/output is kept off the STOMP receiver thread.
         # A bounded queue prevents an unexpectedly slow output callback
@@ -303,45 +303,45 @@ class Listener(stomp.ConnectionListener):
         hdrs = getattr(frame, "headers", {})
         logger.error(f"STOMP ERROR headers={hdrs} body={body}")
 
-    def _ensure_td_worker(self) -> None:
-        """Start the background TD persistence worker on first use."""
+    def _ensure_db_worker(self) -> None:
+        """Start the background database persistence worker on first use."""
         if not self.db:
             return
         with self._lifecycle_lock:
-            if self._td_worker_thread and self._td_worker_thread.is_alive():
+            if self._db_worker_thread and self._db_worker_thread.is_alive():
                 return
-            self._td_worker_stop.clear()
-            self._td_worker_thread = threading.Thread(
-                target=self._td_worker_loop,
-                name="td-persist-worker",
+            self._db_worker_stop.clear()
+            self._db_worker_thread = threading.Thread(
+                target=self._db_worker_loop,
+                name="db-persist-worker",
                 daemon=True,
             )
-            self._td_worker_thread.start()
+            self._db_worker_thread.start()
 
-    def _td_worker_loop(self) -> None:
-        while not self._td_worker_stop.is_set():
+    def _db_worker_loop(self) -> None:
+        while not self._db_worker_stop.is_set():
             try:
-                work_item = self._td_work_q.get(timeout=0.5)
+                work_item = self._db_work_q.get(timeout=0.5)
             except Empty:
                 continue
             try:
-                self._process_td_work_item(work_item)
+                self._process_db_work_item(work_item)
             except Exception as e:
-                self._log_td_worker_error("TD background processing failed", e)
+                self._log_db_worker_error("Background database persistence failed", e)
             finally:
-                self._td_work_q.task_done()
+                self._db_work_q.task_done()
 
-    def _queue_td_work(self, work_item: Dict[str, Any]) -> None:
-        """Queue heavier TD persistence/enrichment work off the receiver thread."""
+    def _queue_db_work(self, work_item: Dict[str, Any]) -> None:
+        """Queue database persistence work off the receiver thread."""
         if not self.db:
             return
-        self._ensure_td_worker()
+        self._ensure_db_worker()
         try:
-            self._td_work_q.put_nowait(work_item)
+            self._db_work_q.put_nowait(work_item)
         except Exception as e:
-            self._log_td_worker_error("TD work enqueue failed", e)
+            self._log_db_worker_error("Database work enqueue failed", e)
 
-    def _process_td_work_item(self, work_item: Dict[str, Any]) -> None:
+    def _process_db_work_item(self, work_item: Dict[str, Any]) -> None:
         if not self.db:
             return
 
@@ -354,8 +354,72 @@ class Listener(stomp.ConnectionListener):
             logger.debug("berth event")
             self._persist_td_berth_event(work_item)
             return
+        if kind == "vstp":
+            self._persist_vstp_work_item(work_item)
+            return
+        if kind == "trust":
+            self._persist_trust_work_item(work_item)
+            return
 
-        logger.debug(f"Ignoring unknown TD work item kind={kind!r}")
+        logger.debug(f"Ignoring unknown database work item kind={kind!r}")
+
+    def _persist_vstp_work_item(self, work_item: Dict[str, Any]) -> None:
+        if not self.db:
+            return
+
+        vs = work_item["schedule"]
+        item = work_item["message"]
+        try:
+            self.db.upsert_vstp(
+                uid=vs["uid"],
+                headcode=vs["signalling_id"],
+                start_date=vs["start_date"],
+                end_date=vs["end_date"],
+                raw=item,
+            )
+            if self.db_callback:
+                self.db_callback(f"VSTP upsert: uid={vs['uid']} hc={vs['signalling_id'] or '?'}")
+        except Exception as e:
+            logger.warning(f"DB: failed to persist VSTP uid={vs['uid'] or '?'}: {e!r}")
+
+        try:
+            self.db.insert_vstp_schedule(item)
+            if self.db_callback:
+                self.db_callback(f"VSTP schedule insert: uid={vs['uid'] or '?'}")
+        except Exception as e:
+            logger.warning(
+                f"DB: failed to insert VSTP schedule locations uid={vs['uid'] or '?'}: {e!r}"
+            )
+
+    def _persist_trust_work_item(self, work_item: Dict[str, Any]) -> None:
+        if not self.db:
+            return
+
+        state = work_item["state"]
+        headcode = work_item["headcode"]
+        body = work_item["body"]
+        try:
+            self.db.upsert_trust(
+                train_id=state["train_id"],
+                headcode=headcode,
+                uid=state["train_uid"],
+                toc_id=state["toc_id"],
+                last_event_time=state["last_event_time"],
+                last_location=state["last_location"],
+                last_delay_min=state["last_delay_min"],
+                raw=body,
+            )
+            if self.db_callback:
+                self.db_callback(f"TRUST upsert: train_id={state['train_id']} hc={headcode}")
+        except Exception as e:
+            logger.warning(f"DB: failed to persist TRUST train_id={state['train_id'] or '?'}: {e!r}")
+
+        try:
+            self.db.insert_trust_message(body)
+            if self.db_callback:
+                self.db_callback(f"TRUST insert: train_id={body.get('train_id', state['train_id'])}")
+        except Exception as e:
+            self._log_db_worker_error("DB: TRUST message persist failed", e)
 
     def _persist_td_signal_event(self, td_msg: Dict[str, Any]) -> None:
         if not self.db:
@@ -484,7 +548,7 @@ class Listener(stomp.ConnectionListener):
         else:
             cache[td_area] = set(tocs)
 
-    def _log_td_worker_error(self, prefix: str, exc: Exception) -> None:
+    def _log_db_worker_error(self, prefix: str, exc: Exception) -> None:
         try:
             self._db_err_count = getattr(self, "_db_err_count", 0) + 1
             if self._db_err_count <= 5:
@@ -492,16 +556,20 @@ class Listener(stomp.ConnectionListener):
         except Exception:
             pass
 
-    def wait_for_td_work(self, timeout: float = 5.0) -> bool:
-        """Best-effort helper for tests to wait until queued TD work is drained."""
+    def wait_for_db_work(self, timeout: float = 5.0) -> bool:
+        """Best-effort helper for tests to wait until queued database work is drained."""
         deadline = time.time() + max(timeout, 0.0)
-        with self._td_work_q.all_tasks_done:
-            while self._td_work_q.unfinished_tasks:
+        with self._db_work_q.all_tasks_done:
+            while self._db_work_q.unfinished_tasks:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     return False
-                self._td_work_q.all_tasks_done.wait(remaining)
+                self._db_work_q.all_tasks_done.wait(remaining)
             return True
+
+    def wait_for_td_work(self, timeout: float = 5.0) -> bool:
+        """Backward-compatible alias for waiting on queued persistence work."""
+        return self.wait_for_db_work(timeout)
 
     def on_message(self, frame) -> None:
         self.last_message_at = utc_now_iso()
@@ -553,35 +621,18 @@ class Listener(stomp.ConnectionListener):
 
                 # Persist VSTP to DB if available
                 if self.db:
-                  
-                    #logger.error(f"DB is available, Persist VSTP {vs}")
-                    
-                    try:
-                        self.db.upsert_vstp(
-                            uid=vs.uid,
-                            headcode=vs.signalling_id or "",
-                            start_date=vs.start_date or "",
-                            end_date=vs.end_date or "",
-                            raw=item
-                        )
-                        logger.debug(f"DB: persisted VSTP uid={vs.uid} headcode={vs.signalling_id} start={vs.start_date}")
-                        # Send DB operation to db callback if available
-                        if self.db_callback:
-                            self.db_callback(f"VSTP upsert: uid={vs.uid} hc={vs.signalling_id or '?'}")
-                    except Exception as e:
-                        logger.warning(f"DB: failed to persist VSTP uid={getattr(vs, 'uid', '?')}: {e!r}")
-
-                    # Persist full expanded schedule (header + per-location rows)
-                    try:
-                        # insert_vstp_schedule expects the raw VSTP message dict
-                        self.db.insert_vstp_schedule(item)
-                        
-                        logger.debug(f"DB: persisted VSTP schedule locations uid={getattr(vs,'uid','?')} start={getattr(vs,'start_date','?')}")
-                        # Send DB operation to db callback if available
-                        if self.db_callback:
-                            self.db_callback(f"VSTP schedule insert: uid={getattr(vs,'uid','?')}")
-                    except Exception as e:
-                        logger.warning(f"DB: failed to insert VSTP schedule locations uid={getattr(vs,'uid','?')}: {e!r}")
+                    self._queue_db_work(
+                        {
+                            "kind": "vstp",
+                            "schedule": {
+                                "uid": vs.uid,
+                                "signalling_id": vs.signalling_id or "",
+                                "start_date": vs.start_date or "",
+                                "end_date": vs.end_date or "",
+                            },
+                            "message": dict(item),
+                        }
+                    )
 
                 if self.args.trace_headcode:
                     if self.args.headcode and vs.signalling_id == self.args.headcode:
@@ -630,39 +681,21 @@ class Listener(stomp.ConnectionListener):
 
                 # Persist TRUST to DB if available
                 if self.db:
-                    try:
-                        self.db.upsert_trust(
-                            train_id=ts.train_id,
-                            headcode=trust_headcode,
-                            uid=ts.train_uid or "",
-                            toc_id=ts.toc_id or "",
-                            last_event_time=ts.last_event_time or "",
-                            last_location=ts.last_location or "",
-                            last_delay_min=ts.last_delay_min,
-                            raw=body,
-                        )
-                        logger.debug(f"DB: persisted TRUST train_id={ts.train_id} headcode={trust_headcode} uid={ts.train_uid}")
-                        # Send DB operation to db callback if available
-                        if self.db_callback:
-                            self.db_callback(f"TRUST upsert: train_id={ts.train_id} hc={trust_headcode}")
-                    except Exception as e:
-                        logger.warning(f"DB: failed to persist TRUST train_id={getattr(ts, 'train_id', '?')}: {e!r}")
-
-                    # Persist full decoded TRUST message into trust_messages history table
-                    try:
-                        self.db.insert_trust_message(body)
-                        logger.debug(f"DB: inserted TRUST message history train_id={getattr(body,'train_id',getattr(ts,'train_id','?'))} actual_ts={body.get('actual_timestamp')}")
-                        # Send DB operation to db callback if available
-                        if self.db_callback:
-                            self.db_callback(f"TRUST insert: train_id={getattr(body,'train_id',getattr(ts,'train_id','?'))}")
-                    except Exception as e:
-                        # Don't kill the receiver thread; log a few DB errors for diagnosis
-                        try:
-                            self._db_err_count = getattr(self, '_db_err_count', 0) + 1
-                            if self._db_err_count <= 5:
-                                logger.error(f"DB: TRUST message persist failed: {type(e).__name__}: {e}")
-                        except Exception:
-                            pass
+                    self._queue_db_work(
+                        {
+                            "kind": "trust",
+                            "state": {
+                                "train_id": ts.train_id,
+                                "train_uid": ts.train_uid or "",
+                                "toc_id": ts.toc_id or "",
+                                "last_event_time": ts.last_event_time or "",
+                                "last_location": ts.last_location or "",
+                                "last_delay_min": ts.last_delay_min,
+                            },
+                            "headcode": trust_headcode,
+                            "body": dict(body),
+                        }
+                    )
 
                 # Trace TRUST visibility
                 if self.args.trace_headcode:
@@ -712,7 +745,7 @@ class Listener(stomp.ConnectionListener):
                     if self.args.td_area and area_id and area_id not in self.args.td_area:
                         continue
                     if self.db:
-                        self._queue_td_work({"kind": "signal", "td_msg": dict(td_msg)})
+                        self._queue_db_work({"kind": "signal", "td_msg": dict(td_msg)})
                     continue
                 
                 # Handle berth events (C-Class: CA, CB, CC)
@@ -747,7 +780,7 @@ class Listener(stomp.ConnectionListener):
                 #logger.error(f"test: {td.area_id}")        
 
                 if self.db:
-                    self._queue_td_work(
+                    self._queue_db_work(
                         {
                             "kind": "berth",
                             "msg_type": msg_type,

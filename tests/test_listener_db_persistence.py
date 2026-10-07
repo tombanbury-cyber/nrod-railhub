@@ -79,6 +79,7 @@ def test_vstp_message_persists_to_db():
     
     # Process the message
     listener.on_message(frame)
+    assert listener.wait_for_db_work(timeout=2.0)
     
     # Verify HumanView was called
     assert hv.upsert_vstp.called
@@ -170,6 +171,7 @@ def test_trust_message_persists_to_db():
     
     # Process the message
     listener.on_message(frame)
+    assert listener.wait_for_db_work(timeout=2.0)
     
     # Verify HumanView was called
     assert hv.upsert_trust.called
@@ -244,6 +246,7 @@ def test_listener_works_without_db():
     
     # Process the message - should not raise exception
     listener.on_message(frame)
+    assert listener.wait_for_db_work(timeout=2.0)
     
     # Verify HumanView was still called
     assert hv.upsert_vstp.called
@@ -305,6 +308,7 @@ def test_db_error_does_not_crash_listener():
     
     # Process the message - should not crash despite DB error
     listener.on_message(frame)
+    assert listener.wait_for_db_work(timeout=2.0)
     
     # Verify HumanView was still called
     assert hv.upsert_vstp.called
@@ -393,6 +397,7 @@ def test_vstp_schedule_locations_persisted():
     
     # Process the message
     listener.on_message(frame)
+    assert listener.wait_for_db_work(timeout=2.0)
     
     # Verify HumanView was called
     assert hv.upsert_vstp.called
