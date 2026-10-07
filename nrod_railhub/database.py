@@ -2149,6 +2149,10 @@ class RailDB:
 
     def import_smart_serial_outputs(self, csv_path: str) -> int:
         """Import smart_serial_outputs.csv into smart_serial_bit_map (upsert). Returns rows imported."""
+
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
         path = pathlib.Path(csv_path).expanduser()
         if not path.is_file():
             logger.info(f"SMART CSV not found, skipping import: {path}")
