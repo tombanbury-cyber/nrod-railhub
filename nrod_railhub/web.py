@@ -3193,7 +3193,7 @@ filterInput.addEventListener('input', updateFilter);
 
     @app.get("/signal-mappings")
     def signal_mappings():
-        """Signal mappings enquiry screen showing berth-signal correlations."""
+        """Signal mappings enquiry screen showing berth-signal relationships."""
         body = ["<h2>Signal Mappings Enquiry</h2>"]
         
         # Check if mapper tables exist
