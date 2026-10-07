@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 # Map CLI log level strings to Python logging levels
 LOG_LEVEL_MAP = {
     "verbose": logging.DEBUG,
+    "debug": logging.DEBUG,
     "info": logging.INFO,
     "warning": logging.WARNING,
     "error": logging.ERROR,
