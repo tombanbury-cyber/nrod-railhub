@@ -496,6 +496,11 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                                     state.note_message("output")  # Track for rate calculation
                     except queue.Empty:
                         pass
+
+            db = queues.get("db_handle")
+            state.berth_signal_lines.clear()
+            for line in _collect_berth_signal_lines(db, state.td_area_filter):
+                state.add_berth_signal_line(line)
         
         # Check if periodic redraw is needed
         current_time = time.time()
@@ -530,6 +535,7 @@ def run_interactive_dashboard(
     error_queue: Optional["queue.Queue[str]"] = None,
     db_queue: Optional["queue.Queue[str]"] = None,
     http_queue: Optional["queue.Queue[str]"] = None,
+    db_handle: Optional[RailDB] = None,
     berth_signal_queue: Optional["queue.Queue[str]"] = None,
     headcode: Optional[str] = None,
     uid: Optional[str] = None,
@@ -570,6 +576,7 @@ def run_interactive_dashboard(
         'error': error_queue,
         'db': db_queue,
         'http': http_queue,
+        'db_handle': db_handle,
         'berth_signal': berth_signal_queue,
     }
     
