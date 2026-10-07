@@ -347,9 +347,11 @@ class Listener(stomp.ConnectionListener):
 
         kind = work_item.get("kind")
         if kind == "signal":
+            logger.debug("signal event")
             self._persist_td_signal_event(work_item.get("td_msg") or {})
             return
         if kind == "berth":
+            logger.debug("berth event")
             self._persist_td_berth_event(work_item)
             return
 
@@ -358,6 +360,7 @@ class Listener(stomp.ConnectionListener):
     def _persist_td_signal_event(self, td_msg: Dict[str, Any]) -> None:
         if not self.db:
             return
+        logger.debug("_persist_td_signal_event")
         area_id = (td_msg.get("area_id") or "").strip()
         address = td_msg.get("address", "")
         msg_type = (td_msg.get("msg_type") or "").upper()
