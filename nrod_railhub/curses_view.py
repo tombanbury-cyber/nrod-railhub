@@ -80,6 +80,12 @@ class InteractiveDashboardState:
     
     # Ring buffer for HTTP request messages
     http_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+
+    # Ring buffer for berth/signal live display
+    berth_signal_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+
+    # Selected area / filter for berth-signal view
+    berth_signal_area: Optional[str] = None
     
     # Message rate tracking
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
@@ -122,6 +128,11 @@ class InteractiveDashboardState:
     def add_http_line(self, line: str) -> None:
         """Add a line to the HTTP requests log."""
         self.http_lines.append(line)
+
+    def add_berth_signal_line(self, line: str) -> None:
+        """Add a line to the berth/signal display."""
+        self.berth_signal_lines.append(line)
+
     
     def rate_messages_per_min(self) -> float:
         """Calculate message rate per minute."""
@@ -228,6 +239,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, listener: Optional
         "Database Inserts",
         "HTTP Requests",
         "Interesting Trains",
+        "Berth / Signal",
     ]
     interesting_lines = _collect_interesting_lines(listener, state.td_area_filter)
     page_lines = [
@@ -238,12 +250,13 @@ def _render_console(stdscr, state: InteractiveDashboardState, listener: Optional
         state.db_lines,
         state.http_lines,
         interesting_lines,
+        state.berth_signal_lines,
     ]
     
     current_page_name = page_names[state.current_page]
     current_lines = page_lines[state.current_page]
     
-    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/7) ", _cattr(CP_TITLE, curses.A_BOLD))
+    _draw_box_title(console, f" {current_page_name} (Page {state.current_page + 1}/8) ", _cattr(CP_TITLE, curses.A_BOLD))
     
     # Show recent lines
     max_lines = max(0, body_h - 2)
@@ -261,7 +274,7 @@ def _render_console(stdscr, state: InteractiveDashboardState, listener: Optional
 def _render_footer(stdscr, h: int, w: int) -> None:
     """Render the footer with key bindings."""
     footer_y = h - 1
-    help_text = "q=quit  p=pause  c=clear  Tab/1-7=pages"
+    help_text = "q=quit  p=pause  c=clear  Tab/1-8=pages"
     try:
         stdscr.addnstr(footer_y, 2, help_text, w - 4, _cattr(CP_DIM))
     except curses.error:
@@ -402,9 +415,9 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                 if 0 <= state.current_page < len(page_buffers):
                     page_buffers[state.current_page].clear()
             elif ch == ord("\t") or ch == 9:  # Tab key
-                state.current_page = (state.current_page + 1) % 7
-            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
-                # Number keys 1-7 for direct page access
+                state.current_page = (state.current_page + 1) % 8
+            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7"), ord("8")):
+                # Number keys 1-8 for direct page access
                 state.current_page = ch - ord("1")
         
         # Update state from listener
@@ -423,6 +436,7 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                 (queues.get('error'), state.add_error_line),
                 (queues.get('db'), state.add_db_line),
                 (queues.get('http'), state.add_http_line),
+                (queues.get('berth_signal'), state.add_berth_signal_line),
             ]
             
             for queue_obj, add_method in queue_handlers:
@@ -470,6 +484,7 @@ def run_interactive_dashboard(
     error_queue: Optional["queue.Queue[str]"] = None,
     db_queue: Optional["queue.Queue[str]"] = None,
     http_queue: Optional["queue.Queue[str]"] = None,
+    berth_signal_queue: Optional["queue.Queue[str]"] = None,
     headcode: Optional[str] = None,
     uid: Optional[str] = None,
     td_area: Optional[List[str]] = None,
@@ -487,6 +502,7 @@ def run_interactive_dashboard(
         error_queue: Optional queue for error log messages
         db_queue: Optional queue for database insert messages
         http_queue: Optional queue for HTTP request messages
+        berth_signal_queue: Optional queue for berth/signal display lines
         headcode: Optional headcode filter
         uid: Optional UID filter
         td_area: Optional list of TD area filters
@@ -508,6 +524,7 @@ def run_interactive_dashboard(
         'error': error_queue,
         'db': db_queue,
         'http': http_queue,
+        'berth_signal': berth_signal_queue,
     }
     
     try:
