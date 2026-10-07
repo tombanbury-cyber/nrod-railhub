@@ -2576,6 +2576,81 @@ class RailDB:
             for row in rows
         ]
 
+    def get_berth_signal_dashboard_rows(
+        self,
+        *,
+        td_area: Optional[str] = None,
+        limit: int = 25,
+    ) -> list[dict]:
+        """
+        Return compact berth/signal rows suitable for a curses dashboard.
+
+        The result prefers diagram-derived relationships from berth_signal_scores,
+        and enriches them with SMART / CORPUS metadata when present.
+        """
+        area = (td_area or "").strip().upper() or None
+        sql = """
+            SELECT
+                bss.td_area,
+                bss.from_berth,
+                bss.to_berth,
+                bss.address,
+                bss.score,
+                bss.obs_count,
+                bss.last_seen_ts,
+                bss.last_seen_utc,
+                bss.last_data,
+                sb.stanox AS smart_stanox,
+                sb.platform AS smart_platform,
+                sb.stanme AS smart_stanme,
+                sb.comment AS smart_comment,
+                cl.name AS location_name
+            FROM berth_signal_scores bss
+            LEFT JOIN smart_berths sb
+              ON sb.td_area = bss.td_area
+             AND sb.berth IN (bss.from_berth, bss.to_berth)
+            LEFT JOIN corpus_locations cl
+              ON CAST(cl.stanox AS TEXT) = CAST(sb.stanox AS TEXT)
+            WHERE 1=1
+        """
+        params: list[Any] = []
+        if area:
+            sql += " AND bss.td_area=?"
+            params.append(area)
+
+        sql += """
+            ORDER BY bss.td_area, bss.score DESC, bss.obs_count DESC,
+                     bss.from_berth, bss.to_berth, bss.address
+            LIMIT ?
+        """
+        params.append(max(1, int(limit or 1)))
+
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "td_area": row[0],
+                "from_berth": row[1],
+                "to_berth": row[2],
+                "address": row[3],
+                "score": row[4],
+                "obs_count": row[5],
+                "last_seen_ts": row[6],
+                "last_seen_utc": row[7],
+                "last_data": row[8],
+                "smart_stanox": row[9],
+                "smart_platform": row[10],
+                "smart_stanme": row[11],
+                "smart_comment": row[12],
+                "location_name": row[13],
+            }
+            for row in rows
+        ]
+    
+
     def get_physical_signal_mapping(self, mapping_id: int) -> Optional[dict]:
         """Return a single physical signal mapping by primary key."""
         with self._lock:
