@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import sqlite3
 import threading
 import time
