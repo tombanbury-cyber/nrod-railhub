@@ -2136,6 +2136,10 @@ class RailDB:
     
     def _ensure_hex_byte_table(self) -> None:
         """Truncate and repopulate hex_byte (00..FF) if it has fewer than 256 rows."""
+
+        from .logging_config import get_logger
+        logger = get_logger("database")
+        
         with self._lock, self._conn:
             count = self._conn.execute("SELECT COUNT(*) FROM hex_byte").fetchone()[0]
             if count >= self.HEX_BYTE_ROWS:
