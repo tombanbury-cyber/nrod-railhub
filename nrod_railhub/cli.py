@@ -245,10 +245,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
         retention_batch_size=getattr(args, "retention_batch_size", 1000),
         save_raw_json=getattr(args, "save_raw_json", True),
     ) if db_path else None
-
-
-    db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
-
+    
+    imported = db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
+    logger.info("SMART serial map rows imported: %s", imported)
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
     #
