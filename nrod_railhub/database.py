@@ -1547,7 +1547,7 @@ class RailDB:
                 # Propagate exception to caller so caller can log
                 raise
 
-    def insert_cif_schedule(self, cif_record: dict, toc_code: str) -> None:
+    def insert_cif_schedule(self, cif_record: dict, toc_code: str) -> bool:
         """
         Persist CIF schedule from downloaded TOC schedule file into cif_schedules + cif_schedule_locations.
         
@@ -1567,7 +1567,7 @@ class RailDB:
         logger = get_logger("database")
         
         if not isinstance(cif_record, dict):
-            return
+            return False
         
         # Extract schedule metadata
         uid = (cif_record.get("CIF_train_uid") or "").strip() or None
@@ -1598,7 +1598,7 @@ class RailDB:
         
         # Skip if no UID or start date
         if not uid or not schedule_start_date:
-            return
+            return false
         
         raw_compact = json.dumps(cif_record, separators=(',',':')) if self.save_raw_json else None
         
@@ -1696,6 +1696,17 @@ class RailDB:
             except Exception as e:
                 logger.error(f"Failed to insert CIF schedule {uid}: {e}")
                 # Don't raise - continue processing other schedules
+                return False
+        return True
+
+
+    def insert_cif_schedules_batch(self, cif_records: list[dict], toc_code: str) -> int:
+        """Persist a batch of CIF schedules and return the number saved."""
+        inserted = 0
+        for cif_record in cif_records:
+            if self.insert_cif_schedule(cif_record, toc_code):
+                inserted += 1
+        return inserted
 
     def upsert_toc(self, toc_code: str, toc_name: str, business_code: Optional[str] = None, 
                    sector_code: Optional[str] = None, atoc_code: Optional[str] = None, 
