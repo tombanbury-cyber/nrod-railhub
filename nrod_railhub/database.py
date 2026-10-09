@@ -115,7 +115,7 @@ class RailDB:
                     function         TEXT,
                     location_context TEXT,
                     source_document  TEXT default 'Serial Signalling Outputs' not null,
-                    primary key (byte_dec, bit),
+                    primary key (td_area, byte_dec, bit),
                     check (bit BETWEEN 0 AND 7),
                     check (byte_dec BETWEEN 0 AND 255)
                 );
