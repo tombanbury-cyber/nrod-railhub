@@ -597,7 +597,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     db_path = str(pathlib.Path(args.db_path).expanduser())
     db = TdEventDB(db_path)
     logger.info(f"DB: TD events will be stored in {db_path}")
-    db.import_smart_serial_outputs("smart_serial_outputs.csv")
+    db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
 
     conn = stomp.Connection11(
         host_and_ports=[(args.host, args.port)],
