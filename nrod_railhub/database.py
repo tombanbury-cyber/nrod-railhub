@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import pathlib
@@ -12,8 +13,10 @@ import time
 from statistics import median, pvariance
 from typing import Optional, Any, Dict, List, Tuple
 
+from .logging_config import get_logger
 from .models import expand_td_signal_bytes, safe_int
 
+logger = get_logger("database")
 
 class RailDB:
     """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
@@ -2152,40 +2155,68 @@ class RailDB:
             )
 
     def import_smart_serial_outputs(self, csv_path: str) -> int:
-        """Import smart_serial_outputs.csv into smart_serial_bit_map (upsert). Returns rows imported."""
+        """Import smart_serial_outputs.csv into smart_serial_bit_map (upsert).
 
-        from .logging_config import get_logger
-        logger = get_logger("database")
-        
+        Expected CSV columns: td_area, interlocking, byte_dec, byte_hex, bit,
+        section, function_type, function, location_context.
+        (A bit_mask_hex column is accepted but ignored; bit_mask is derived
+        as 1 << bit so it can never disagree with bit.)
+
+        Returns the number of rows imported.
+        """
         path = pathlib.Path(csv_path).expanduser()
         if not path.is_file():
             logger.info(f"SMART CSV not found, skipping import: {path}")
             return 0
 
-        rows = []
+        def _clean(value: Any) -> str:
+            return (value or "").strip()
+
+        rows: list[tuple] = []
+        skipped = 0
         try:
             with path.open(newline="", encoding="utf-8-sig") as f:
-                for n, r in enumerate(csv.DictReader(f), start=2):
+                reader = csv.DictReader(f)
+                for n, r in enumerate(reader, start=2):
                     try:
+                        td_area = _clean(r.get("td_area")).upper()
+                        byte_dec = int(_clean(r.get("byte_dec")))
+                        bit = int(_clean(r.get("bit")))
+                        if not td_area:
+                            raise ValueError("blank td_area")
+                        if not 0 <= byte_dec <= 255:
+                            raise ValueError(f"byte_dec {byte_dec} out of range")
+                        if not 0 <= bit <= 7:
+                            raise ValueError(f"bit {bit} out of range")
+
+                        interlocking_raw = _clean(r.get("interlocking"))
+                        interlocking = int(interlocking_raw) if interlocking_raw else None
+                        byte_hex = _clean(r.get("byte_hex")).upper() or f"{byte_dec:02X}"
+
                         rows.append((
-                            (r["td_area"] or "").strip().upper(),
-                            int(r["interlocking"]),
-                            int(r["byte_dec"]),
-                            (r["byte_hex"] or "").strip().upper(),
-                            int(r["bit"]),
-                            (r["bit_mask_hex"] or "").strip().upper(),
-                            (r["section"] or "").strip(),
-                            (r["function_type"] or "").strip(),
-                            (r["function"] or "").strip(),
-                            (r["location_context"] or "").strip(),
+                            td_area,
+                            interlocking,
+                            byte_dec,
+                            byte_hex,
+                            bit,
+                            1 << bit,
+                            _clean(r.get("section")),
+                            _clean(r.get("function_type")),
+                            _clean(r.get("function")),
+                            _clean(r.get("location_context")),
                         ))
-                    except (KeyError, ValueError, TypeError, AttributeError) as e:
+                    except (ValueError, TypeError, AttributeError) as e:
+                        skipped += 1
                         logger.warning(f"SMART CSV line {n}: skipped bad row ({e!r})")
+
+            if not rows:
+                logger.warning(f"SMART CSV: no valid rows found in {path} (skipped {skipped})")
+                return 0
 
             with self._lock, self._conn:
                 self._conn.executemany(
                     "INSERT OR REPLACE INTO smart_serial_bit_map("
-                    "td_area, interlocking, byte_dec, byte_hex, bit, bit_mask_hex, "
+                    "td_area, interlocking, byte_dec, byte_hex, bit, bit_mask, "
                     "section, function_type, function, location_context"
                     ") VALUES (?,?,?,?,?,?,?,?,?,?)",
                     rows,
@@ -2194,7 +2225,7 @@ class RailDB:
             logger.error(f"SMART CSV import failed for {path}: {e!r}")
             return 0
 
-        logger.info(f"SMART CSV: imported {len(rows)} rows from {path}")
+        logger.info(f"SMART CSV: imported {len(rows)} rows from {path} (skipped {skipped})")
         return len(rows)
 
     
