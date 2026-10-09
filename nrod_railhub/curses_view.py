@@ -379,50 +379,35 @@ def _seed_startup_page(
     state.add_error_line(message)
     state.startup_page_until = time.monotonic() + hold_seconds
 
-def _format_berth_signal_row(row: dict) -> str:
-    """Format one berth/signal score row for the curses dashboard."""
-    score = row.get("score")
-    obs = row.get("obs_count")
-    td_area = row.get("td_area") or ""
-    from_berth = row.get("from_berth") or ""
-    to_berth = row.get("to_berth") or ""
-    address = row.get("address") or ""
-    location_name = row.get("location_name") or row.get("smart_stanme") or ""
-    smart_stanox = row.get("smart_stanox") or ""
-    smart_platform = row.get("smart_platform") or ""
-
-    relation = f"{from_berth} → {to_berth}".strip()
-    signal = f"{address}"
-    loc_bits = []
-    if location_name:
-        loc_bits.append(location_name)
-    if smart_stanox:
-        loc_bits.append(f"STANOX {smart_stanox}")
-    if smart_platform:
-        loc_bits.append(f"PLAT {smart_platform}")
-
-    suffix = f" | {'; '.join(loc_bits)}" if loc_bits else ""
-    return f"{td_area} {relation:<24} | {signal:<8} | score={score:.3f} obs={obs}{suffix}"
+def _format_signal_function_row(row: dict) -> str:
+    """Format one decoded SMART function row."""
+    mark = "ON " if row["state"] else "off"
+    ctx = row.get("location_context") or row.get("section") or ""
+    ctx_part = f"  {ctx}" if ctx else ""
+    return (
+        f"{mark} {row['function']:<14} "
+        f"{row['td_address']}.{row['bit']}  "
+        f"{(row.get('function_type') or ''):<10}{ctx_part}"
+    )
 
 
 def _collect_berth_signal_lines(db: Optional[RailDB], td_area_filter: Optional[List[str]] = None) -> List[str]:
-    """Build a compact list of berth/signal rows for the new curses page."""
+    """Decoded signal function state, grouped by TD area."""
     if not db:
-        return ["No berth/signal data source available."]
-
+        return ["No data source available."]
     areas = [a.strip().upper() for a in (td_area_filter or []) if a and a.strip()]
     area = areas[0] if len(areas) == 1 else None
-    rows = db.get_berth_signal_dashboard_rows(td_area=area, limit=25)
+    rows = db.get_td_signal_function_state(td_area=area, limit=500)
     if not rows:
-        return ["No berth/signal mappings available."]
+        return ["No decoded signal state yet (waiting for S-class messages or SMART import)."]
 
-    lines = []
+    lines: List[str] = []
     current_area = None
     for row in rows:
         if row["td_area"] != current_area:
             current_area = row["td_area"]
             lines.append(f"[{current_area}]")
-        lines.append("  " + _format_berth_signal_row(row))
+        lines.append("  " + _format_signal_function_row(row))
     return lines
 
 def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener, queues: dict, stop_event: threading.Event) -> None:
