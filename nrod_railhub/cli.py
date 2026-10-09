@@ -383,6 +383,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                 error_queue=error_queue,  # type: ignore[name-defined]
                 db_queue=db_queue,  # type: ignore[name-defined]
                 http_queue=http_queue,  # type: ignore[name-defined]
+                db_handle=db,
                 headcode=args.headcode,
                 uid=args.uid,
                 td_area=args.td_area,
