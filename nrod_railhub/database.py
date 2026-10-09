@@ -2585,79 +2585,99 @@ class RailDB:
             for row in rows
         ]
 
-    def get_berth_signal_dashboard_rows(
+    def get_td_signal_function_state(
         self,
         *,
         td_area: Optional[str] = None,
-        limit: int = 25,
+        only_active: bool = False,
+        limit: int = 200,
     ) -> list[dict]:
         """
-        Return compact berth/signal rows suitable for a curses dashboard.
+        Decode current S-class state into named SMART functions.
 
-        The result prefers diagram-derived relationships from berth_signal_scores,
-        and enriches them with SMART / CORPUS metadata when present.
+        Source of truth:
+          - td_signal_events (latest SF/SG/SH per area+address), expanded to bytes
+          - smart_serial_bit_map, joined on td_area + byte_dec == address_int
+
+        Returns one row per documented (byte, bit) with its current ON/OFF state.
         """
         area = (td_area or "").strip().upper() or None
-        sql = """
-            SELECT
-                bss.td_area,
-                bss.from_berth,
-                bss.to_berth,
-                bss.address,
-                bss.score,
-                bss.obs_count,
-                bss.last_seen_ts,
-                bss.last_seen_utc,
-                bss.last_data,
-                sb.stanox AS smart_stanox,
-                sb.platform AS smart_platform,
-                sb.stanme AS smart_stanme,
-                sb.comment AS smart_comment,
-                cl.name AS location_name
-            FROM berth_signal_scores bss
-            LEFT JOIN smart_berths sb
-              ON sb.td_area = bss.td_area
-             AND sb.berth IN (bss.from_berth, bss.to_berth)
-            LEFT JOIN corpus_locations cl
-              ON CAST(cl.stanox AS TEXT) = CAST(sb.stanox AS TEXT)
-            WHERE 1=1
-        """
-        params: list[Any] = []
-        if area:
-            sql += " AND bss.td_area=?"
-            params.append(area)
 
-        sql += """
-            ORDER BY bss.td_area, bss.score DESC, bss.obs_count DESC,
-                     bss.from_berth, bss.to_berth, bss.address
-            LIMIT ?
-        """
-        params.append(max(1, int(limit or 1)))
+        latest_sql = """
+            SELECT e.id, e.ts_ms, e.ts_iso, e.td_area, e.msg_type, e.address, e.data
+            FROM td_signal_events e
+            WHERE e.id IN (
+                SELECT MAX(id)
+                FROM td_signal_events
+                WHERE msg_type IN ('SF','SG','SH')
+                  AND td_area IS NOT NULL
+                  {area_clause}
+                GROUP BY td_area, address
+            )
+            ORDER BY e.id ASC
+        """.format(area_clause="AND UPPER(td_area)=?" if area else "")
+        latest_params: tuple[Any, ...] = (area,) if area else ()
+
+        smart_sql = """
+            SELECT td_area, byte_dec, bit, interlocking, section,
+                   function_type, function, location_context
+            FROM smart_serial_bit_map
+            WHERE function IS NOT NULL AND function <> ''
+              {area_clause}
+        """.format(area_clause="AND UPPER(td_area)=?" if area else "")
 
         with self._lock:
             cursor = self._conn.cursor()
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
+            event_rows = cursor.execute(latest_sql, latest_params).fetchall()
+            smart_rows = cursor.execute(smart_sql, latest_params).fetchall()
 
-        return [
-            {
-                "td_area": row[0],
-                "from_berth": row[1],
-                "to_berth": row[2],
-                "address": row[3],
-                "score": row[4],
-                "obs_count": row[5],
-                "last_seen_ts": row[6],
-                "last_seen_utc": row[7],
-                "last_data": row[8],
-                "smart_stanox": row[9],
-                "smart_platform": row[10],
-                "smart_stanme": row[11],
-                "smart_comment": row[12],
-                "location_name": row[13],
-            }
-            for row in rows
-        ]
+        # (area, address_int) -> (value_int, ts_ms, ts_iso); later ids overwrite earlier
+        byte_state: Dict[Tuple[str, int], Tuple[int, int, str]] = {}
+        for _id, ts_ms, ts_iso, ev_area, msg_type, address, data in event_rows:
+            ev_area = (ev_area or "").strip().upper()
+            if not ev_area:
+                continue
+            if msg_type == "SF":
+                try:
+                    addr_int = int(str(address).strip(), 16)
+                    value_int = int(str(data).strip()[:2], 16)
+                except (TypeError, ValueError):
+                    continue
+                byte_state[(ev_area, addr_int)] = (value_int, ts_ms, ts_iso)
+            else:
+                for addr_int, value_int, _addr_hex, _val_hex in expand_td_signal_bytes(address, data or ""):
+                    byte_state[(ev_area, addr_int)] = (value_int, ts_ms, ts_iso)
+
+        results: list[dict] = []
+        for s_area, byte_dec, bit, interlocking, section, ftype, function, ctx in smart_rows:
+            key = ((s_area or "").strip().upper(), int(byte_dec))
+            state_row = byte_state.get(key)
+            if state_row is None:
+                continue
+            value_int, ts_ms, ts_iso = state_row
+            state = 1 if (value_int & (1 << int(bit))) else 0
+            if only_active and not state:
+                continue
+            results.append(
+                {
+                    "td_area": key[0],
+                    "address_int": key[1],
+                    "td_address": f"{key[1]:02X}",
+                    "bit": int(bit),
+                    "interlocking": interlocking,
+                    "section": section,
+                    "function_type": ftype,
+                    "function": function,
+                    "location_context": ctx,
+                    "state": state,
+                    "byte_value": value_int,
+                    "last_seen_ts": ts_ms,
+                    "last_seen_iso": ts_iso,
+                }
+            )
+
+        results.sort(key=lambda r: (r["td_area"], r["address_int"], r["bit"]))
+        return results[: max(1, int(limit or 1))]
     
 
     def get_physical_signal_mapping(self, mapping_id: int) -> Optional[dict]:
