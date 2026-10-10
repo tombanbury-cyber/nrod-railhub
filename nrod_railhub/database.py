@@ -64,6 +64,7 @@ class RailDB:
         self.ensure_physical_signal_schema()
         self.ensure_topology_schema()
         self._ensure_hex_byte_table()
+        self._ensure_cif_fingerprint_column()
         
 
         # Retention settings
@@ -355,6 +356,7 @@ class RailDB:
                     CIF_power_type TEXT,
                     CIF_headcode TEXT,
                     raw_json TEXT,
+                    record_fingerprint TEXT,
                     created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                     created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
                     PRIMARY KEY (uid, schedule_start_date, CIF_stp_indicator)
@@ -1598,14 +1600,31 @@ class RailDB:
         
         # Skip if no UID or start date
         if not uid or not schedule_start_date:
-            return false
+            return False
         
-        raw_compact = json.dumps(cif_record, separators=(',',':')) if self.save_raw_json else None
+        raw_compact = json.dumps(cif_record, separators=(',',':'), sort_keys=True) if self.save_raw_json else None
+        # Fingerprint covers the record and toc_code, so changes to either force an update
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"toc_code": toc_code, "record": cif_record},
+                separators=(',', ':'), sort_keys=True, ensure_ascii=True, default=str,
+            ).encode("utf-8")
+        ).hexdigest()
         
         # Insert header + locations inside a lock/transaction
         with self._lock, self._conn:
             cur = self._conn.cursor()
             try:
+                existing = cur.execute(
+                    """
+                    SELECT record_fingerprint FROM cif_schedules
+                    WHERE uid=? AND schedule_start_date=? AND CIF_stp_indicator=?
+                    """,
+                    (uid, schedule_start_date, CIF_stp_indicator),
+                ).fetchone()
+                if existing and existing[0] == fingerprint:
+                    return True
+
                 # Upsert schedule header (use INSERT OR REPLACE to update)
                 cur.execute(
                     """
@@ -1613,8 +1632,8 @@ class RailDB:
                         uid, schedule_start_date, schedule_end_date, toc_code, transaction_type, train_status,
                         schedule_days_runs, applicable_timetable, CIF_train_uid, CIF_stp_indicator,
                         signalling_id, CIF_train_service_code, CIF_train_category, CIF_power_type,
-                        CIF_headcode, raw_json
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        CIF_headcode, raw_json, record_fingerprint
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         uid,
@@ -1633,6 +1652,7 @@ class RailDB:
                         CIF_power_type,
                         CIF_headcode,
                         raw_compact,
+                        fingerprint,
                     ),
                 )
                 
@@ -2148,6 +2168,13 @@ class RailDB:
 
     HEX_BYTE_ROWS = 256
     
+    def _ensure_cif_fingerprint_column(self) -> None:
+        """Add cif_schedules.record_fingerprint to databases created before it existed."""
+        with self._lock, self._conn:
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(cif_schedules)").fetchall()]
+            if "record_fingerprint" not in cols:
+                self._conn.execute("ALTER TABLE cif_schedules ADD COLUMN record_fingerprint TEXT")
+
     def _ensure_hex_byte_table(self) -> None:
         """Truncate and repopulate hex_byte (00..FF) if it has fewer than 256 rows."""
 

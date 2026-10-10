@@ -372,3 +372,63 @@ def test_insert_cif_schedule_missing_required_fields():
 if __name__ == '__main__':
     import pytest
     pytest.main([__file__, '-v'])
+
+
+def _dedup_record(platform="1"):
+    return {
+        "CIF_train_uid": "C99999",
+        "schedule_start_date": "2026-02-11",
+        "CIF_stp_indicator": "P",
+        "schedule_segment": {
+            "signalling_id": "2C90",
+            "schedule_location": [
+                {"tiploc_code": "START", "platform": platform},
+                {"tiploc_code": "END"},
+            ],
+        },
+    }
+
+
+def _loc_ids(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT id, platform FROM cif_schedule_locations WHERE uid='C99999' ORDER BY location_index"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_cif_duplicate_skipped_and_changed_updates(tmp_path):
+    for save_raw in (True, False):
+        db_path = str(tmp_path / f"dup_{save_raw}.db")
+        db = RailDB(db_path, save_raw_json=save_raw)
+        assert db.insert_cif_schedule(_dedup_record(), "SE")
+        before = _loc_ids(db_path)
+        assert db.insert_cif_schedule(_dedup_record(), "SE")
+        assert _loc_ids(db_path) == before  # same row ids: not replaced
+
+        assert db.insert_cif_schedule(_dedup_record(platform="2"), "SE")
+        after = _loc_ids(db_path)
+        assert [r[1] for r in after] == ["2", None]
+        assert after[0][0] != before[0][0]
+        db.close()
+
+
+def test_cif_fingerprint_migration_old_schema(tmp_path):
+    db_path = str(tmp_path / "old.db")
+    db = RailDB(db_path, save_raw_json=False)
+    db.close()
+    conn = sqlite3.connect(db_path)
+    conn.execute("ALTER TABLE cif_schedules DROP COLUMN record_fingerprint")
+    conn.commit()
+    conn.close()
+
+    db = RailDB(db_path, save_raw_json=False)
+    db.close()
+    db = RailDB(db_path, save_raw_json=False)  # idempotent
+    assert db.insert_cif_schedule(_dedup_record(), "SE")
+    before = _loc_ids(db_path)
+    assert db.insert_cif_schedule(_dedup_record(), "SE")
+    assert _loc_ids(db_path) == before
+    db.close()
