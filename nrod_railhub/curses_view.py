@@ -397,7 +397,7 @@ def _collect_berth_signal_lines(db: Optional[RailDB], td_area_filter: Optional[L
         return ["No data source available."]
     areas = [a.strip().upper() for a in (td_area_filter or []) if a and a.strip()]
     area = areas[0] if len(areas) == 1 else None
-    rows = db.get_td_signal_function_state(td_area=area, limit=500)
+    rows = db.get_td_signal_function_state(td_area=area, limit=50)
     if not rows:
         return ["No decoded signal state yet (waiting for S-class messages or SMART import)."]
 
