@@ -237,6 +237,7 @@ When `--db-path` and `--web-port` are set, a Flask web server starts on `http://
 - **`/`** - Latest TD state (all trains or filtered by area)
 - **`/train? area=XX&hc=YYYY`** - Drill-down for specific train
 - **`/events`** - Recent TD events (last 500)
+- **`/signal-mappings`** - Berth / Signal page; includes a station-to-station corridor explorer (`from_station`, `to_station`, `direction`, `date`; see `docs/corridor_explorer.md`)
 
 The dashboard uses raw HTML (no templates) for simplicity. Runs in daemon thread. 
 
