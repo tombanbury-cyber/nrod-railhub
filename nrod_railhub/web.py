@@ -3191,10 +3191,50 @@ filterInput.addEventListener('input', updateFilter);
             return {"status": "error", "message": "Topology edge not found"}, 404
         return {"status": "ok", "edge_id": edge_id}
 
+    _corridor_cache: Dict[str, Any] = {}
+
+    def _corridor_section_html() -> str:
+        """Station-to-station corridor explorer (form plus results when both stations are given)."""
+        from . import corridor
+
+        from_text = request.args.get("from_station", "").strip()[:80]
+        to_text = request.args.get("to_station", "").strip()[:80]
+        direction = request.args.get("direction", "both").strip().lower()
+        if direction not in {"both", "up", "down", "a_to_b", "b_to_a"}:
+            direction = "both"
+        date_text = request.args.get("date", "").strip()
+        on_date = datetime.now().date()
+        if date_text:
+            try:
+                on_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+            except ValueError:
+                date_text = ""
+        if not _corridor_cache.get("suggestions"):
+            try:
+                _corridor_cache["suggestions"] = [
+                    (r["crs"], r["name"]) for r in q(
+                        "SELECT DISTINCT crs, name FROM corpus_locations WHERE crs IS NOT NULL AND crs<>'' "
+                        "ORDER BY name LIMIT 3000"
+                    )
+                ]
+            except sqlite3.Error:
+                _corridor_cache["suggestions"] = []
+        suggestions = _corridor_cache["suggestions"]
+        parts = [corridor.render_corridor_form(from_text, to_text, direction, date_text, suggestions)]
+        if from_text or to_text:
+            try:
+                result = corridor.build_corridor(conn, from_text, to_text, on_date)
+                parts.append(corridor.render_corridor_html(result, direction))
+            except sqlite3.Error:
+                logger.exception("Web dashboard: Error building corridor view")
+                parts.append("<p style='color:red'>Unable to build the corridor view; see the log for details.</p>")
+        return "".join(parts)
+
     @app.get("/signal-mappings")
     def signal_mappings():
         """Signal mappings enquiry screen showing berth-signal relationships."""
         body = ["<h2>Signal Mappings Enquiry</h2>"]
+        body.append(_corridor_section_html())
         
         # Check if mapper tables exist
         try:
