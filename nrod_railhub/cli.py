@@ -20,6 +20,13 @@ from .models import NR_HOST, NR_PORT, TOPIC_VSTP, TOPIC_TRUST, TOPIC_TD, utc_now
 from .resolvers import LocationResolver, SmartResolver, ScheduleResolver, TOCResolver
 from .views import HumanView
 from .database import RailDB
+from .db_backend import (
+    DatabaseConfigError,
+    DatabaseDriverError,
+    normalize_provider,
+    redact_target,
+    resolve_database_target,
+)
 from .listener import Listener
 from .web import start_web_dashboard
 from .logging_config import setup_logger, get_logger
@@ -169,10 +176,25 @@ def start_connection_watchdog(
     return t
 
 
+def resolve_db_target(args: argparse.Namespace) -> Optional[str]:
+    """Return the database target (SQLite path or PostgreSQL URL) for the parsed args.
+
+    Raises DatabaseConfigError / DatabaseDriverError for unusable settings.
+    """
+    provider = getattr(args, "db_provider", None)
+    db_url = getattr(args, "db_url", None)
+    if db_url and normalize_provider(provider) != "postgres":
+        raise DatabaseConfigError(
+            "db_url is only used with db_provider: postgres; set db_provider: postgres "
+            "(or use db_path for SQLite)"
+        )
+    return resolve_database_target(provider, getattr(args, "db_path", None), db_url)
+
+
 def connect_and_run(args: argparse.Namespace) -> None:
 
-    # Get db_path early so we can pass it to resolvers for persistence
-    db_path = str(pathlib.Path(args.db_path).expanduser()) if args.db_path else None
+    # Get the database target early so we can pass it to resolvers for persistence
+    db_path = resolve_db_target(args)
     startup_log_queue = None
     output_queue = None
     trust_queue = None
@@ -246,8 +268,9 @@ def connect_and_run(args: argparse.Namespace) -> None:
         save_raw_json=getattr(args, "save_raw_json", True),
     ) if db_path else None
     
-    imported = db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
-    logger.info("SMART serial map rows imported: %s", imported)
+    if db is not None:
+        imported = db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
+        logger.info("SMART serial map rows imported: %s", imported)
 
     # Optional: load planned timetable (SCHEDULE feed) so we can fill ?? fields.
     #
@@ -333,7 +356,7 @@ def connect_and_run(args: argparse.Namespace) -> None:
                 daemon=True
             )
         t.start()
-        logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {db_path}")
+        logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {redact_target(db_path)}")
     conn.set_listener("", listener)
 
     logger.info("Connecting (wait=True) ...")
@@ -520,10 +543,19 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--trace-headcode", action="store_true",
                help="Extra debug: show when VSTP/TRUST/TD mention the filtered headcode/uid")
+    p.add_argument("--db-provider", default=None, metavar="{sqlite,postgres}",
+                   help="Database backend for state/event storage (default: sqlite)")
     p.add_argument("--db-path", default=None,
-                   help="SQLite database path for state/event storage (required)")
+                   help="SQLite database path for state/event storage "
+                        "(required when --db-provider is sqlite)")
+    p.add_argument("--db-url", default=None,
+                   help="PostgreSQL connection URL, e.g. postgresql://USER@HOST:5432/DBNAME "
+                        "(required when --db-provider is postgres; may also be given via the "
+                        "NROD_RAILHUB_DB_URL environment variable; prefer that or the config "
+                        "file over the command line so the password is not visible in the "
+                        "process list)")
     p.add_argument("--web-port", type=int, default=8088,
-                   help="Start tiny web dashboard on this port (requires --db-path)")
+                   help="Start tiny web dashboard on this port (requires a configured database)")
     p.add_argument("--disable-mapper", dest="enable_mapper", action="store_false", default=True,
                    help="Disable berth-to-signal correlation mapper (enabled by default)")
     
@@ -573,8 +605,12 @@ def parse_args() -> argparse.Namespace:
         p.error("--user is required (either via command-line or config file)")
     if not args.password:
         p.error("--password is required (either via command-line or config file)")
-    if not args.db_path:
-        p.error("--db-path is required (either via command-line or config file)")
+    try:
+        db_target = resolve_db_target(args)
+    except (DatabaseConfigError, DatabaseDriverError) as e:
+        p.error(str(e))
+    if not db_target:
+        p.error("--db-path is required for the sqlite provider (either via command-line or config file)")
     
     return args
 

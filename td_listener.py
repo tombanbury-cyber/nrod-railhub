@@ -579,6 +579,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     if args.config:
         config = load_config_file(args.config)
+        if str(config.get("db_provider") or "sqlite").strip().lower() not in ("sqlite", "sqlite3"):
+            p.error(
+                "td_listener.py only supports the sqlite database provider; "
+                f"config file sets db_provider: {config.get('db_provider')}"
+            )
         parser_defaults = {action.dest: action.default for action in p._actions}
         args = merge_config_with_args(args, config, parser_defaults)
 

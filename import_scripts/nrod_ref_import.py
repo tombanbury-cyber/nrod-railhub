@@ -3,7 +3,8 @@
 nrod_ref_import.py
 
 Download and import Network Rail Open Data supporting reference files
-CORPUS and SMART into a SQLite database.
+CORPUS and SMART into a SQLite database (or a PostgreSQL database when given a
+postgresql:// URL).
 
 - CORPUS expected top-level keys:
     {"TIPLOCDATA":[...], "STANOXDATA":[...], "CRSDATA":[...]}
@@ -25,10 +26,12 @@ import gzip
 import hashlib
 import json
 import os
-import sqlite3
 import sys
 import urllib.request
 from typing import Any, Dict, Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from nrod_railhub.db_backend import connect, is_postgres_target, redact_target  # noqa: E402
 
 
 URL_TEMPLATE = "https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type={type}"
@@ -135,17 +138,24 @@ def read_json_file(path: str) -> Any:
     return data
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
+def connect_db(db_path: str) -> Any:
+    """Open the SQLite file or PostgreSQL URL given by ``db_path``."""
+    conn = connect(db_path)
+    if not conn.is_postgres:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+# PostgreSQL primary keys cannot contain NULLs, so corpus_tiploc is keyed by a
+# unique expression index over COALESCEd columns instead, which gives the
+# upsert below a stable conflict target.
+_TIPLOC_IDENTITY = "(COALESCE(tiploc, ''), COALESCE(stanox, ''), COALESCE(crs, ''), COALESCE(nlc, -1))"
+
+
+def init_schema(conn: Any) -> None:
+    schema = """
         CREATE TABLE IF NOT EXISTS meta_downloads (
             dataset        TEXT PRIMARY KEY,
             source_url     TEXT NOT NULL,
@@ -236,22 +246,35 @@ def init_schema(conn: sqlite3.Connection) -> None:
         LEFT JOIN corpus_stanox st ON st.stanox = s.stanox
         LEFT JOIN corpus_tiploc tl ON tl.stanox = s.stanox;
         """
-    )
+    if conn.is_postgres:
+        for sqlite_form, postgres_form in (
+            ("PRIMARY KEY (tiploc, stanox, crs, nlc)",
+             "CHECK (tiploc IS NOT NULL OR stanox IS NOT NULL OR crs IS NOT NULL OR nlc IS NOT NULL)"),
+            ("CREATE VIEW IF NOT EXISTS", "CREATE OR REPLACE VIEW"),
+        ):
+            if sqlite_form not in schema:
+                raise RuntimeError(f"PostgreSQL schema adaptation failed: {sqlite_form!r} not found")
+            schema = schema.replace(sqlite_form, postgres_form)
+        schema += f"\n        CREATE UNIQUE INDEX IF NOT EXISTS idx_corpus_tiploc_identity ON corpus_tiploc {_TIPLOC_IDENTITY};\n"
+    conn.executescript(schema)
     conn.commit()
 
 
-def record_download_meta(conn: sqlite3.Connection, dataset: str, url: str, path: str) -> None:
+def record_download_meta(conn: Any, dataset: str, url: str, path: str) -> None:
     conn.execute(
         """
-        INSERT OR REPLACE INTO meta_downloads(dataset, source_url, downloaded_at, file_path, sha256)
+        INSERT INTO meta_downloads(dataset, source_url, downloaded_at, file_path, sha256)
         VALUES (?,?,?,?,?)
+        ON CONFLICT(dataset) DO UPDATE SET
+            source_url=excluded.source_url, downloaded_at=excluded.downloaded_at,
+            file_path=excluded.file_path, sha256=excluded.sha256
         """,
         (dataset, url, utc_now_iso(), os.path.abspath(path), sha256_file(path)),
     )
     conn.commit()
 
 
-def import_corpus(conn: sqlite3.Connection, corpus_json: Any) -> Dict[str, int]:
+def import_corpus(conn: Any, corpus_json: Any) -> Dict[str, int]:
     if not isinstance(corpus_json, dict):
         raise ValueError("CORPUS JSON must be an object with TIPLOCDATA/STANOXDATA/CRSDATA keys")
 
@@ -272,11 +295,15 @@ def import_corpus(conn: sqlite3.Connection, corpus_json: Any) -> Dict[str, int]:
             nlcdesc = norm(r.get("NLCDESC"))
             nlcdesc16 = norm(r.get("NLCDESC16"))
 
+            conflict_target = _TIPLOC_IDENTITY if conn.is_postgres else "(tiploc, stanox, crs, nlc)"
             cur.execute(
-                """
-                INSERT OR REPLACE INTO corpus_tiploc
+                f"""
+                INSERT INTO corpus_tiploc
                 (tiploc, stanox, crs, nlc, uic, nlcdesc, nlcdesc16, raw_json)
                 VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT {conflict_target} DO UPDATE SET
+                    uic=excluded.uic, nlcdesc=excluded.nlcdesc,
+                    nlcdesc16=excluded.nlcdesc16, raw_json=excluded.raw_json
                 """,
                 (
                     tiploc,
@@ -304,7 +331,8 @@ def import_corpus(conn: sqlite3.Connection, corpus_json: Any) -> Dict[str, int]:
             if not stanox:
                 continue
             cur.execute(
-                "INSERT OR REPLACE INTO corpus_stanox (stanox, name, raw_json) VALUES (?,?,?)",
+                "INSERT INTO corpus_stanox (stanox, name, raw_json) VALUES (?,?,?) "
+                "ON CONFLICT(stanox) DO UPDATE SET name=excluded.name, raw_json=excluded.raw_json",
                 (stanox, name, json.dumps(r, ensure_ascii=False)),
             )
             counts["STANOXDATA"] += 1
@@ -320,7 +348,8 @@ def import_corpus(conn: sqlite3.Connection, corpus_json: Any) -> Dict[str, int]:
             if not crs:
                 continue
             cur.execute(
-                "INSERT OR REPLACE INTO corpus_crs (crs, name, raw_json) VALUES (?,?,?)",
+                "INSERT INTO corpus_crs (crs, name, raw_json) VALUES (?,?,?) "
+                "ON CONFLICT(crs) DO UPDATE SET name=excluded.name, raw_json=excluded.raw_json",
                 (crs, name, json.dumps(r, ensure_ascii=False)),
             )
             counts["CRSDATA"] += 1
@@ -329,7 +358,7 @@ def import_corpus(conn: sqlite3.Connection, corpus_json: Any) -> Dict[str, int]:
     return counts
 
 
-def import_smart(conn: sqlite3.Connection, smart_json: Any) -> int:
+def import_smart(conn: Any, smart_json: Any) -> int:
     if not isinstance(smart_json, dict):
         raise ValueError("SMART JSON must be an object with BERTHDATA key")
 
@@ -350,10 +379,11 @@ def import_smart(conn: sqlite3.Connection, smart_json: Any) -> int:
 
         cur.execute(
             """
-            INSERT OR IGNORE INTO smart_steps
+            INSERT INTO smart_steps
             (td, step_type, event, from_berth, to_berth, stanox, stanme,
              platform, route, from_line, to_line, berthoffset, comment, raw_json)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 td,
@@ -381,7 +411,7 @@ def import_smart(conn: sqlite3.Connection, smart_json: Any) -> int:
     return n
 
 
-def maybe_rebuild(conn: sqlite3.Connection) -> None:
+def maybe_rebuild(conn: Any) -> None:
     # Drop tables/views and recreate schema
     conn.executescript(
         """
@@ -417,7 +447,7 @@ def run_imports(
     High-level function to run imports for specified datasets.
     
     Args:
-        db_path: Path to SQLite database
+        db_path: SQLite database path or postgresql:// URL
         datasets: List of dataset names (e.g. ["CORPUS", "SMART"])
         username: Network Rail username
         password: Network Rail password
@@ -442,7 +472,10 @@ def run_imports(
     if rebuild:
         maybe_rebuild(conn)
     
-    summary = {"db_path": os.path.abspath(db_path), "datasets": {}}
+    summary = {
+        "db_path": redact_target(db_path) if is_postgres_target(db_path) else os.path.abspath(db_path),
+        "datasets": {},
+    }
     
     for ds in datasets:
         url = URL_TEMPLATE.format(type=ds)
@@ -472,9 +505,9 @@ def run_imports(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Download and import Network Rail CORPUS + SMART reference data into SQLite."
+        description="Download and import Network Rail CORPUS + SMART reference data into SQLite or PostgreSQL."
     )
-    ap.add_argument("--db", default="nrod_ref.sqlite", help="SQLite database path (default: nrod_ref.sqlite)")
+    ap.add_argument("--db", default="nrod_ref.sqlite", help="SQLite database path or postgresql:// URL (default: nrod_ref.sqlite)")
     ap.add_argument("--username", required=True, help="Network Rail Open Data username (email)")
     ap.add_argument("--password", required=True, help="Network Rail Open Data password")
     ap.add_argument("--outdir", default="nrod_ref_downloads", help="Download directory")

@@ -335,14 +335,13 @@ class SmartResolver:
         # from different threads (e.g., STOMP receiver thread). The connection is read-only
         # and SQLite supports concurrent reads safely.
         if db_path:
-            import sqlite3
             import logging
+            from .db_backend import connect, redact_target
             logger = logging.getLogger(__name__)
             try:
-                self._db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5.0)
-                self._db_conn.row_factory = sqlite3.Row
+                self._db_conn = connect(db_path, named_rows=True, timeout=5.0)
             except Exception as e:
-                logger.warning(f"SmartResolver: Failed to connect to database {db_path}: {e}")
+                logger.warning(f"SmartResolver: Failed to connect to database {redact_target(db_path)}: {e}")
                 self._db_conn = None  # Silently fail; fallback won't work but SMART will
 
     def load_or_download(

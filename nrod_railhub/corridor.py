@@ -26,6 +26,8 @@ import sqlite3
 import urllib.parse
 from typing import Any, Dict, Iterable, List, Optional
 
+from .db_backend import DB_ERRORS
+
 # (from CRS, to CRS) -> direction of travel from first to second ("down" = away from London).
 # This is curated reference knowledge, not derived from the database.
 KNOWN_DIRECTION_HINTS: Dict[tuple, str] = {
@@ -43,6 +45,9 @@ DIRECTION_LABELS = {
 
 
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    table_exists = getattr(conn, "table_exists", None)
+    if table_exists is not None:
+        return table_exists(name)
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone()
@@ -300,7 +305,7 @@ def build_corridor(
     # --- CIF ---------------------------------------------------------------
     try:
         schedules = find_corridor_schedules(conn, sa["tiplocs"], sb["tiplocs"], on_date)
-    except sqlite3.Error as e:
+    except DB_ERRORS as e:
         schedules = []
         result["gaps"].append(f"CIF schedule data could not be read: {e}")
     if not schedules:
@@ -317,7 +322,7 @@ def build_corridor(
     for sched in schedules:
         try:
             locs = _load_schedule_detail(conn, sched)
-        except sqlite3.Error:
+        except DB_ERRORS:
             continue
         details[(sched["uid"], sched["schedule_start_date"])] = locs
         lo, hi = sorted((sched["idx_a"], sched["idx_b"]))
@@ -383,7 +388,7 @@ def build_corridor(
                         "td_area": r["td_area"], "berth": r["berth"], "stanox": r["stanox"],
                         "platform": r["platform"], "station": r["stanme"],
                     })
-        except sqlite3.Error as e:
+        except DB_ERRORS as e:
             result["gaps"].append(f"SMART berth data could not be read: {e}")
     # SMART rows can repeat a berth for several steps; keep one row per area/berth.
     uniq: Dict[tuple, dict] = {}
@@ -426,7 +431,7 @@ def build_corridor(
                         if r["last_ts"] and (not mv["last_seen"] or r["last_ts"] > mv["last_seen"]):
                             mv["last_seen"] = r["last_ts"]
                         mv["headcodes"].update(h.upper() for h in (r["hcs"] or "").split(",") if h)
-        except sqlite3.Error as e:
+        except DB_ERRORS as e:
             result["gaps"].append(f"TD berth movements could not be read: {e}")
         if not movements:
             result["gaps"].append(
@@ -462,7 +467,7 @@ def build_corridor(
                         [area] + chunk + chunk,
                     ):
                         sclass[(r["td_area"], r["from_berth"], r["to_berth"])] = dict(r)
-    except sqlite3.Error as e:
+    except DB_ERRORS as e:
         result["gaps"].append(f"Signal evidence could not be read: {e}")
 
     def _signals_for(mv: dict) -> List[dict]:
@@ -542,7 +547,7 @@ def build_corridor(
                     "FROM td_state WHERE " + " OR ".join(conds) + " ORDER BY last_time_ms DESC LIMIT 1000",
                     params,
                 ).fetchall()
-    except sqlite3.Error as e:
+    except DB_ERRORS as e:
         result["gaps"].append(f"Live TD state could not be read: {e}")
     unscheduled_live: List[dict] = []
     for r in live_rows:
@@ -582,7 +587,7 @@ def build_corridor(
                         [area] + chunk + chunk,
                     ):
                         result["topology"].append(dict(r))
-    except sqlite3.Error as e:
+    except DB_ERRORS as e:
         result["gaps"].append(f"Topology data could not be read: {e}")
     if berths and not result["topology"]:
         result["gaps"].append(

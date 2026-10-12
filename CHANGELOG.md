@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional PostgreSQL database provider** alongside the default SQLite backend
+  - New `db_provider` / `db_url` config keys and `--db-provider` / `--db-url` CLI options (CLI overrides YAML)
+  - New `nrod_railhub/db_backend.py` provider boundary; `requirements-postgres.txt` optional extra
+  - Docs: `docs/database_providers.md`. Switching providers does not migrate data; `td_listener.py` and the visualisation API stay SQLite-only
 - **Proper logging system** with configurable log levels
   - New `logging_config.py` module with centralized logger setup
   - `--log-level` CLI argument with options: verbose (debug), info, warning, error

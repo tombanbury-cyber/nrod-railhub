@@ -216,8 +216,12 @@ python3 nrod_railhub.py --user USER --password PASS --interactive --db-path rail
 
 | Option | Description |
 |--------|-------------|
-| `--db-path PATH` | SQLite database file path (required) |
-| `--web-port PORT` | Start web dashboard on this port (requires --db-path) |
+| `--db-provider {sqlite,postgres}` | Database backend (default: sqlite); see [docs/database_providers.md](docs/database_providers.md) |
+| `--db-path PATH` | SQLite database file path (required for the sqlite provider) |
+| `--db-url URL` | PostgreSQL URL (required for the postgres provider; or set `NROD_RAILHUB_DB_URL`) |
+| `--web-port PORT` | Start web dashboard on this port (requires a configured database) |
+
+PostgreSQL support is optional (`pip install -r requirements-postgres.txt`) and does not migrate existing SQLite data. `td_listener.py` and the visualisation API remain SQLite-only.
 
 ### Data Sources
 

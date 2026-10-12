@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite database persistence for nrod_railhub."""
+"""Database persistence for nrod_railhub (SQLite by default, optional PostgreSQL)."""
 
 from __future__ import annotations
 
@@ -7,19 +7,22 @@ import csv
 import hashlib
 import json
 import pathlib
-import sqlite3
 import threading
 import time
 from statistics import median, pvariance
 from typing import Optional, Any, Dict, List, Tuple
 
+from .db_backend import connect, redact_target
 from .logging_config import get_logger
 from .models import expand_td_signal_bytes, safe_int
 
 logger = get_logger("database")
 
 class RailDB:
-    """SQLite persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
+    """SQLite/PostgreSQL persistence for TD/TRUST/VSTP with a 'current state' view plus event history.
+
+    The provider is chosen from the ``path`` target: a filesystem path opens SQLite,
+    a ``postgresql://`` URL opens PostgreSQL (see :mod:`nrod_railhub.db_backend`).
     
     Features:
     - TD state/events: Current train positions and historical berth/signal events
@@ -42,7 +45,7 @@ class RailDB:
         """Initialize RailDB.
         
         Args:
-            path: Path to SQLite database file
+            path: SQLite database file path, or a postgresql:// URL for PostgreSQL
             enable_mapper: If True, enables automatic berth-to-signal correlation
             retain_trust_days: Days to retain TRUST messages (None = no cleanup)
             retain_vstp_days: Days to retain VSTP schedules (None = no cleanup)
@@ -53,12 +56,15 @@ class RailDB:
         """
         self.path = path
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = None
-        self._conn.execute("PRAGMA journal_mode=WAL;")
-        self._conn.execute("PRAGMA synchronous=NORMAL;")
-        self._conn.execute("PRAGMA busy_timeout=5000;")
-        self._conn.execute("PRAGMA temp_store=MEMORY;")
+        self._conn = connect(self.path, timeout=30.0)
+        self.provider = self._conn.provider
+        self.is_postgres = self._conn.is_postgres
+        if not self.is_postgres:
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
+            self._conn.execute("PRAGMA busy_timeout=5000;")
+            self._conn.execute("PRAGMA temp_store=MEMORY;")
+        logger.info("Database provider=%s target=%s", self.provider, redact_target(self.path))
         self._init_schema()
         self.ensure_sclass_correlation_schema()
         self.ensure_physical_signal_schema()
@@ -93,6 +99,13 @@ class RailDB:
         # Start retention thread if enabled
         if retain_trust_days or retain_vstp_days or retain_cif_days:
             self._start_retention_thread()
+
+    # PostgreSQL forbids NULLs in primary keys, whereas SQLite (historically) allows them.
+    # corpus_locations rows may legitimately lack a TIPLOC, STANOX or CRS, so on PostgreSQL the
+    # identity is a unique index over the NULL-coalesced columns instead of a primary key.
+    _CORPUS_LOCATIONS_PK_SQLITE = "PRIMARY KEY (tiploc, stanox, crs)"
+    _CORPUS_LOCATIONS_PK_POSTGRES = "CHECK (tiploc IS NOT NULL OR stanox IS NOT NULL OR crs IS NOT NULL)"
+    _CORPUS_LOCATIONS_IDENTITY = "(COALESCE(tiploc, ''), COALESCE(stanox, ''), COALESCE(crs, ''))"
 
     def _init_schema(self) -> None:
         with self._conn:
@@ -147,7 +160,7 @@ class RailDB:
                 );
                 
                 CREATE TABLE IF NOT EXISTS td_berth_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     ts_ms INTEGER NOT NULL,
                     ts_iso TEXT NOT NULL,
                     td_area TEXT,
@@ -161,7 +174,7 @@ class RailDB:
                 CREATE INDEX IF NOT EXISTS idx_td_berth_area_hc_ts ON td_berth_events(td_area, headcode, ts_ms);
 
                 CREATE TABLE IF NOT EXISTS td_berth_movements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     source_event_id INTEGER UNIQUE,
                     ts_ms INTEGER NOT NULL,
                     ts_iso TEXT NOT NULL,
@@ -179,7 +192,7 @@ class RailDB:
                     ON td_berth_movements(td_area, headcode, ts_ms, from_berth, to_berth);
                 
                 CREATE TABLE IF NOT EXISTS td_signal_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     ts_ms INTEGER NOT NULL,
                     ts_iso TEXT NOT NULL,
                     td_area TEXT,
@@ -191,7 +204,7 @@ class RailDB:
                 CREATE INDEX IF NOT EXISTS idx_td_signal_area_ts ON td_signal_events(td_area, ts_ms);
 
                 CREATE TABLE IF NOT EXISTS td_signal_bytes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     timestamp TEXT NOT NULL,
                     area_id TEXT NOT NULL,
                     address_int INTEGER NOT NULL,
@@ -217,7 +230,7 @@ class RailDB:
                 CREATE INDEX IF NOT EXISTS idx_td_sclass_state_area_ts ON td_sclass_state(td_area, last_seen_ts);
 
                 CREATE TABLE IF NOT EXISTS td_sclass_changes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     ts_ms INTEGER NOT NULL,
                     ts_iso TEXT NOT NULL,
                     td_area TEXT NOT NULL,
@@ -258,7 +271,7 @@ class RailDB:
 
                 -- New table: store fully decoded TRUST messages (history)
                 CREATE TABLE IF NOT EXISTS trust_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     train_id TEXT,
                     actual_timestamp_ms INTEGER,
                     gbtt_timestamp_ms INTEGER,
@@ -285,8 +298,8 @@ class RailDB:
                     reporting_stanox TEXT,
                     auto_expected INTEGER,
                     raw_json TEXT,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__,
                     UNIQUE(train_id, actual_timestamp_ms)
                 );
                 CREATE INDEX IF NOT EXISTS idx_trust_messages_train_id ON trust_messages(train_id);
@@ -310,15 +323,15 @@ class RailDB:
                     CIF_power_type TEXT,
                     sender_organisation TEXT,
                     raw_json TEXT,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__,
                     PRIMARY KEY (uid, schedule_start_date)
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_schedules_uid ON vstp_schedules(uid);
 
                 -- VSTP: per-location rows
                 CREATE TABLE IF NOT EXISTS vstp_schedule_locations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     uid TEXT NOT NULL,
                     schedule_start_date TEXT NOT NULL,
                     segment_index INTEGER NOT NULL,
@@ -334,7 +347,7 @@ class RailDB:
                     CIF_line TEXT,
                     CIF_engineering_allowance TEXT,
                     CIF_performance_allowance TEXT,
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__
                 );
                 CREATE INDEX IF NOT EXISTS idx_vstp_loc_uid ON vstp_schedule_locations(uid);
                 
@@ -357,8 +370,8 @@ class RailDB:
                     CIF_headcode TEXT,
                     raw_json TEXT,
                     record_fingerprint TEXT,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__,
                     PRIMARY KEY (uid, schedule_start_date, CIF_stp_indicator)
                 );
                 CREATE INDEX IF NOT EXISTS idx_cif_schedules_uid ON cif_schedules(uid);
@@ -368,7 +381,7 @@ class RailDB:
                 
                 -- CIF: per-location rows
                 CREATE TABLE IF NOT EXISTS cif_schedule_locations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     uid TEXT NOT NULL,
                     schedule_start_date TEXT NOT NULL,
                     segment_index INTEGER NOT NULL,
@@ -386,7 +399,7 @@ class RailDB:
                     CIF_path TEXT,
                     CIF_engineering_allowance TEXT,
                     CIF_performance_allowance TEXT,
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__
                 );
                 CREATE INDEX IF NOT EXISTS idx_cif_loc_uid ON cif_schedule_locations(uid);
                 CREATE INDEX IF NOT EXISTS idx_cif_loc_tiploc ON cif_schedule_locations(tiploc);
@@ -400,12 +413,12 @@ class RailDB:
                     sector_code TEXT,
                     atoc_code TEXT,
                     sector TEXT,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
                 
                 -- TOC-TD Area Mappings: Many-to-many relationships between TOCs and TD areas
                 CREATE TABLE IF NOT EXISTS toc_td_areas (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     toc_code TEXT NOT NULL,
                     td_area TEXT NOT NULL,
                     is_primary INTEGER NOT NULL DEFAULT 0,
@@ -414,7 +427,7 @@ class RailDB:
                     effective_from TEXT,
                     effective_to TEXT,
                     created_by TEXT,
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__,
                     notes TEXT,
                     UNIQUE(toc_code, td_area)
                 );
@@ -429,8 +442,8 @@ class RailDB:
                     nlc TEXT,
                     name TEXT NOT NULL,
                     raw_json TEXT,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    PRIMARY KEY (tiploc, stanox, crs)
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    __CORPUS_LOCATIONS_PK__
                 );
                 CREATE INDEX IF NOT EXISTS idx_corpus_tiploc ON corpus_locations(tiploc) WHERE tiploc IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_corpus_stanox ON corpus_locations(stanox) WHERE stanox IS NOT NULL;
@@ -450,12 +463,20 @@ class RailDB:
                     berthoffset INTEGER,
                     comment TEXT,
                     raw_json TEXT,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
                     PRIMARY KEY (td_area, berth)
                 );
                 CREATE INDEX IF NOT EXISTS idx_smart_stanox ON smart_berths(stanox) WHERE stanox IS NOT NULL;
-                """
+                """.replace(
+                    "__CORPUS_LOCATIONS_PK__",
+                    self._CORPUS_LOCATIONS_PK_POSTGRES if self.is_postgres else self._CORPUS_LOCATIONS_PK_SQLITE,
+                )
             )
+            if self.is_postgres:
+                self._conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_corpus_locations_identity "
+                    f"ON corpus_locations {self._CORPUS_LOCATIONS_IDENTITY}"
+                )
 
     def _start_retention_thread(self) -> None:
         """Start background thread for periodic data retention."""
@@ -566,7 +587,7 @@ class RailDB:
                     mask = 1 << bit
                     if not (changed_bits & mask):
                         continue
-                    cursor.execute(
+                    change_id = cursor.execute_returning_id(
                         """
                         INSERT INTO td_sclass_changes(
                             ts_ms, ts_iso, td_area, msg_type, address, byte_offset, bit,
@@ -589,7 +610,7 @@ class RailDB:
                     )
                     changes.append(
                         {
-                            "id": cursor.lastrowid,
+                            "id": change_id,
                             "ts_ms": ts_ms,
                             "ts_iso": ts_iso,
                             "td_area": area,
@@ -784,11 +805,10 @@ class RailDB:
         
         with self._lock, self._conn:
             #logger.error(f"insert_td_berth_event: {ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr}")
-            cursor = self._conn.execute(
+            event_id = self._conn.execute_returning_id(
                 "INSERT INTO td_berth_events(ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth, descr) VALUES (?,?,?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, headcode, msg_type, from_berth, to_berth, descr),
             )
-            event_id = cursor.lastrowid
             movement = self._extract_td_berth_movement(
                 {
                     "id": event_id,
@@ -923,12 +943,14 @@ class RailDB:
             ),
         }
 
-    def _insert_td_berth_movement(self, movement: Dict[str, Any]) -> None:
-        self._conn.execute(
+    def _insert_td_berth_movement(self, movement: Dict[str, Any]) -> bool:
+        """Insert a normalized movement; returns False when it already existed."""
+        cursor = self._conn.execute(
             """
-            INSERT OR IGNORE INTO td_berth_movements(
+            INSERT INTO td_berth_movements(
                 source_event_id, ts_ms, ts_iso, td_area, headcode, from_berth, to_berth, source_msg_type, evidence_json
             ) VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 movement["source_event_id"],
@@ -942,6 +964,7 @@ class RailDB:
                 movement["evidence_json"],
             ),
         )
+        return cursor.rowcount == 1
 
     def rebuild_td_berth_movements(self, td_area: Optional[str] = None) -> dict:
         """Rebuild normalized C-Class berth movements from td_berth_events."""
@@ -990,9 +1013,7 @@ class RailDB:
                     state_store,
                 )
                 if movement:
-                    before = self._conn.total_changes
-                    self._insert_td_berth_movement(movement)
-                    if self._conn.total_changes > before:
+                    if self._insert_td_berth_movement(movement):
                         inserted += 1
 
             if td_area_filter:
@@ -1011,11 +1032,10 @@ class RailDB:
         raw_message_id: Optional[int] = None
         with self._lock, self._conn:
             #logger.error(f"insert_td_signal_event: {ts_ms, ts_iso, area, msg_type, address, data}")
-            cursor = self._conn.execute(
+            raw_message_id = self._conn.execute_returning_id(
                 "INSERT INTO td_signal_events(ts_ms, ts_iso, td_area, msg_type, address, data) VALUES (?,?,?,?,?,?)",
                 (ts_ms, ts_iso, area, msg_type, address, data or ""),
             )
-            raw_message_id = cursor.lastrowid
 
             if msg_type in ("SG", "SH"):
                 self._insert_td_signal_bytes(ts_iso, area, msg_type, address, data or "", raw_message_id)
@@ -1179,11 +1199,11 @@ class RailDB:
                 VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(td_area, from_berth, to_berth, address)
                 DO UPDATE SET
-                    score = score + excluded.score,
-                    obs_count = obs_count + 1,
-                    last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
-                    last_seen_utc = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_utc ELSE last_seen_utc END,
-                    last_data = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_data ELSE last_data END
+                    score = berth_signal_scores.score + excluded.score,
+                    obs_count = berth_signal_scores.obs_count + 1,
+                    last_seen_ts = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_seen_ts ELSE berth_signal_scores.last_seen_ts END,
+                    last_seen_utc = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_seen_utc ELSE berth_signal_scores.last_seen_utc END,
+                    last_data = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_data ELSE berth_signal_scores.last_data END
                 """,
                 score_row
             )
@@ -1256,7 +1276,7 @@ class RailDB:
 
         - Coerces timestamps (strings of epoch ms) to integers.
         - Coerces boolean-like strings ("true"/"false", "1"/"0") to integers 1/0.
-        - Inserts using INSERT OR IGNORE to avoid duplicate rows for the same (train_id, actual_timestamp_ms).
+        - Inserts using ON CONFLICT DO NOTHING to avoid duplicate rows for the same (train_id, actual_timestamp_ms).
         """
         if not isinstance(body, dict):
             return
@@ -1313,13 +1333,14 @@ class RailDB:
             try:
                 self._conn.execute(
                     """
-                    INSERT OR IGNORE INTO trust_messages (
+                    INSERT INTO trust_messages (
                         train_id, actual_timestamp_ms, gbtt_timestamp_ms, planned_timestamp_ms,
                         planned_event_type, event_type, event_source, correction_ind, offroute_ind,
                         direction_ind, line_ind, platform, route, train_service_code, division_code,
                         toc_id, toc_code, timetable_variation, variation_status, next_report_stanox, next_report_run_time,
                         train_terminated, delay_monitoring_point, reporting_stanox, auto_expected, raw_json
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         train_id,
@@ -1442,16 +1463,32 @@ class RailDB:
         with self._lock, self._conn:
             cur = self._conn.cursor()
             try:
-                # Upsert schedule header (use INSERT OR REPLACE to update)
+                # Upsert schedule header (replace the existing row, resetting created_at_*)
                 if uid and schedule_start_date:
                     cur.execute(
                         """
-                        INSERT OR REPLACE INTO vstp_schedules (
+                        INSERT INTO vstp_schedules (
                             uid, schedule_start_date, schedule_end_date, transaction_type, train_status,
                             schedule_days_runs, applicable_timetable, CIF_train_uid, CIF_stp_indicator,
                             signalling_id, CIF_train_service_code, CIF_train_category, CIF_power_type,
                             sender_organisation, raw_json
                         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(uid, schedule_start_date) DO UPDATE SET
+                            schedule_end_date=excluded.schedule_end_date,
+                            transaction_type=excluded.transaction_type,
+                            train_status=excluded.train_status,
+                            schedule_days_runs=excluded.schedule_days_runs,
+                            applicable_timetable=excluded.applicable_timetable,
+                            CIF_train_uid=excluded.CIF_train_uid,
+                            CIF_stp_indicator=excluded.CIF_stp_indicator,
+                            signalling_id=excluded.signalling_id,
+                            CIF_train_service_code=excluded.CIF_train_service_code,
+                            CIF_train_category=excluded.CIF_train_category,
+                            CIF_power_type=excluded.CIF_power_type,
+                            sender_organisation=excluded.sender_organisation,
+                            raw_json=excluded.raw_json,
+                            created_at_utc=__NOW_ISO__,
+                            created_at_ts=__NOW_MS__
                         """,
                         (
                             uid,
@@ -1625,15 +1662,32 @@ class RailDB:
                 if existing and existing[0] == fingerprint:
                     return True
 
-                # Upsert schedule header (use INSERT OR REPLACE to update)
+                # Upsert schedule header (replace the existing row, resetting created_at_*)
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO cif_schedules (
+                    INSERT INTO cif_schedules (
                         uid, schedule_start_date, schedule_end_date, toc_code, transaction_type, train_status,
                         schedule_days_runs, applicable_timetable, CIF_train_uid, CIF_stp_indicator,
                         signalling_id, CIF_train_service_code, CIF_train_category, CIF_power_type,
                         CIF_headcode, raw_json, record_fingerprint
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(uid, schedule_start_date, CIF_stp_indicator) DO UPDATE SET
+                        schedule_end_date=excluded.schedule_end_date,
+                        toc_code=excluded.toc_code,
+                        transaction_type=excluded.transaction_type,
+                        train_status=excluded.train_status,
+                        schedule_days_runs=excluded.schedule_days_runs,
+                        applicable_timetable=excluded.applicable_timetable,
+                        CIF_train_uid=excluded.CIF_train_uid,
+                        signalling_id=excluded.signalling_id,
+                        CIF_train_service_code=excluded.CIF_train_service_code,
+                        CIF_train_category=excluded.CIF_train_category,
+                        CIF_power_type=excluded.CIF_power_type,
+                        CIF_headcode=excluded.CIF_headcode,
+                        raw_json=excluded.raw_json,
+                        record_fingerprint=excluded.record_fingerprint,
+                        created_at_utc=__NOW_ISO__,
+                        created_at_ts=__NOW_MS__
                     """,
                     (
                         uid,
@@ -1753,7 +1807,7 @@ class RailDB:
                     sector_code=excluded.sector_code,
                     atoc_code=excluded.atoc_code,
                     sector=excluded.sector,
-                    updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    updated_at_utc=__NOW_ISO__
                 """,
                 (toc_code, toc_name, business_code, sector_code, atoc_code, sector),
             )
@@ -1889,7 +1943,7 @@ class RailDB:
                     effective_to=excluded.effective_to,
                     created_by=excluded.created_by,
                     notes=excluded.notes,
-                    created_at_ts=strftime('%s','now') * 1000
+                    created_at_ts=__NOW_MS__
                 """,
                 (toc_code, td_area, 1 if is_primary else 0, source, confidence,
                  effective_from, effective_to, created_by, notes),
@@ -2080,7 +2134,7 @@ class RailDB:
         with self._conn:
             self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS berth_signal_observations (
-                    id INTEGER PRIMARY KEY,
+                    id __PK__,
                     td_area TEXT NOT NULL,
                     step_event_id INTEGER,
                     step_timestamp INTEGER,
@@ -2093,8 +2147,8 @@ class RailDB:
                     data TEXT,
                     dt_ms INTEGER NOT NULL,
                     weight REAL NOT NULL,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__
                 );
                 
                 CREATE INDEX IF NOT EXISTS idx_bso_edge
@@ -2125,19 +2179,19 @@ class RailDB:
                 CREATE TABLE IF NOT EXISTS mapper_config (
                     key TEXT PRIMARY KEY,
                     value INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
             """)
             # Set default mapper parameters if not exists
             with self._conn:
                 self._conn.execute("""
-                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('pre_ms', 1000)
+                    INSERT INTO mapper_config (key, value) VALUES ('pre_ms', 1000) ON CONFLICT(key) DO NOTHING
                 """)
                 self._conn.execute("""
-                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('post_ms', 5000)
+                    INSERT INTO mapper_config (key, value) VALUES ('post_ms', 5000) ON CONFLICT(key) DO NOTHING
                 """)
                 self._conn.execute("""
-                    INSERT OR IGNORE INTO mapper_config (key, value) VALUES ('tau_ms', 2500)
+                    INSERT INTO mapper_config (key, value) VALUES ('tau_ms', 2500) ON CONFLICT(key) DO NOTHING
                 """)
     
     def get_mapper_config(self) -> dict:
@@ -2151,13 +2205,13 @@ class RailDB:
         """Update mapper configuration parameters."""
         with self._lock, self._conn:
             self._conn.execute("""
-                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'
+                UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='pre_ms'
             """, (pre_ms,))
             self._conn.execute("""
-                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'
+                UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='post_ms'
             """, (post_ms,))
             self._conn.execute("""
-                UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'
+                UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='tau_ms'
             """, (tau_ms,))
 
     @staticmethod
@@ -2171,8 +2225,7 @@ class RailDB:
     def _ensure_cif_fingerprint_column(self) -> None:
         """Add cif_schedules.record_fingerprint to databases created before it existed."""
         with self._lock, self._conn:
-            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(cif_schedules)").fetchall()]
-            if "record_fingerprint" not in cols:
+            if "record_fingerprint" not in self._conn.table_columns("cif_schedules"):
                 self._conn.execute("ALTER TABLE cif_schedules ADD COLUMN record_fingerprint TEXT")
 
     def _ensure_hex_byte_table(self) -> None:
@@ -2253,10 +2306,15 @@ class RailDB:
 
             with self._lock, self._conn:
                 self._conn.executemany(
-                    "INSERT OR REPLACE INTO smart_serial_bit_map("
+                    "INSERT INTO smart_serial_bit_map("
                     "td_area, interlocking, byte_dec, byte_hex, bit, bit_mask, "
                     "section, function_type, function, location_context"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(td_area, byte_dec, bit) DO UPDATE SET "
+                    "interlocking=excluded.interlocking, byte_hex=excluded.byte_hex, "
+                    "bit_mask=excluded.bit_mask, section=excluded.section, "
+                    "function_type=excluded.function_type, function=excluded.function, "
+                    "location_context=excluded.location_context",
                     rows,
                 )
         except Exception as e:
@@ -2275,11 +2333,11 @@ class RailDB:
                 CREATE TABLE IF NOT EXISTS sclass_correlation_config (
                     key TEXT PRIMARY KEY,
                     value INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
 
                 CREATE TABLE IF NOT EXISTS td_sclass_movement_observations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     td_area TEXT NOT NULL,
                     movement_event_id INTEGER NOT NULL,
                     movement_ts_ms INTEGER NOT NULL,
@@ -2299,8 +2357,8 @@ class RailDB:
                     dt_ms INTEGER NOT NULL,
                     weight REAL NOT NULL,
                     evidence_json TEXT NOT NULL,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    created_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    created_at_ts INTEGER NOT NULL DEFAULT __NOW_MS__
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_td_sclass_movement_obs_unique
                     ON td_sclass_movement_observations(movement_event_id, change_event_id);
@@ -2331,14 +2389,14 @@ class RailDB:
                     associated_bits_json TEXT NOT NULL,
                     last_seen_ts_ms INTEGER NOT NULL,
                     last_seen_iso TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
                     PRIMARY KEY (td_area, from_berth, to_berth)
                 );
                 CREATE INDEX IF NOT EXISTS idx_td_sclass_movement_scores_area_ts
                     ON td_sclass_movement_scores(td_area, last_seen_ts_ms);
 
                 CREATE TABLE IF NOT EXISTS td_sclass_lab_annotations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     relation_type TEXT NOT NULL,
                     td_area TEXT NOT NULL,
                     address TEXT,
@@ -2350,7 +2408,7 @@ class RailDB:
                     source TEXT,
                     confidence REAL,
                     notes TEXT,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_td_sclass_lab_annotations_unique
                     ON td_sclass_lab_annotations(
@@ -2366,7 +2424,7 @@ class RailDB:
                 ("tau_ms", 60000),
             ):
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO sclass_correlation_config (key, value) VALUES (?, ?)",
+                    "INSERT INTO sclass_correlation_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
                     (key, value),
                 )
 
@@ -2376,7 +2434,7 @@ class RailDB:
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS physical_signal_mappings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     td_area TEXT NOT NULL,
                     address TEXT NOT NULL,
                     byte_offset INTEGER NOT NULL DEFAULT 0,
@@ -2393,8 +2451,8 @@ class RailDB:
                     evidence_json TEXT,
                     notes TEXT,
                     supersedes_id INTEGER,
-                    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    created_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
                 CREATE INDEX IF NOT EXISTS idx_physical_signal_mappings_area_status
                     ON physical_signal_mappings(td_area, verification_status, updated_at_utc DESC);
@@ -2418,7 +2476,7 @@ class RailDB:
                     attributes_json TEXT NOT NULL DEFAULT '{}',
                     verification_status TEXT NOT NULL DEFAULT 'inferred',
                     provenance TEXT NOT NULL DEFAULT 'manual',
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__)
                 );
                 CREATE INDEX IF NOT EXISTS idx_topology_nodes_area_type
                     ON topology_nodes(td_area, node_type, verification_status);
@@ -2435,7 +2493,7 @@ class RailDB:
                     provenance TEXT NOT NULL DEFAULT 'manual',
                     reviewed_by TEXT,
                     review_notes TEXT,
-                    updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    updated_at_utc TEXT NOT NULL DEFAULT (__NOW_ISO__),
                     UNIQUE(td_area, from_node_id, relationship, to_node_id, hypothesis)
                 );
                 CREATE INDEX IF NOT EXISTS idx_topology_edges_area_from
@@ -2444,7 +2502,7 @@ class RailDB:
                     ON topology_edges(td_area, to_node_id, verification_status);
 
                 CREATE TABLE IF NOT EXISTS topology_edge_evidence (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id __PK__,
                     edge_id TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     source_id TEXT NOT NULL,
@@ -2490,7 +2548,7 @@ class RailDB:
     ) -> int:
         """Insert a new physical signal mapping revision."""
         with self._lock, self._conn:
-            cursor = self._conn.execute(
+            return self._conn.execute_returning_id(
                 """
                 INSERT INTO physical_signal_mappings(
                     td_area, address, byte_offset, bit, from_berth, to_berth,
@@ -2518,7 +2576,6 @@ class RailDB:
                     supersedes_id,
                 ),
             )
-            return int(cursor.lastrowid)
 
     def update_physical_signal_mapping(
         self,
@@ -2568,7 +2625,7 @@ class RailDB:
         if supersedes_id is not None:
             updates.append("supersedes_id=?")
             params.append(supersedes_id)
-        updates.append("updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+        updates.append("updated_at_utc=__NOW_ISO__")
         params.append(mapping_id)
 
         if len(updates) == 1:
@@ -2801,15 +2858,15 @@ class RailDB:
         """Update S-class correlation configuration parameters."""
         with self._lock, self._conn:
             self._conn.execute(
-                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'",
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='pre_ms'",
                 (pre_ms,),
             )
             self._conn.execute(
-                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'",
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='post_ms'",
                 (post_ms,),
             )
             self._conn.execute(
-                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'",
+                "UPDATE sclass_correlation_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='tau_ms'",
                 (tau_ms,),
             )
 
@@ -3252,18 +3309,18 @@ class RailDB:
             prepared_rows.append((tiploc, stanox, crs, nlc, name, raw_json))
 
         count = 0
+        conflict_target = self._CORPUS_LOCATIONS_IDENTITY if self.is_postgres else "(tiploc, stanox, crs)"
         with self._lock, self._conn:
             for tiploc, stanox, crs, nlc, name, raw_json in prepared_rows:
-                # Use COALESCE to handle NULLs in PRIMARY KEY
                 self._conn.execute(
-                    """
+                    f"""
                     INSERT INTO corpus_locations (tiploc, stanox, crs, nlc, name, raw_json)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(tiploc, stanox, crs) DO UPDATE SET
+                    ON CONFLICT{conflict_target} DO UPDATE SET
                         nlc=excluded.nlc,
                         name=excluded.name,
                         raw_json=excluded.raw_json,
-                        updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                        updated_at_utc=__NOW_ISO__
                     """,
                     (tiploc, stanox, crs, nlc, name, raw_json)
                 )
@@ -3326,7 +3383,7 @@ class RailDB:
                             berthoffset=excluded.berthoffset,
                             comment=excluded.comment,
                             raw_json=excluded.raw_json,
-                            updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                            updated_at_utc=__NOW_ISO__
                         """,
                         (td_area, berth, stanox, platform, event, stanme, 
                          step_type, from_line, to_line, berthoffset, comment, raw_json)
@@ -3500,7 +3557,7 @@ class RailDB:
                     WHEN topology_nodes.verification_status='confirmed' THEN topology_nodes.provenance
                     ELSE excluded.provenance
                 END,
-                updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                updated_at_utc=__NOW_ISO__
             """,
             (
                 node_id,
@@ -3576,7 +3633,10 @@ class RailDB:
                 hypothesis, confidence, verification_status, provenance
             ) VALUES (?,?,?,?,?,?,?,?,?)
             ON CONFLICT(edge_id) DO UPDATE SET
-                confidence=MAX(topology_edges.confidence, excluded.confidence),
+                confidence=CASE
+                    WHEN excluded.confidence > topology_edges.confidence THEN excluded.confidence
+                    ELSE topology_edges.confidence
+                END,
                 verification_status=CASE
                     WHEN topology_edges.verification_status='inferred'
                     THEN excluded.verification_status
@@ -3586,7 +3646,7 @@ class RailDB:
                     WHEN topology_edges.verification_status='inferred' THEN excluded.provenance
                     ELSE topology_edges.provenance
                 END,
-                updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                updated_at_utc=__NOW_ISO__
             """,
             (
                 edge_id, td_area, from_node_id, relationship, to_node_id,
@@ -3596,9 +3656,10 @@ class RailDB:
         if source_type and source_id is not None:
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO topology_edge_evidence(
+                INSERT INTO topology_edge_evidence(
                     edge_id, source_type, source_id, evidence_json
                 ) VALUES (?,?,?,?)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     edge_id,
@@ -3653,7 +3714,7 @@ class RailDB:
                 """
                 UPDATE topology_edges
                 SET verification_status=?, reviewed_by=?, review_notes=?,
-                    updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    updated_at_utc=__NOW_ISO__
                 WHERE edge_id=?
                 """,
                 (status, reviewer, notes, edge_id),
@@ -3685,7 +3746,7 @@ class RailDB:
                 """
                 DELETE FROM topology_nodes
                 WHERE provenance='reconstruction' AND verification_status='inferred'
-                  AND (? IS NULL OR td_area=?)
+                  AND (CAST(? AS TEXT) IS NULL OR td_area=?)
                   AND NOT EXISTS (
                       SELECT 1 FROM topology_edges e
                       WHERE e.from_node_id=topology_nodes.node_id

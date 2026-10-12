@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import sys
 from typing import Optional
+
+from .db_backend import DB_ERRORS, connect, is_postgres_target, redact_target
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +20,19 @@ NON_EMPTY_TABLES = ("corpus_tiploc", "smart_steps")
 
 
 def reference_data_present(db_path: str) -> bool:
-    """Return True if all reference tables exist and the main ones contain rows."""
-    if not db_path or not os.path.exists(db_path):
+    """Return True if all reference tables exist and the main ones contain rows.
+
+    ``db_path`` is a SQLite file path or a PostgreSQL URL.
+    """
+    if not db_path:
+        return False
+    if not is_postgres_target(db_path) and not os.path.exists(db_path):
         return False
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect(db_path)
         try:
             for table in REQUIRED_TABLES:
-                exists = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                ).fetchone()
-                if not exists:
+                if not conn.table_exists(table):
                     return False
                 if table in NON_EMPTY_TABLES and conn.execute(
                     f"SELECT 1 FROM {table} LIMIT 1"
@@ -37,7 +40,7 @@ def reference_data_present(db_path: str) -> bool:
                     return False
         finally:
             conn.close()
-    except sqlite3.Error:
+    except DB_ERRORS:
         return False
     return True
 
@@ -48,19 +51,21 @@ def ensure_reference_data(
     password: Optional[str],
     outdir: Optional[str] = None,
 ) -> bool:
-    """Ensure CORPUS/SMART tables exist in db_path, importing them if missing.
+    """Ensure CORPUS/SMART tables exist in db_path (SQLite file or PostgreSQL URL),
+    importing them if missing.
 
     Never raises; returns True if reference data is available afterwards.
     """
     if not db_path:
         return False
+    shown = redact_target(db_path)
     if reference_data_present(db_path):
-        logger.info("Reference data already present in %s; skipping import", db_path)
+        logger.info("Reference data already present in %s; skipping import", shown)
         return True
     if not username or not password:
         logger.warning(
             "Reference tables missing in %s and no Network Rail credentials supplied; "
-            "skipping automatic import (use --user/--password)", db_path,
+            "skipping automatic import (use --user/--password)", shown,
         )
         return False
     try:
@@ -69,8 +74,14 @@ def ensure_reference_data(
             from nrod_ref_import import run_imports
         finally:
             sys.path.pop(0)
-        outdir = outdir or os.path.join(os.path.dirname(os.path.abspath(db_path)), "nrod_ref_downloads")
-        logger.info("Importing CORPUS and SMART reference data into %s ...", db_path)
+        if outdir is None:
+            base = (
+                os.path.expanduser("~/.cache/openraildata")
+                if is_postgres_target(db_path)
+                else os.path.dirname(os.path.abspath(db_path))
+            )
+            outdir = os.path.join(base, "nrod_ref_downloads")
+        logger.info("Importing CORPUS and SMART reference data into %s ...", shown)
         run_imports(
             db_path=db_path,
             datasets=["CORPUS", "SMART"],
