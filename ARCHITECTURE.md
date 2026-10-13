@@ -94,7 +94,14 @@ headcode_by_uid: Dict[uid, headcode]
 - State lost on restart (mitigated by SQLite persistence)
 - No historical queries (use RailDB for that)
 
-### 3. RailDB (SQLite Persistence)
+### 3. RailDB (SQLite or PostgreSQL Persistence)
+
+`RailDB`, the web dashboard and the reference importers open connections through
+`nrod_railhub/db_backend.py`, which selects SQLite (default) or PostgreSQL from
+`db_provider`/`db_path`/`db_url` and hides the SQL differences (placeholders,
+generated IDs, upserts, timestamp defaults, transactions). See
+[docs/database_providers.md](docs/database_providers.md). The schema below is
+shown in SQLite syntax.
 
 **Schema:**
 
@@ -418,7 +425,8 @@ Main Thread
 - **Complexity:** Extra dependencies, configuration overhead
 - **Startup time:** Flask is instant, Django takes seconds
 
-### Why SQLite instead of PostgreSQL?
+### Why SQLite by default (and optional PostgreSQL)?
+- **Both supported:** PostgreSQL is selectable via `db_provider: postgres` for longer-term storage
 - **Single user:** No need for client-server architecture
 - **Portability:** Self-contained database file
 - **Performance:** WAL mode provides excellent concurrent read/write

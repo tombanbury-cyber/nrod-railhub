@@ -25,6 +25,7 @@ from typing import List, Dict, Any, Optional
 from flask import Flask, request, redirect
 
 from .database import RailDB
+from .db_backend import DB_ERRORS, connect, is_postgres_target
 from .logging_config import get_logger
 from .interesting import classify_interesting_train, format_location
 
@@ -32,11 +33,12 @@ logger = get_logger("web")
 
 def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = None, log_queue: Optional["queue.Queue[str]"] = None) -> None:
     app = Flask(__name__)
-    db_path = str(pathlib.Path(db_path).expanduser())
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    if not is_postgres_target(db_path):
+        db_path = str(pathlib.Path(db_path).expanduser())
+    conn = connect(db_path, named_rows=True)
     rail_db = RailDB(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000;")
+    if not conn.is_postgres:
+        conn.execute("PRAGMA busy_timeout=5000;")
     
     # Store config path for reading/writing
     _config_path = str(pathlib.Path(config_path).expanduser()) if config_path else None
@@ -673,9 +675,9 @@ filterInput.addEventListener('input', updateFilter);
                     # Save config if requested
                     if save_mapper_config:
                         cursor = conn.cursor()
-                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='pre_ms'", (pre_ms,))
-                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='post_ms'", (post_ms,))
-                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key='tau_ms'", (tau_ms,))
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='pre_ms'", (pre_ms,))
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='post_ms'", (post_ms,))
+                        cursor.execute("UPDATE mapper_config SET value=?, updated_at_utc=__NOW_ISO__ WHERE key='tau_ms'", (tau_ms,))
                         conn.commit()
                         body.append("<p style='color:green'><b>Mapper configuration saved to database</b></p>")
                     
@@ -683,7 +685,8 @@ filterInput.addEventListener('input', updateFilter);
                     from .mapper import process_batch_for_mapper
                     from datetime import timezone
                     
-                    # Delete existing scores
+                    # Delete existing scores (the rebuild below commits or rolls back as a unit)
+                    conn.begin()
                     cursor = conn.cursor()
                     if td_area_filter:
                         cursor.execute("DELETE FROM berth_signal_scores WHERE td_area=?", (td_area_filter,))
@@ -794,11 +797,11 @@ filterInput.addEventListener('input', updateFilter);
                                         VALUES (?,?,?,?,?,?,?,?)
                                         ON CONFLICT(td_area, from_berth, to_berth, address)
                                         DO UPDATE SET
-                                            score = score + excluded.score,
-                                            obs_count = obs_count + 1,
-                                            last_seen_ts = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_ts ELSE last_seen_ts END,
-                                            last_seen_utc = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_seen_utc ELSE last_seen_utc END,
-                                            last_data = CASE WHEN excluded.last_seen_ts > last_seen_ts THEN excluded.last_data ELSE last_data END
+                                            score = berth_signal_scores.score + excluded.score,
+                                            obs_count = berth_signal_scores.obs_count + 1,
+                                            last_seen_ts = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_seen_ts ELSE berth_signal_scores.last_seen_ts END,
+                                            last_seen_utc = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_seen_utc ELSE berth_signal_scores.last_seen_utc END,
+                                            last_data = CASE WHEN excluded.last_seen_ts > berth_signal_scores.last_seen_ts THEN excluded.last_data ELSE berth_signal_scores.last_data END
                                     """, score_rows)
                                     
                                     total_inserted += len(score_rows)
@@ -816,6 +819,7 @@ filterInput.addEventListener('input', updateFilter);
                         body.append(f"<p>Deleted: {deleted} | Inserted: {total_inserted} | Observations: {total_observations}</p>")
                 
                 except Exception as e:
+                    conn.rollback()
                     logger.error(f"Web dashboard: Error during mapper rebuild: {e}")
                     body.append(f"<p style='color:red'>Error during rebuild: {e}</p>")
                     import traceback
@@ -3217,7 +3221,7 @@ filterInput.addEventListener('input', updateFilter);
                         "ORDER BY name LIMIT 3000"
                     )
                 ]
-            except sqlite3.Error:
+            except DB_ERRORS:
                 _corridor_cache["suggestions"] = []
         suggestions = _corridor_cache["suggestions"]
         parts = [corridor.render_corridor_form(from_text, to_text, direction, date_text, suggestions)]
@@ -3225,7 +3229,7 @@ filterInput.addEventListener('input', updateFilter);
             try:
                 result = corridor.build_corridor(conn, from_text, to_text, on_date)
                 parts.append(corridor.render_corridor_html(result, direction))
-            except sqlite3.Error:
+            except DB_ERRORS:
                 logger.exception("Web dashboard: Error building corridor view")
                 parts.append("<p style='color:red'>Unable to build the corridor view; see the log for details.</p>")
         return "".join(parts)
@@ -3238,8 +3242,7 @@ filterInput.addEventListener('input', updateFilter);
         
         # Check if mapper tables exist
         try:
-            table_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='berth_signal_scores'")
-            if not table_check:
+            if not conn.table_exists("berth_signal_scores"):
                 body.append("<p><i>Signal mappings table not found. Ensure database was created with mapper support enabled.</i></p>")
                 return render_page("Signal Mappings - NR RailHub", body, active="signal-mappings")
         except Exception as e:
@@ -3266,8 +3269,7 @@ filterInput.addEventListener('input', updateFilter);
         # Check if corpus_tiploc table exists for location enrichment
         corpus_exists = False
         try:
-            corpus_check = q("SELECT name FROM sqlite_master WHERE type='table' AND name='corpus_tiploc'")
-            corpus_exists = len(corpus_check) > 0
+            corpus_exists = conn.table_exists("corpus_tiploc")
         except Exception:
             pass
         

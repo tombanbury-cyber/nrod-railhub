@@ -132,7 +132,13 @@ manager = ConnectionManager()
 @contextmanager
 def get_conn():
     """Get database connection with row factory."""
-    db_path = Path(os.environ.get("NROD_RAILHUB_DB", str(DB_PATH)))
+    raw_target = os.environ.get("NROD_RAILHUB_DB", str(DB_PATH))
+    if raw_target.strip().lower().startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "The visualisation API only supports SQLite; NROD_RAILHUB_DB must be a SQLite "
+            "file path, not a PostgreSQL URL"
+        )
+    db_path = Path(raw_target)
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")

@@ -103,11 +103,21 @@ use_schedule: true  # Enable/disable timetable enrichment
 # ============================================================================
 # Persistent storage and web interface options
 
-# SQLite database path for state/event storage (required)
+# Database provider: sqlite (default) or postgres. See docs/database_providers.md
+# Switching provider does NOT migrate existing data.
+# db_provider: sqlite
+
+# SQLite database path for state/event storage (required for sqlite)
 # Use a single shared DB file for runtime + reference imports
 db_path: /path/to/railhub.db
 
-# Web dashboard port (requires db_path to be set)
+# PostgreSQL alternative (pip install -r requirements-postgres.txt):
+#   db_provider: postgres
+#   db_url: postgresql://railhub:${RAILHUB_DB_PASSWORD}@db.example:5432/railhub
+# ${VAR} is expanded from the environment; if db_url is omitted the
+# NROD_RAILHUB_DB_URL environment variable is used. db_path is ignored.
+
+# Web dashboard port (requires a configured database)
 # Set to null to disable web dashboard
 web_port: 8088
 

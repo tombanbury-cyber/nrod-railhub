@@ -329,6 +329,17 @@ Or configure syslog forwarding to ELK/Graylog.
 
 ## Database Maintenance
 
+### PostgreSQL provider
+
+For longer-term storage, set `db_provider: postgres` and `db_url` in the config
+file (or export `NROD_RAILHUB_DB_URL`) instead of `db_path`, after
+`pip install -r requirements-postgres.txt`. Create the database and a user with
+`CREATE` rights first; the schema is created on startup. Use `${VAR}` in `db_url`
+or the environment variable to keep the password out of the config file. Back up
+with `pg_dump`. The SQLite WAL notes below apply only to the sqlite provider, and
+switching providers does not migrate data. See
+[docs/database_providers.md](docs/database_providers.md).
+
 ### SQLite WAL Mode and Concurrent Access
 
 The application uses SQLite with WAL (Write-Ahead Logging) mode for better concurrency:

@@ -241,6 +241,10 @@ When `--db-path` and `--web-port` are set, a Flask web server starts on `http://
 
 The dashboard uses raw HTML (no templates) for simplicity. Runs in daemon thread. 
 
+## Database Providers
+
+SQLite is the default; PostgreSQL is optional (`db_provider: postgres` + `db_url`, CLI `--db-provider`/`--db-url`, env `NROD_RAILHUB_DB_URL`; extra deps in `requirements-postgres.txt`). All connections go through `nrod_railhub/db_backend.py` (`connect`, `resolve_database_target`): write portable SQL with `?` markers, `ON CONFLICT` upserts, `conn.execute_returning_id()` instead of `lastrowid`, `conn.table_exists()/table_columns()` instead of `sqlite_master`/`PRAGMA`, and the `__PK__`/`__NOW_ISO__`/`__NOW_MS__` schema tokens. `td_listener.py` and `app/visualisation` stay SQLite-only; switching providers does not migrate data. See `docs/database_providers.md`. Live PostgreSQL tests run only with `NROD_RAILHUB_TEST_POSTGRES_URL` set.
+
 ## Known Issues & Future Work
 
 - **Schedule loading**: Daily timetable is large (~300MB gzip); loads in background thread but can delay enrichment
