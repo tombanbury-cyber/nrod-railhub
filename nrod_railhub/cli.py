@@ -124,6 +124,7 @@ def _normalize_toc_td_areas(value: Any) -> Optional[list[tuple[str, str]]]:
     """Convert YAML's TOC-to-area mapping into normalized mapping pairs."""
     if value is None:
         return None
+    
     if not isinstance(value, dict):
         raise ValueError("toc_td_areas must be a YAML mapping of TOC codes to TD areas")
 
@@ -292,7 +293,8 @@ def connect_and_run(args: argparse.Namespace) -> None:
     ) if db_path else None
     
     if db is not None:
-        toc_td_areas = _normalize_toc_td_areas(getattr(args, "toc_td_areas", None))
+        #toc_td_areas = _normalize_toc_td_areas(getattr(args, "toc_td_areas", None))
+        toc_td_areas = getattr(args, "toc_td_areas", None)
         if toc_td_areas is not None:
             db.sync_toc_td_areas(toc_td_areas)
             logger.info("TOC-TD area mappings synchronized from YAML: %d", len(toc_td_areas))
