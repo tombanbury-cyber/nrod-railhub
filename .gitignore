@@ -50,3 +50,6 @@ build/
 config.yaml
 *_config.yaml
 test_config.yaml
+
+# YAML with credentials
+nrod.yaml

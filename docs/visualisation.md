@@ -30,6 +30,87 @@ The visualization PoC consists of:
                                            └──────────────────┘
 ```
 
+## Corridor Cards (berth-sequence cards)
+
+Open `http://127.0.0.1:8000/cards` to configure and view cards. Each card's
+**selected, ordered berth sequence is its source of truth**; the from/to stations
+only help discover and label candidate sequences.
+
+### Setup flow
+
+1. Enter from/to stations (name, CRS, STANOX or TIPLOC) and choose *Find candidate sequences*
+   (`GET /api/cards/suggest?from_station=..&to_station=..`; nothing is saved).
+2. Candidates are ranked with a method, confidence and per-berth provenance:
+   - `td_observed_movements`: shortest paths through observed `td_berth_movements`
+     (falling back to `td_berth_events`) from SMART berths of the first station to SMART berths
+     of the second, within one TD area. Confidence is `n/(n+2)` for the least-observed step `n`
+     (a heuristic, not a probability). Alternatives are found by excluding single steps of the best path.
+   - `historical_route_pattern`: only used when no observed path exists; berths/links not seen in
+     TD movements are marked `inferred`.
+   - If nothing is found, no sequence is invented and notes explain why. The count of CIF schedules
+     calling at both stations in order (`schedule_support`) is shown as supporting context only;
+     schedules are not mapped to berths.
+3. Pick a sequence, choose display options (stations, berth labels, occupancy, signals) and save.
+
+### Configuration storage
+
+Cards are stored under `visualisation_cards:` in the shared YAML (`nrod.yaml` in the project root, or
+the path in `NROD_RAILHUB_CONFIG`). Saving rewrites only that key and keeps other settings (written
+atomically, file permissions preserved; the API never returns other settings). PyYAML does not keep
+comments, so comments in the file are lost on save; an unreadable YAML file is never overwritten.
+When `NROD_RAILHUB_DB` is unset, the SQLite `db_path` from the same YAML is used (else `railhub.db`);
+`db_provider: postgres` is still unsupported by this service.
+
+### API
+
+`GET/POST /api/cards`, `GET/PUT/DELETE /api/cards/{id}`, and `GET /api/cards/{id}/state`.
+
+### Manual editing
+
+After choosing a candidate (or opening a saved card), berths can be reordered or removed. You can
+also import a train's observed chain (`GET /api/cards/chain?td_area=..&headcode=..`, all items
+`observed`), or add a berth by hand (always marked `inferred`, source `manual`). Edited sequences are
+saved with method `manual_edit:<original>`. This is the fallback when SMART/CORPUS data is missing.
+If `td_berth_movements` is sparse, backfill it with `RailDB.rebuild_td_berth_movements()` or let the
+listener run longer.
+
+### Live view
+
+The page polls `/api/cards/{id}/state` every 5 seconds. It reads persisted `td_state` (the listener's
+writes), so it does not depend on `POST /event`/WebSocket. The response includes a `revision`
+(max `td_berth_events` id, max `td_state` time and row count); passing `?since_revision=<rev>` returns
+`{"unchanged": true}` when nothing changed, and the page does a full refresh at least every 60 s so
+staleness ages stay current. A train occupies the berth in `to_berth` (else `from_berth`); each train
+reports `age_s`. Trains older than `max_age_s` (default 1800, `0` disables) are hidden and counted;
+trains outside the sequence are only counted. Solid borders are observed, dashed amber are inferred.
+
+### Security
+
+If `NROD_RAILHUB_VIS_TOKEN` is set, card create/update/delete require a bearer token in the `Authorization` header
+(the page prompts for it). Unset means open, as before; the service still allows any CORS origin, so
+bind it to localhost. Card saves take an advisory file lock (`<config>.lock`, POSIX) as well as the
+in-process lock.
+
+### Remaining limitations and possible resolutions
+
+- **Single TD area per sequence**: needs cross-area links (boundary berth map, or headcodes seen in two
+  areas close in time) and a search over `(area, berth)` nodes.
+- **Schedules don't rank routes**: map CIF/VSTP stops (TIPLOC -> STANOX) to SMART berth events and
+  score candidates by matching scheduled services.
+- **Heuristic confidence**: `n/(n+2)` on the least-seen step; alternatives avoid one step only. Weight
+  by recency/direction, use k-shortest paths, filter by SMART line, calibrate on held-out movements.
+- **Inferred gaps** come only from `headcode_route_patterns`; run `rebuild_route_patterns` regularly or
+  use `topology_edges`/S-class evidence.
+- **Occupancy** comes from `td_state` (not per-berth events), so cancels/clears are not modelled;
+  derive from the latest event per berth instead.
+- **Signals**: only reviewed mappings are listed; no live aspects until bit-to-aspect decoding in
+  `td_sclass_state`/`td_signal_bytes` is confirmed.
+- **Storage**: PyYAML drops comments (use `ruamel.yaml` or a DB table); SQLite only (port to
+  `db_backend.connect`); the main CLI ignores the `visualisation_cards` key.
+- **Push updates**: still polling; a listener-to-WebSocket/SSE publisher would remove the lag.
+- **UI**: no schematic rendering of candidates, no browser tests.
+- Station/platform labels need SMART (and CORPUS) data; otherwise raw berth ids are shown.
+
 ## Quick Start
 
 ### 1. Initialize the Database

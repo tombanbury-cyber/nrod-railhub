@@ -155,3 +155,9 @@ save_raw_json: true
 
 # Number of records to delete per batch (default: 1000)
 # retention_batch_size: 1000
+
+# ============================================================================
+# Visualisation cards (managed by the /cards page of the visualisation API)
+# ============================================================================
+# Saved automatically; comments in this file are not preserved when cards are saved.
+# visualisation_cards: []

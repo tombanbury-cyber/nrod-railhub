@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NROD RailHub - Corridor Cards</title>
+<style>
+  body{font-family:'Segoe UI',Tahoma,sans-serif;background:#1a1a1a;color:#e0e0e0;margin:0;padding:20px}
+  h1,h2{color:#4CAF50;margin:0 0 10px}
+  .wrap{max-width:1200px;margin:0 auto}
+  .panel{background:#2a2a2a;border-radius:6px;padding:15px;margin-bottom:20px}
+  label{margin-right:12px}
+  input[type=text]{background:#111;color:#e0e0e0;border:1px solid #555;padding:6px;border-radius:3px}
+  button{background:#4CAF50;color:#fff;border:0;padding:6px 12px;border-radius:3px;cursor:pointer;margin:2px}
+  button.danger{background:#c0392b}
+  .muted{color:#999;font-size:.85em}
+  .seq{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px;margin:10px 0}
+  .station{font-size:.8em;color:#9ec9ff;margin:6px 0 2px;width:100%}
+  .berth{min-width:64px;text-align:center;border:2px solid #4CAF50;border-radius:4px;padding:4px;background:#222}
+  .berth.inferred{border-style:dashed;border-color:#e6a23c}
+  .berth.occupied{background:#7a1f1f;border-color:#ff6b6b}
+  .berth .hc{font-weight:bold;color:#fff}
+  .berth .id{font-size:.75em;color:#aaa}
+  .sig{font-size:.75em;color:#e6a23c;align-self:center}
+  .cand{border:1px solid #444;border-radius:4px;padding:8px;margin:8px 0}
+  .tag{display:inline-block;padding:0 6px;border-radius:8px;font-size:.75em;margin-left:6px}
+  .tag.observed{background:#1e5e2c}.tag.inferred{background:#8a5a00}
+  .err{color:#ff8a80}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Corridor Cards</h1>
+  <p class="muted">Each card follows a saved, ordered berth sequence. Solid borders are observed in TD data;
+  dashed amber borders are inferred and not directly observed.</p>
+
+  <div id="cards-msg" class="muted"></div>
+  <div id="cards"></div>
+
+  <div class="panel">
+    <h2 id="form-title">New card</h2>
+    <div>
+      <label>Name <input type="text" id="name"></label>
+      <label>From station <input type="text" id="from" placeholder="name, CRS or STANOX"></label>
+      <label>To station <input type="text" id="to" placeholder="name, CRS or STANOX"></label>
+      <button id="suggest">Find candidate sequences</button>
+    </div>
+    <div id="notes" class="muted"></div>
+    <div>
+      <label>Or import from a train: TD area <input type="text" id="imp-area" size="3">
+      headcode <input type="text" id="imp-hc" size="5"></label>
+      <button id="import">Import observed chain</button>
+      <label>Add berth <input type="text" id="add-berth" size="6"> in area <input type="text" id="add-area" size="3"></label>
+      <button id="add">Add (marked inferred)</button>
+    </div>
+    <div id="editor"></div>
+    <div id="candidates"></div>
+    <div>
+      <label><input type="checkbox" id="o-stations" checked> Stations</label>
+      <label><input type="checkbox" id="o-berth_labels" checked> Berth labels</label>
+      <label><input type="checkbox" id="o-occupancy" checked> Occupancy</label>
+      <label><input type="checkbox" id="o-signals"> Signals (reviewed mappings only; no live aspect)</label>
+    </div>
+    <button id="save" disabled>Save card</button>
+    <button id="cancel" style="display:none">Cancel edit</button>
+    <span id="msg" class="err"></span>
+  </div>
+</div>
+<script>
+const API = '';
+let chosen = null;      // {sequence, method, confidence, evidence}
+let editingId = null;
+let candidates = [];
+const revs = {}, lastFull = {};
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+async function api(path, opts) {
+  opts = opts || {};
+  const tok = sessionStorage.getItem('railhubToken');
+  if (tok && opts.method && opts.method !== 'GET') opts.headers = Object.assign({'Authorization': 'Bearer ' + tok}, opts.headers || {});
+  const r = await fetch(API + path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401) { const t = prompt('API token required'); if (t) sessionStorage.setItem('railhubToken', t); }
+  if (!r.ok) throw new Error(body.detail ? JSON.stringify(body.detail) : r.statusText);
+  return body;
+}
+function berthBox(item, display, trains) {
+  const b = el('div', 'berth ' + (item.provenance || 'observed') + (trains && trains.length ? ' occupied' : ''));
+  b.title = (item.provenance || 'observed') + (item.source ? ' (' + item.source + ')' : '');
+  if (display.occupancy !== false && trains && trains.length) b.appendChild(el('div', 'hc', trains.map(t => t.headcode).join(',')));
+  if (display.berth_labels !== false) b.appendChild(el('div', 'id', item.berth));
+  if (item.platform && display.berth_labels !== false) b.appendChild(el('div', 'id', 'Pl ' + item.platform));
+  return b;
+}
+function renderSequence(container, items, display, signals) {
+  container.textContent = '';
+  let last = null;
+  items.forEach((it, i) => {
+    if (display.stations !== false && it.station && it.station !== last) {
+      container.appendChild(el('div', 'station', it.station)); last = it.station;
+    }
+    container.appendChild(berthBox(it, display, it.trains));
+    (signals || []).filter(s => s.after_index === i).forEach(s => container.appendChild(el('span', 'sig', '⚑ ' + s.signal)));
+  });
+}
+async function refreshCards() {
+  const host = document.getElementById('cards');
+  let list;
+  const cmsg = document.getElementById('cards-msg');
+  try { list = (await api('/api/cards')).cards; } catch (e) { cmsg.textContent = e.message; return; }
+  cmsg.textContent = list.length ? '' : 'No cards yet - create one below.';
+  const seen = new Set();
+  for (const card of list) {
+    seen.add(card.id);
+    let panel = document.getElementById('card-' + card.id);
+    if (!panel) {
+      panel = el('div', 'panel'); panel.id = 'card-' + card.id;
+      const h = el('h2', null, card.name); panel.appendChild(h);
+      panel.appendChild(el('div', 'muted meta'));
+      panel.appendChild(el('div', 'seq body'));
+      const edit = el('button', null, 'Edit'); edit.onclick = () => startEdit(card);
+      const del = el('button', 'danger', 'Delete');
+      del.onclick = async () => {
+        if (!confirm('Delete card?')) return;
+        try { await api('/api/cards/' + encodeURIComponent(card.id), {method: 'DELETE'}); panel.remove(); }
+        catch (e) { document.getElementById('msg').textContent = e.message; }
+      };
+      panel.appendChild(edit); panel.appendChild(del);
+      host.appendChild(panel);
+    }
+    try {
+      const fresh = Date.now() - (lastFull[card.id] || 0) > 60000;
+      const rev = fresh ? '' : (revs[card.id] ? '?since_revision=' + encodeURIComponent(revs[card.id]) : '');
+      const st = await api('/api/cards/' + encodeURIComponent(card.id) + '/state' + rev);
+      if (st.unchanged) continue;
+      revs[card.id] = st.revision; lastFull[card.id] = Date.now();
+      renderSequence(panel.querySelector('.body'), st.items, st.display, st.signals);
+      const n = st.items.filter(i => i.provenance === 'inferred').length;
+      panel.querySelector('.meta').textContent = [card.from_station, card.to_station].filter(Boolean).join(' → ')
+        + ' · ' + st.items.length + ' berths' + (n ? ' (' + n + ' inferred)' : '')
+        + (st.updated_at ? ' · TD updated ' + st.updated_at : '')
+        + (st.notes.length ? ' · ' + st.notes.join(' ') : '');
+    } catch (e) { panel.querySelector('.meta').textContent = e.message; }
+  }
+  host.querySelectorAll('.panel').forEach(p => { if (!seen.has(p.id.slice(5))) p.remove(); });
+}
+function renderCandidates() {
+  const host = document.getElementById('candidates'); host.textContent = '';
+  candidates.forEach((c, idx) => {
+    const box = el('div', 'cand');
+    const radio = el('input'); radio.type = 'radio'; radio.name = 'cand';
+    radio.onchange = () => { chosen = {sequence: c.sequence.map(i => ({berth: i.berth, td_area: i.td_area, provenance: i.provenance, source: i.source})),
+      method: c.method, confidence: c.confidence, evidence: {td_area: c.td_area}}; document.getElementById('save').disabled = false; renderEditor(); };
+    const lbl = el('label', null, ' ' + c.method + ' · area ' + c.td_area + ' · ' + c.sequence.length + ' berths · confidence ' + c.confidence);
+    lbl.prepend(radio); box.appendChild(lbl);
+    const inf = c.sequence.filter(i => i.provenance === 'inferred').length;
+    box.appendChild(el('span', 'tag ' + (inf ? 'inferred' : 'observed'), inf ? inf + ' inferred' : 'all observed'));
+    const seq = el('div', 'seq'); renderSequence(seq, c.sequence, {stations: true, berth_labels: true}, []); box.appendChild(seq);
+    host.appendChild(box);
+  });
+}
+document.getElementById('suggest').onclick = async () => {
+  const f = document.getElementById('from').value, t = document.getElementById('to').value;
+  chosen = null; document.getElementById('save').disabled = true;
+  try {
+    const r = await api('/api/cards/suggest?from_station=' + encodeURIComponent(f) + '&to_station=' + encodeURIComponent(t));
+    candidates = r.candidates;
+    const notes = r.notes.slice();
+    if (r.schedule_support !== undefined && r.schedule_support !== null) notes.push('Schedules calling at both stations in order: ' + r.schedule_support);
+    document.getElementById('notes').textContent = notes.join(' ');
+    renderCandidates();
+  } catch (e) { document.getElementById('notes').textContent = e.message; }
+};
+function renderEditor() {
+  const host = document.getElementById('editor'); host.textContent = '';
+  if (!chosen) return;
+  host.appendChild(el('div', 'muted', 'Chosen sequence (' + chosen.sequence.length + ' berths) - reorder or remove berths:'));
+  const seq = el('div', 'seq');
+  chosen.sequence.forEach((it, i) => {
+    const box = berthBox(it, {berth_labels: true}, []);
+    const mk = (t, fn) => { const b = el('button', null, t); b.onclick = fn; box.appendChild(b); };
+    mk('◀', () => { if (i > 0) { [chosen.sequence[i-1], chosen.sequence[i]] = [chosen.sequence[i], chosen.sequence[i-1]]; markManual(); } });
+    mk('▶', () => { if (i < chosen.sequence.length - 1) { [chosen.sequence[i+1], chosen.sequence[i]] = [chosen.sequence[i], chosen.sequence[i+1]]; markManual(); } });
+    mk('✕', () => { chosen.sequence.splice(i, 1); markManual(); });
+    seq.appendChild(box);
+  });
+  host.appendChild(seq);
+}
+function markManual() {
+  if (chosen.method && chosen.method.indexOf('manual') < 0) chosen.method = 'manual_edit:' + chosen.method;
+  document.getElementById('save').disabled = chosen.sequence.length === 0;
+  renderEditor();
+}
+document.getElementById('import').onclick = async () => {
+  const a = document.getElementById('imp-area').value.trim(), h = document.getElementById('imp-hc').value.trim();
+  try {
+    const r = await api('/api/cards/chain?td_area=' + encodeURIComponent(a) + '&headcode=' + encodeURIComponent(h));
+    document.getElementById('notes').textContent = r.notes.join(' ');
+    if (r.sequence.length) { chosen = {sequence: r.sequence, method: 'headcode_chain', confidence: null, evidence: {td_area: a, headcode: h}}; markManual(); chosen.method = 'headcode_chain'; }
+  } catch (e) { document.getElementById('notes').textContent = e.message; }
+};
+document.getElementById('add').onclick = () => {
+  const b = document.getElementById('add-berth').value.trim(), a = document.getElementById('add-area').value.trim();
+  if (!b || !a) return;
+  if (!chosen) chosen = {sequence: [], method: 'manual', confidence: null, evidence: {}};
+  chosen.sequence.push({berth: b, td_area: a, provenance: 'inferred', source: 'manual'});
+  markManual();
+};
+function opts() {
+  const o = {};
+  ['stations', 'berth_labels', 'occupancy', 'signals'].forEach(k => o[k] = document.getElementById('o-' + k).checked);
+  return o;
+}
+function startEdit(card) {
+  editingId = card.id;
+  document.getElementById('form-title').textContent = 'Edit card: ' + card.name;
+  document.getElementById('name').value = card.name;
+  document.getElementById('from').value = card.from_station || '';
+  document.getElementById('to').value = card.to_station || '';
+  const d = card.display || {};
+  ['stations', 'berth_labels', 'occupancy', 'signals'].forEach(k => document.getElementById('o-' + k).checked = d[k] === undefined ? k !== 'signals' : !!d[k]);
+  chosen = {sequence: card.sequence, method: (card.sequence_source || {}).method, confidence: (card.sequence_source || {}).confidence, evidence: (card.sequence_source || {}).evidence || {}};
+  document.getElementById('save').disabled = false;
+  renderEditor();
+  document.getElementById('cancel').style.display = '';
+  document.getElementById('notes').textContent = 'Keeping the saved sequence; search again to replace it.';
+}
+document.getElementById('cancel').onclick = () => { editingId = null; chosen = null; location.reload(); };
+document.getElementById('save').onclick = async () => {
+  const msg = document.getElementById('msg'); msg.textContent = '';
+  const name = document.getElementById('name').value.trim();
+  if (!name || !chosen) { msg.textContent = 'Name and a chosen sequence are required.'; return; }
+  const id = editingId || (name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'card') + '-' + Date.now().toString(36);
+  const body = {id, name, from_station: document.getElementById('from').value.trim() || null,
+    to_station: document.getElementById('to').value.trim() || null,
+    sequence: chosen.sequence, sequence_source: {method: chosen.method, confidence: chosen.confidence, evidence: chosen.evidence},
+    display: opts()};
+  try {
+    await api(editingId ? '/api/cards/' + encodeURIComponent(id) : '/api/cards', {method: editingId ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    location.reload();
+  } catch (e) { msg.textContent = e.message; }
+};
+refreshCards();
+setInterval(refreshCards, 5000);
+</script>
+</body>
+</html>

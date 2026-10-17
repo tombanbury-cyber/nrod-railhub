@@ -5,6 +5,7 @@ train visualization on schematic layouts.
 """
 
 import asyncio
+import hmac
 import html
 import json
 import os
@@ -13,12 +14,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, constr
 
+from . import cards as card_store
+from . import sequences
 from .route_inference import infer_train_chain
 
 
@@ -132,7 +135,12 @@ manager = ConnectionManager()
 @contextmanager
 def get_conn():
     """Get database connection with row factory."""
-    raw_target = os.environ.get("NROD_RAILHUB_DB", str(DB_PATH))
+    raw_target = os.environ.get("NROD_RAILHUB_DB")
+    if not raw_target:
+        try:
+            raw_target = card_store.configured_sqlite_path() or str(DB_PATH)
+        except card_store.CardConfigError as exc:
+            raise RuntimeError(str(exc)) from exc
     if raw_target.strip().lower().startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
             "The visualisation API only supports SQLite; NROD_RAILHUB_DB must be a SQLite "
@@ -1315,6 +1323,118 @@ async def delete_signal(signal_id: str):
         return {"status": "deleted", "id": signal_id}
 
 
+WRITE_TOKEN_ENV_VAR = "NROD_RAILHUB_VIS_TOKEN"
+
+
+def require_write_token(request: Request) -> None:
+    """If NROD_RAILHUB_VIS_TOKEN is set, card writes need a matching bearer token header."""
+    token = os.environ.get(WRITE_TOKEN_ENV_VAR, "")
+    if not token:
+        return
+    supplied = request.headers.get("authorization", "")
+    expected = "Bearer " + token
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+
+def _card_http_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=500, detail=f"card configuration unavailable: {exc}")
+
+
+@app.get("/cards", response_class=HTMLResponse)
+async def cards_page():
+    """Card setup and live view UI."""
+    return HTMLResponse((STATIC_PATH / "cards.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/cards")
+async def api_list_cards():
+    try:
+        return {"cards": card_store.list_cards(), "config_file": str(card_store.config_path())}
+    except card_store.CardConfigError as exc:
+        raise _card_http_error(exc) from exc
+
+
+@app.get("/api/cards/suggest")
+async def api_suggest_sequences(from_station: str, to_station: str):
+    """Rank candidate berth sequences between two stations (nothing is saved)."""
+    with get_conn() as conn:
+        try:
+            return sequences.suggest_sequences(conn, from_station, to_station)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+
+
+@app.get("/api/cards/chain")
+async def api_chain_sequence(td_area: str, headcode: str):
+    """Seed a manually edited sequence from one train's observed TD berth events."""
+    with get_conn() as conn:
+        try:
+            return sequences.chain_sequence(conn, td_area, headcode)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+
+
+@app.get("/api/cards/{card_id}")
+async def api_get_card(card_id: str):
+    try:
+        card = card_store.get_card(card_id)
+    except card_store.CardConfigError as exc:
+        raise _card_http_error(exc) from exc
+    if card is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    return card
+
+
+@app.post("/api/cards", status_code=201, dependencies=[Depends(require_write_token)])
+async def api_create_card(payload: card_store.CardPayload):
+    try:
+        return card_store.save_card(payload, create=True)
+    except KeyError:
+        raise HTTPException(status_code=409, detail="card already exists")
+    except (card_store.CardConfigError, OSError) as exc:
+        raise _card_http_error(exc) from exc
+
+
+@app.put("/api/cards/{card_id}", dependencies=[Depends(require_write_token)])
+async def api_update_card(card_id: str, payload: card_store.CardPayload):
+    if payload.id != card_id:
+        raise HTTPException(status_code=400, detail="card id in body does not match URL")
+    try:
+        return card_store.save_card(payload, create=False)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    except (card_store.CardConfigError, OSError) as exc:
+        raise _card_http_error(exc) from exc
+
+
+@app.delete("/api/cards/{card_id}", dependencies=[Depends(require_write_token)])
+async def api_delete_card(card_id: str):
+    try:
+        deleted = card_store.delete_card(card_id)
+    except (card_store.CardConfigError, OSError) as exc:
+        raise _card_http_error(exc) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="card not found")
+    return {"status": "deleted", "id": card_id}
+
+
+@app.get("/api/cards/{card_id}/state")
+async def api_card_state(card_id: str, max_age_s: int = 1800, since_revision: str | None = None):
+    """Live occupancy for a card, read from persisted TD tables (poll this)."""
+    try:
+        card = card_store.get_card(card_id)
+    except card_store.CardConfigError as exc:
+        raise _card_http_error(exc) from exc
+    if card is None:
+        raise HTTPException(status_code=404, detail="card not found")
+    with get_conn() as conn:
+        try:
+            return sequences.card_live_state(conn, card, max_age_s=max(0, max_age_s), since_revision=since_revision)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -1325,6 +1445,7 @@ async def root():
             "berths": "/berths/{layout_id}",
             "trains": "/trains",
             "admin": "/admin",
+            "cards": "/cards",
             "train_chain": "/train/{train_id}/chain",
             "state": "/state",
             "td_chain": "/td/{td_area}/{headcode}/chain",
