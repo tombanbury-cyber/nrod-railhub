@@ -20,10 +20,31 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, constr
 
+from nrod_railhub.db_backend import (
+    DB_ERRORS,
+    DatabaseConfigError,
+    DatabaseDriverError,
+    connect as db_connect,
+    is_postgres_target,
+    resolve_database_target,
+)
+
 from . import cards as card_store
 from . import sequences
 from .route_inference import infer_train_chain
 
+
+def _integrity_errors() -> tuple[type, ...]:
+    errors: tuple[type, ...] = (sqlite3.IntegrityError,)
+    try:
+        import psycopg  # type: ignore
+        errors += (psycopg.IntegrityError,)
+    except ImportError:
+        pass
+    return errors
+
+
+INTEGRITY_ERRORS = _integrity_errors()
 
 # Database path (relative to project root)
 DB_PATH = Path(__file__).parent.parent.parent / "railhub.db"
@@ -132,39 +153,38 @@ app.add_middleware(
 manager = ConnectionManager()
 
 
+def resolve_target() -> str:
+    """Resolve the database target (SQLite path or PostgreSQL URL).
+
+    ``NROD_RAILHUB_DB`` wins; otherwise ``db_provider``/``db_path``/``db_url`` from the
+    selected shared YAML are used, falling back to the project ``railhub.db``.
+    """
+    override = os.environ.get("NROD_RAILHUB_DB", "").strip()
+    try:
+        if override:
+            if is_postgres_target(override):
+                return resolve_database_target("postgres", db_url=override)
+            return resolve_database_target("sqlite", override)
+        return card_store.configured_database_target() or str(DB_PATH)
+    except (DatabaseConfigError, DatabaseDriverError, card_store.CardConfigError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 @contextmanager
 def get_conn():
-    """Get database connection with row factory."""
-    raw_target = os.environ.get("NROD_RAILHUB_DB")
-    if not raw_target:
-        try:
-            raw_target = card_store.configured_sqlite_path() or str(DB_PATH)
-        except card_store.CardConfigError as exc:
-            raise RuntimeError(str(exc)) from exc
-    if raw_target.strip().lower().startswith(("postgres://", "postgresql://")):
-        raise RuntimeError(
-            "The visualisation API only supports SQLite; NROD_RAILHUB_DB must be a SQLite "
-            "file path, not a PostgreSQL URL (the shared YAML must use db_provider: sqlite)"
-        )
-    db_path = Path(raw_target)
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
+    """Get a database connection (SQLite or PostgreSQL) with named-row access."""
+    conn = db_connect(resolve_target(), named_rows=True)
     try:
         yield conn
     finally:
         conn.close()
 
 
-def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return row is not None
+def _table_exists(conn: Any, table_name: str) -> bool:
+    return sequences._exists(conn, table_name)
 
 
-def _require_visualisation_schema(conn: sqlite3.Connection) -> None:
+def _require_visualisation_schema(conn: Any) -> None:
     missing = [name for name in ("layout", "berth", "signal") if not _table_exists(conn, name)]
     if missing:
         raise HTTPException(status_code=503, detail=f"missing visualisation tables: {', '.join(missing)}")
@@ -187,7 +207,7 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
     return model.dict()
 
 
-def _require_layout_exists(conn: sqlite3.Connection, layout_id: str) -> None:
+def _require_layout_exists(conn: Any, layout_id: str) -> None:
     """Raise a 404 when a referenced layout does not exist."""
     existing = conn.execute("SELECT id FROM layout WHERE id = ?", (layout_id,)).fetchone()
     if not existing:
@@ -209,7 +229,7 @@ def _normalise_import_berth_ids(berth_ids: list[str]) -> list[str]:
     return cleaned
 
 
-def _render_admin_page(layout_rows: list[sqlite3.Row], berth_rows: list[sqlite3.Row], signal_rows: list[sqlite3.Row]) -> str:
+def _render_admin_page(layout_rows: list[Any], berth_rows: list[Any], signal_rows: list[Any]) -> str:
     def esc(value: Any) -> str:
         return html.escape("" if value is None else str(value), quote=True)
 
@@ -761,11 +781,11 @@ loadHeadcodes();
 """
 
 
-def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _row_dict(row: Any) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
-def _format_event_row(row: sqlite3.Row, source: str) -> dict[str, Any]:
+def _format_event_row(row: Any, source: str) -> dict[str, Any]:
     data = _row_dict(row)
     data["source"] = source
     data["berth_id"] = data.get("to_berth") or data.get("from_berth") or data.get("object_id")
@@ -775,7 +795,7 @@ def _format_event_row(row: sqlite3.Row, source: str) -> dict[str, Any]:
 
 
 def _fetch_td_snapshot(
-    conn: sqlite3.Connection,
+    conn: Any,
     td_area: str | None = None,
     headcode: str | None = None,
     limit: int = 200,
@@ -861,7 +881,7 @@ def _fetch_td_snapshot(
                     for row in rows
                 ]
                 if snapshot["source"] == "empty":
-                    latest_by_key: dict[tuple[str | None, str | None], sqlite3.Row] = {}
+                    latest_by_key: dict[tuple[str | None, str | None], Any] = {}
                     for row in rows:
                         key = (row["td_area"], row["headcode"])
                         if key not in latest_by_key:
@@ -936,12 +956,12 @@ def _fetch_td_snapshot(
         snapshot["train_count"] = len(snapshot["trains"])
         snapshot["event_count"] = len(snapshot["events"])
         return snapshot
-    except sqlite3.OperationalError as exc:
+    except DB_ERRORS as exc:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
 def _fetch_td_chain(
-    conn: sqlite3.Connection,
+    conn: Any,
     td_area: str,
     headcode: str,
 ) -> dict[str, Any]:
@@ -1013,7 +1033,7 @@ def _fetch_td_chain(
                 )
 
         return {"td_area": td_area, "headcode": headcode, "chain": chain}
-    except sqlite3.OperationalError as exc:
+    except DB_ERRORS as exc:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1047,9 +1067,10 @@ async def create_layout(payload: LayoutPayload):
                         json.dumps(payload.data),
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "created", "rowid": cursor.lastrowid, "layout": _model_dump(payload)}
+        rowid = None if getattr(conn, "is_postgres", False) else cursor.lastrowid
+        return {"status": "created", "rowid": rowid, "layout": _model_dump(payload)}
 
 
 @app.put("/api/layouts/{layout_id}")
@@ -1073,7 +1094,7 @@ async def update_layout(layout_id: str, payload: LayoutPayload):
                     """,
                     (payload.id, payload.name, payload.description, json.dumps(payload.data), layout_id),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "updated", "id": payload.id, "layout": _model_dump(payload)}
 
@@ -1117,7 +1138,7 @@ async def create_berth(payload: BerthPayload):
                         payload.berth_type,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "created", "id": payload.id, "berth": _model_dump(payload)}
 
@@ -1233,7 +1254,7 @@ async def update_berth(berth_id: str, payload: BerthPayload):
                         berth_id,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "updated", "id": payload.id, "berth": _model_dump(payload)}
 
@@ -1273,7 +1294,7 @@ async def create_signal(payload: SignalPayload):
                         payload.signal_type,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "created", "id": payload.id, "signal": _model_dump(payload)}
 
@@ -1305,7 +1326,7 @@ async def update_signal(signal_id: str, payload: SignalPayload):
                         signal_id,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "updated", "id": payload.id, "signal": _model_dump(payload)}
 
@@ -1361,7 +1382,7 @@ async def api_suggest_sequences(from_station: str, to_station: str):
     with get_conn() as conn:
         try:
             return sequences.suggest_sequences(conn, from_station, to_station)
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1371,7 +1392,7 @@ async def api_chain_sequence(td_area: str, headcode: str):
     with get_conn() as conn:
         try:
             return sequences.chain_sequence(conn, td_area, headcode)
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1431,7 +1452,7 @@ async def api_card_state(card_id: str, max_age_s: int = 1800, since_revision: st
     with get_conn() as conn:
         try:
             return sequences.card_live_state(conn, card, max_age_s=max(0, max_age_s), since_revision=since_revision)
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1583,7 +1604,7 @@ async def get_trains():
                 )
 
             return trains
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1599,7 +1620,7 @@ async def get_train_chain(train_id: str, td_area: str | None = None, headcode: s
             result = infer_train_chain(conn, train_id)
             if result.get("chain"):
                 return result
-        except sqlite3.OperationalError:
+        except DB_ERRORS:
             result = None
 
         td_headcode = headcode or train_id
@@ -1626,7 +1647,7 @@ async def get_state(td_area: str | None = None, headcode: str | None = None, are
     with get_conn() as conn:
         try:
             return _fetch_td_snapshot(conn, td_area=td_area, headcode=headcode)
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1636,7 +1657,7 @@ async def get_td_chain(td_area: str, headcode: str):
     with get_conn() as conn:
         try:
             return _fetch_td_chain(conn, td_area=td_area, headcode=headcode)
-        except sqlite3.OperationalError as exc:
+        except DB_ERRORS as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
@@ -1645,7 +1666,7 @@ async def create_event(event: EventCreate):
     """Create a new event and broadcast to WebSocket clients."""
     try:
         with get_conn() as conn:
-            cursor = conn.execute(
+            event_id = conn.execute_returning_id(
                 """
                 INSERT INTO event (ts, source, train_id, event_type, object_id, payload)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -1660,7 +1681,6 @@ async def create_event(event: EventCreate):
                 )
             )
             conn.commit()
-            event_id = cursor.lastrowid
         
         # Broadcast to WebSocket clients
         broadcast_data = {
@@ -1713,10 +1733,37 @@ if STATIC_PATH.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
 
 
-if __name__ == "__main__":
+def _parse_args(argv: Optional[list[str]] = None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m app.visualisation.app",
+        description="NROD RailHub visualisation API",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help="shared nrod.yaml used for database settings, host/port and cards "
+        f"(must exist; default: ${card_store.CONFIG_ENV_VAR}, else nrod.yaml in the project root)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> None:
     import uvicorn
+
+    args = _parse_args(argv)
+    if args.config:
+        if not Path(args.config).expanduser().is_file():
+            raise SystemExit(f"Config file not found: {args.config}")
+        card_store.set_config_path(args.config)
     try:
-        _settings = card_store.visualisation_settings()
+        settings = card_store.visualisation_settings()
     except card_store.CardConfigError as exc:
         raise SystemExit(f"Invalid visualisation configuration: {exc}")
-    uvicorn.run(app, host=_settings["host"], port=_settings["port"])
+    uvicorn.run(app, host=settings["host"], port=settings["port"])
+
+
+if __name__ == "__main__":
+    main()

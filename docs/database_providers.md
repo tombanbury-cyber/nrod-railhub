@@ -68,9 +68,7 @@ renders natively. SQLite-only features (`PRAGMA`, `executescript`, `lastrowid`,
   migration; a new PostgreSQL database starts empty (reference data is
   re-imported automatically at startup when credentials are supplied).
 * Still SQLite-only (they fail with a clear message instead of misbehaving):
-  `td_listener.py` (rejects `db_provider: postgres` in the config file), the
-  visualisation API in `app/visualisation` (rejects a PostgreSQL
-  `NROD_RAILHUB_DB`), and the helper scripts under `scripts/`, `sql/` and
+  `td_listener.py` (rejects `db_provider: postgres` in the config file), and the helper scripts under `scripts/`, `sql/` and
   `import_scripts/convert_nwr_shp_to_sqlite.py`.
 * The `/config` web page edits the YAML file but does not expose `db_url`; edit
   the file (or environment) directly to change database settings.

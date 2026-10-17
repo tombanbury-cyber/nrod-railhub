@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -34,7 +33,7 @@ def _headcode_from_payload(payload: str | None) -> str | None:
     return headcode if isinstance(headcode, str) and headcode else None
 
 
-def build_observed_chain(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> list[dict[str, Any]]:
+def build_observed_chain(rows: Iterable[Any]) -> list[dict[str, Any]]:
     """Build direct berth occupancy periods from enter/exit events."""
     chain: list[dict[str, Any]] = []
     berth_states: dict[str, dict[str, Any]] = {}
@@ -69,7 +68,7 @@ def build_observed_chain(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> list[d
     return chain
 
 
-def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
+def rebuild_route_patterns(conn: Any) -> dict[str, Any]:
     """Rebuild transition counts and route patterns from historical events."""
     started_at = _utc_now()
     grouped_rows: dict[tuple[str, str], dict[str, Any]] = {}
@@ -238,7 +237,7 @@ def rebuild_route_patterns(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _load_transition_stats(
-    conn: sqlite3.Connection,
+    conn: Any,
     headcode: str,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, int]]:
     rows = conn.execute(
@@ -262,7 +261,7 @@ def _load_transition_stats(
     return by_edge, totals_by_from
 
 
-def _load_route_patterns(conn: sqlite3.Connection, headcode: str) -> list[dict[str, Any]]:
+def _load_route_patterns(conn: Any, headcode: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT berth_sequence_json, observations, confidence, updated_at
@@ -351,7 +350,7 @@ def _infer_gap_items(
     ]
 
 
-def infer_train_chain(conn: sqlite3.Connection, train_id: str) -> dict[str, Any]:
+def infer_train_chain(conn: Any, train_id: str) -> dict[str, Any]:
     """Build a berth chain with historical gap inference when evidence exists."""
     event_rows = conn.execute(
         """

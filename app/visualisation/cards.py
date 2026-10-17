@@ -1,7 +1,7 @@
 """YAML-backed storage for berth-sequence visualisation cards.
 
 Cards live under the ``visualisation_cards`` key of the shared ``nrod.yaml``
-configuration (or the file named by ``NROD_RAILHUB_CONFIG``). Saving only
+configuration (or the file named by ``--config`` / ``NROD_RAILHUB_CONFIG``). Saving only
 replaces that key; every other setting is written back unchanged.  Note that
 PyYAML does not retain comments, so comments in the file are lost on save.
 """
@@ -39,8 +39,24 @@ class CardConfigError(RuntimeError):
     """The shared YAML file cannot be read or safely updated."""
 
 
+_config_override: Optional[Path] = None
+
+
+def set_config_path(path: Optional[str | os.PathLike]) -> None:
+    """Select the shared YAML file for this process (e.g. from ``--config``); ``None`` clears it."""
+    global _config_override
+    text = os.fspath(path).strip() if path is not None else ""
+    _config_override = Path(text).expanduser() if text else None
+
+
 def config_path() -> Path:
-    """Return the shared YAML path (env override, else ``nrod.yaml`` in the project root)."""
+    """Return the shared YAML path.
+
+    Precedence: ``set_config_path()`` (``--config``), ``NROD_RAILHUB_CONFIG``, then
+    ``nrod.yaml`` in the project root.
+    """
+    if _config_override is not None:
+        return _config_override
     override = os.environ.get(CONFIG_ENV_VAR, "").strip()
     if override:
         return Path(override).expanduser()
@@ -64,26 +80,35 @@ def load_config(path: Optional[Path] = None) -> dict[str, Any]:
     return data
 
 
-def configured_sqlite_path() -> Optional[str]:
-    """SQLite ``db_path`` from the shared YAML, or None when unset/no file.
+def configured_database_target() -> Optional[str]:
+    """Database target (SQLite path or PostgreSQL URL) from the shared YAML.
 
-    Uses the same provider validation as the main RailHub CLI. Raises
-    CardConfigError if the YAML selects a non-SQLite provider (unsupported by the
-    visualisation service) or has invalid database settings.
+    Reads ``db_provider``, ``db_path`` and ``db_url`` and validates them with
+    ``resolve_database_target`` like the main RailHub CLI. Returns None for SQLite
+    when no ``db_path`` is set. Raises CardConfigError for invalid settings; the
+    message never contains the connection URL.
     """
-    from nrod_railhub.db_backend import DatabaseConfigError, resolve_database_target
+    from nrod_railhub.db_backend import (
+        DatabaseConfigError,
+        DatabaseDriverError,
+        normalize_provider,
+        resolve_database_target,
+    )
 
     cfg = load_config()
-    provider = str(cfg.get("db_provider") or "sqlite").strip().lower()
-    if provider in ("postgres", "postgresql", "pg"):
-        raise CardConfigError(
-            "The visualisation API only supports SQLite; db_provider in "
-            f"{config_path()} is {provider!r}"
-        )
     try:
-        return resolve_database_target(provider, cfg.get("db_path"), check_driver=False)
-    except DatabaseConfigError as exc:
+        provider = normalize_provider(cfg.get("db_provider"))
+        db_url = cfg.get("db_url")
+        if db_url and provider != "postgres":
+            raise DatabaseConfigError("db_url is only used with db_provider: postgres")
+        return resolve_database_target(provider, cfg.get("db_path"), db_url)
+    except (DatabaseConfigError, DatabaseDriverError) as exc:
         raise CardConfigError(f"{config_path()}: {exc}") from exc
+
+
+def configured_sqlite_path() -> Optional[str]:
+    """Backward-compatible alias of :func:`configured_database_target`."""
+    return configured_database_target()
 
 
 def visualisation_settings() -> dict[str, Any]:

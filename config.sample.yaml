@@ -160,7 +160,8 @@ save_raw_json: true
 # Visualisation service (python3 -m app.visualisation.app)
 # ============================================================================
 # The visualisation API reads this same file (or NROD_RAILHUB_CONFIG) and uses
-# the root-level db_path above (SQLite only; db_provider: postgres is rejected).
+# the root-level db_provider/db_path/db_url above (SQLite or PostgreSQL).
+# Select another file with: python -m app.visualisation.app --config PATH
 # NROD_RAILHUB_DB, if set, overrides db_path. Do not repeat the database here.
 # visualisation:
 #   host: 127.0.0.1

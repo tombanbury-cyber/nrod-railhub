@@ -16,23 +16,30 @@ from __future__ import annotations
 import heapq
 import json
 import math
-import sqlite3
 import time
 from collections import defaultdict
 from typing import Any, Optional
+
+from nrod_railhub.db_backend import DB_ERRORS
 
 MAX_CANDIDATES = 5
 MAX_SEQUENCE_LEN = 200
 TRUSTED_SIGNAL_STATUSES = ("confirmed", "corrected")
 
 
-def _exists(conn: sqlite3.Connection, name: str) -> bool:
+def _exists(conn: Any, name: str) -> bool:
+    """Portable table (or SQLite view) existence check."""
+    if hasattr(conn, "table_exists"):
+        if conn.table_exists(name):
+            return True
+        if getattr(conn, "is_postgres", False):
+            return False
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?", (name,)
     ).fetchone() is not None
 
 
-def resolve_stations(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[dict[str, Any]]:
+def resolve_stations(conn: Any, query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Match a station by CRS, STANOX, TIPLOC or name fragment."""
     query = (query or "").strip()
     if not query:
@@ -69,7 +76,7 @@ def resolve_stations(conn: sqlite3.Connection, query: str, limit: int = 20) -> l
     return list(found.values())
 
 
-def station_berths(conn: sqlite3.Connection, stanoxes: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
+def station_berths(conn: Any, stanoxes: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
     """Map ``{td_area: {berth: info}}`` for berths SMART associates with the stations."""
     out: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     if not stanoxes or not _exists(conn, "smart_berths"):
@@ -83,7 +90,7 @@ def station_berths(conn: sqlite3.Connection, stanoxes: list[str]) -> dict[str, d
     return out
 
 
-def berth_labels(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def berth_labels(conn: Any, items: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     """Station/platform labels for ``(td_area, berth)`` pairs where SMART/CORPUS know them."""
     labels: dict[tuple[str, str], dict[str, Any]] = {}
     if not items or not _exists(conn, "smart_berths"):
@@ -114,7 +121,7 @@ def berth_labels(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[
     return labels
 
 
-def _observed_edges(conn: sqlite3.Connection, area: str) -> dict[tuple[str, str], int]:
+def _observed_edges(conn: Any, area: str) -> dict[tuple[str, str], int]:
     if _exists(conn, "td_berth_movements"):
         sql = """SELECT from_berth, to_berth, COUNT(*) FROM td_berth_movements
                  WHERE td_area = ? AND from_berth != to_berth GROUP BY from_berth, to_berth"""
@@ -196,7 +203,7 @@ def _observed_candidates(area: str, edges: dict[tuple[str, str], int],
     return out
 
 
-def _pattern_candidates(conn: sqlite3.Connection, area: str, edges: dict[tuple[str, str], int],
+def _pattern_candidates(conn: Any, area: str, edges: dict[tuple[str, str], int],
                         origins: set[str], dests: set[str]) -> list[dict[str, Any]]:
     if not _exists(conn, "headcode_route_patterns"):
         return []
@@ -247,7 +254,7 @@ def _pattern_candidates(conn: sqlite3.Connection, area: str, edges: dict[tuple[s
     return out[:MAX_CANDIDATES]
 
 
-def _schedule_support(conn: sqlite3.Connection, a: dict[str, Any], b: dict[str, Any]) -> Optional[int]:
+def _schedule_support(conn: Any, a: dict[str, Any], b: dict[str, Any]) -> Optional[int]:
     if not _exists(conn, "cif_schedule_locations"):
         return None
     ta, tb = a.get("tiplocs") or [], b.get("tiplocs") or []
@@ -267,7 +274,7 @@ def _schedule_support(conn: sqlite3.Connection, a: dict[str, Any], b: dict[str, 
     return int(row[0])
 
 
-def chain_sequence(conn: sqlite3.Connection, td_area: str, headcode: str) -> dict[str, Any]:
+def chain_sequence(conn: Any, td_area: str, headcode: str) -> dict[str, Any]:
     """Ordered, de-duplicated berth sequence taken from one train's observed TD events.
 
     Used to seed a manually edited card; every item is ``observed``.
@@ -294,7 +301,7 @@ def chain_sequence(conn: sqlite3.Connection, td_area: str, headcode: str) -> dic
     return {"td_area": area, "headcode": hc, "sequence": items, "notes": notes}
 
 
-def _revision(conn: sqlite3.Connection) -> Optional[str]:
+def _revision(conn: Any) -> Optional[str]:
     parts = []
     if _exists(conn, "td_berth_events"):
         parts.append(str(conn.execute("SELECT MAX(id) FROM td_berth_events").fetchone()[0]))
@@ -304,7 +311,7 @@ def _revision(conn: sqlite3.Connection) -> Optional[str]:
     return ":".join(parts) if parts else None
 
 
-def suggest_sequences(conn: sqlite3.Connection, from_station: str, to_station: str) -> dict[str, Any]:
+def suggest_sequences(conn: Any, from_station: str, to_station: str) -> dict[str, Any]:
     """Return ranked candidate berth sequences between two stations, with provenance."""
     result: dict[str, Any] = {
         "from_station": from_station, "to_station": to_station,
@@ -341,7 +348,7 @@ def suggest_sequences(conn: sqlite3.Connection, from_station: str, to_station: s
     if len(from_m) == 1 and len(to_m) == 1:
         try:
             result["schedule_support"] = _schedule_support(conn, from_m[0], to_m[0])
-        except sqlite3.Error:
+        except DB_ERRORS:
             result["schedule_support"] = None
     result["candidates"] = candidates
     if not candidates:
@@ -357,7 +364,7 @@ def suggest_sequences(conn: sqlite3.Connection, from_station: str, to_station: s
     return result
 
 
-def card_live_state(conn: sqlite3.Connection, card: dict[str, Any], max_age_s: int = 1800,
+def card_live_state(conn: Any, card: dict[str, Any], max_age_s: int = 1800,
                     since_revision: Optional[str] = None) -> dict[str, Any]:
     """Occupancy along the card's saved sequence, from persisted TD state.
 
