@@ -58,9 +58,17 @@ Cards are stored under `visualisation_cards:` in the shared YAML (`nrod.yaml` in
 the path in `NROD_RAILHUB_CONFIG`). Saving rewrites only that key and keeps other settings (written
 atomically, file permissions preserved; the API never returns other settings). PyYAML does not keep
 comments, so comments in the file are lost on save; an unreadable YAML file is never overwritten.
-When `NROD_RAILHUB_DB` is unset, the SQLite `db_path` from the same YAML is used (else `railhub.db`);
-`db_provider: postgres` is still unsupported by this service and fails with an error rather than
-falling back to another database.
+The YAML file is chosen with `python -m app.visualisation.app --config /path/to/nrod.yaml`
+(falling back to `NROD_RAILHUB_CONFIG`, then the project-root `nrod.yaml`); it is applied before
+service settings are loaded or the database is opened, and is used for database settings,
+`visualisation:` host/port and card reads/writes.
+
+Database selection matches the main app: `NROD_RAILHUB_DB` (a SQLite path or a `postgresql://` URL)
+overrides everything; otherwise `db_provider`, `db_path` and `db_url` (or `NROD_RAILHUB_DB_URL`)
+from the selected YAML are used, falling back to the project `railhub.db`. PostgreSQL needs
+`pip install -r requirements-postgres.txt`; the visualisation tables (`sql/init_db.sql`) must exist
+in the target database. Invalid provider settings fail with an error and never fall back to another
+database; connection URLs are not logged.
 
 ### Service settings
 
@@ -121,8 +129,8 @@ in-process lock.
   derive from the latest event per berth instead.
 - **Signals**: only reviewed mappings are listed; no live aspects until bit-to-aspect decoding in
   `td_sclass_state`/`td_signal_bytes` is confirmed.
-- **Storage**: PyYAML drops comments (use `ruamel.yaml` or a DB table); SQLite only (port to
-  `db_backend.connect`); the main CLI ignores the `visualisation_cards` key.
+- **Storage**: PyYAML drops comments (use `ruamel.yaml` or a DB table); SQLite and PostgreSQL via
+  `nrod_railhub.db_backend`; the main CLI ignores the `visualisation_cards` key.
 - **Push updates**: still polling; a listener-to-WebSocket/SSE publisher would remove the lag.
 - **UI**: no schematic rendering of candidates, no browser tests.
 - Station/platform labels need SMART (and CORPUS) data; otherwise raw berth ids are shown.
