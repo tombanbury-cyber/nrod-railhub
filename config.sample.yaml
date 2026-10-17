@@ -157,6 +157,16 @@ save_raw_json: true
 # retention_batch_size: 1000
 
 # ============================================================================
+# Visualisation service (python3 -m app.visualisation.app)
+# ============================================================================
+# The visualisation API reads this same file (or NROD_RAILHUB_CONFIG) and uses
+# the root-level db_path above (SQLite only; db_provider: postgres is rejected).
+# NROD_RAILHUB_DB, if set, overrides db_path. Do not repeat the database here.
+# visualisation:
+#   host: 127.0.0.1
+#   port: 8000
+
+# ============================================================================
 # Visualisation cards (managed by the /cards page of the visualisation API)
 # ============================================================================
 # Saved automatically; comments in this file are not preserved when cards are saved.

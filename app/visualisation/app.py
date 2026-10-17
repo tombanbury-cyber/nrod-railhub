@@ -144,7 +144,7 @@ def get_conn():
     if raw_target.strip().lower().startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
             "The visualisation API only supports SQLite; NROD_RAILHUB_DB must be a SQLite "
-            "file path, not a PostgreSQL URL"
+            "file path, not a PostgreSQL URL (the shared YAML must use db_provider: sqlite)"
         )
     db_path = Path(raw_target)
     conn = sqlite3.connect(str(db_path), timeout=30.0)
@@ -1715,4 +1715,8 @@ if STATIC_PATH.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    try:
+        _settings = card_store.visualisation_settings()
+    except card_store.CardConfigError as exc:
+        raise SystemExit(f"Invalid visualisation configuration: {exc}")
+    uvicorn.run(app, host=_settings["host"], port=_settings["port"])
