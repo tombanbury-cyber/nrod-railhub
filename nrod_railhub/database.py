@@ -1948,6 +1948,46 @@ class RailDB:
                 (toc_code, td_area, 1 if is_primary else 0, source, confidence,
                  effective_from, effective_to, created_by, notes),
             )
+
+    def sync_toc_td_areas(self, mappings: list[tuple[str, str]]) -> None:
+        """Replace YAML-managed TOC-TD mappings while preserving other sources."""
+        desired = set(mappings)
+        with self._lock, self._conn:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT toc_code, td_area, source FROM toc_td_areas")
+            sources = {(row[0], row[1]): row[2] for row in cursor.fetchall()}
+            existing = {
+                mapping for mapping, source in sources.items()
+                if source == "yaml"
+            }
+
+            for toc_code, td_area in existing - desired:
+                cursor.execute(
+                    "DELETE FROM toc_td_areas WHERE toc_code=? AND td_area=? AND source=?",
+                    (toc_code, td_area, "yaml"),
+                )
+
+            for toc_code, td_area in desired:
+                if (toc_code, td_area) in sources and sources[(toc_code, td_area)] != "yaml":
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO toc_td_areas(
+                        toc_code, td_area, is_primary, source, created_by
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(toc_code, td_area) DO UPDATE SET
+                        is_primary=excluded.is_primary,
+                        source=excluded.source,
+                        confidence=NULL,
+                        effective_from=NULL,
+                        effective_to=NULL,
+                        created_by=excluded.created_by,
+                        notes=NULL,
+                        created_at_ts=__NOW_MS__
+                    """,
+                    (toc_code, td_area, 0, "yaml", "config"),
+                )
     
     def delete_toc_td_area(self, toc_code: str, td_area: str) -> None:
         """

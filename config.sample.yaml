@@ -41,6 +41,13 @@ vhost: publicdatafeeds.networkrail.co.uk
 # If not specified, schedule downloads are disabled
 # toc_filter: []
 
+# TOC-to-TD-area mappings imported into toc_td_areas on startup
+# YAML-managed mappings are synchronized on each startup; other DB-managed mappings are preserved.
+# Use a single area or a list of areas per TOC. An empty mapping clears YAML-managed mappings.
+# toc_td_areas:
+#   SE: [EK, WK]
+#   SW: WR
+
 # ============================================================================
 # Display Options
 # ============================================================================

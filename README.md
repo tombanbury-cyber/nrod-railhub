@@ -74,7 +74,14 @@ log_level: info
 # Filtering
 headcode: 2C90  # Optional: monitor specific train
 toc_filter: ["SE", "GW"]  # Optional: filter to specific TOCs for schedule downloads
+
+# Optional TOC-to-TD-area mappings
+toc_td_areas:
+  SE: [EK, WK]
+  SW: WR
 ```
+
+Mappings are synchronized with the `toc_td_areas` database table at startup. Removed YAML entries are removed from the database, while mappings added through other sources (such as the web dashboard) are preserved.
 
 ### Schedule Downloads
 

@@ -119,6 +119,29 @@ def merge_config_with_args(args: argparse.Namespace, config: Dict[str, Any], par
     
     return args
 
+
+def _normalize_toc_td_areas(value: Any) -> Optional[list[tuple[str, str]]]:
+    """Convert YAML's TOC-to-area mapping into normalized mapping pairs."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("toc_td_areas must be a YAML mapping of TOC codes to TD areas")
+
+    mappings = set()
+    for toc_code, areas in value.items():
+        if not isinstance(toc_code, str) or not toc_code.strip():
+            raise ValueError("toc_td_areas keys must be non-empty TOC codes")
+        if isinstance(areas, str):
+            areas = [areas]
+        if not isinstance(areas, list):
+            raise ValueError(f"TD areas for TOC {toc_code!r} must be a string or list of strings")
+        for td_area in areas:
+            if not isinstance(td_area, str) or not td_area.strip():
+                raise ValueError(f"TD areas for TOC {toc_code!r} must be non-empty strings")
+            mappings.add((toc_code.strip().upper(), td_area.strip().upper()))
+    return sorted(mappings)
+
+
 def start_status_ticker(listener: Listener, interval: int = 15) -> threading.Thread:
     def loop():
         while True:
@@ -269,6 +292,10 @@ def connect_and_run(args: argparse.Namespace) -> None:
     ) if db_path else None
     
     if db is not None:
+        toc_td_areas = _normalize_toc_td_areas(getattr(args, "toc_td_areas", None))
+        if toc_td_areas is not None:
+            db.sync_toc_td_areas(toc_td_areas)
+            logger.info("TOC-TD area mappings synchronized from YAML: %d", len(toc_td_areas))
         imported = db.import_smart_serial_outputs("~/python/smart_serial_outputs.csv")
         logger.info("SMART serial map rows imported: %s", imported)
 
@@ -574,6 +601,10 @@ def parse_args() -> argparse.Namespace:
     # Raw JSON storage setting
     p.add_argument("--no-save-raw-json", dest="save_raw_json", action="store_false", default=True,
                    help="Disable saving raw JSON messages to database (enabled by default)")
+
+    # YAML-only structured configuration; this default makes the setting mergeable
+    # without adding an awkward command-line representation for a mapping.
+    p.set_defaults(toc_td_areas=None)
     
     # Get default values before parsing
     parser_defaults = {}
@@ -590,6 +621,10 @@ def parse_args() -> argparse.Namespace:
             config = load_config_file(args.config)
             logger.info(f"Loaded configuration from {args.config}")
             args = merge_config_with_args(args, config, parser_defaults)
+            try:
+                args.toc_td_areas = _normalize_toc_td_areas(args.toc_td_areas)
+            except ValueError as e:
+                p.error(str(e))
         except FileNotFoundError as e:
             logger.error(f"Configuration file error: {e}")
             sys.exit(1)
