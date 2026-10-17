@@ -1954,11 +1954,12 @@ class RailDB:
         desired = set(mappings)
         with self._lock, self._conn:
             cursor = self._conn.cursor()
-            cursor.execute(
-                "SELECT toc_code, td_area FROM toc_td_areas WHERE source=?",
-                ("yaml",),
-            )
-            existing = {(row[0], row[1]) for row in cursor.fetchall()}
+            cursor.execute("SELECT toc_code, td_area, source FROM toc_td_areas")
+            sources = {(row[0], row[1]): row[2] for row in cursor.fetchall()}
+            existing = {
+                mapping for mapping, source in sources.items()
+                if source == "yaml"
+            }
 
             for toc_code, td_area in existing - desired:
                 cursor.execute(
@@ -1967,6 +1968,8 @@ class RailDB:
                 )
 
             for toc_code, td_area in desired:
+                if (toc_code, td_area) in sources and sources[(toc_code, td_area)] != "yaml":
+                    continue
                 cursor.execute(
                     """
                     INSERT INTO toc_td_areas(

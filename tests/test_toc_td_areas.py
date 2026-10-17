@@ -237,7 +237,7 @@ def test_sync_toc_td_areas_reconciles_yaml_rows_only():
         db.upsert_toc_td_area("SE", "WK", source="yaml")
         db.upsert_toc_td_area("SW", "WR", source="web_ui")
 
-        db.sync_toc_td_areas([("SE", "EK"), ("GW", "P1")])
+        db.sync_toc_td_areas([("SE", "EK"), ("GW", "P1"), ("SW", "WR")])
 
         mappings = db.get_toc_td_areas()
         assert {(row["toc_code"], row["td_area"], row["source"]) for row in mappings} == {
