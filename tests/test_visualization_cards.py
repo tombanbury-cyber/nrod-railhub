@@ -237,3 +237,31 @@ def test_concurrent_saves_do_not_lose_cards(env):
     ts = [threading.Thread(target=lambda n=n: client.post("/api/cards", json=_card(id=f"c{n}"))) for n in range(8)]
     [t.start() for t in ts]; [t.join() for t in ts]
     assert len(client.get("/api/cards").json()["cards"]) == 8
+
+
+def test_visualisation_settings_defaults_and_overrides(env):
+    from app.visualisation import cards
+    assert cards.visualisation_settings() == {"host": "127.0.0.1", "port": 8000}
+    env["cfg"].write_text("visualisation:\n  host: 0.0.0.0\n  port: 9100\n")
+    assert cards.visualisation_settings() == {"host": "0.0.0.0", "port": 9100}
+
+
+@pytest.mark.parametrize("body", [
+    "visualisation: nope\n",
+    "visualisation:\n  port: 70000\n",
+    "visualisation:\n  port: '80'\n",
+    "visualisation:\n  host: ''\n",
+    "visualisation:\n  db_path: x.db\n",
+])
+def test_visualisation_settings_invalid(env, body):
+    from app.visualisation import cards
+    env["cfg"].write_text(body)
+    with pytest.raises(cards.CardConfigError):
+        cards.visualisation_settings()
+
+
+def test_db_path_rejects_postgres_url_in_db_path(env):
+    from app.visualisation import cards
+    env["cfg"].write_text("db_path: postgresql://u@h/d\n")
+    with pytest.raises(cards.CardConfigError):
+        cards.configured_sqlite_path()

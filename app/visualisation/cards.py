@@ -25,6 +25,9 @@ from pydantic import BaseModel, Field, constr, field_validator
 
 CONFIG_ENV_VAR = "NROD_RAILHUB_CONFIG"
 CARDS_KEY = "visualisation_cards"
+SETTINGS_KEY = "visualisation"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
 DEFAULT_CONFIG_NAME = "nrod.yaml"
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -64,18 +67,48 @@ def load_config(path: Optional[Path] = None) -> dict[str, Any]:
 def configured_sqlite_path() -> Optional[str]:
     """SQLite ``db_path`` from the shared YAML, or None when unset/no file.
 
-    Raises CardConfigError if the YAML selects a non-SQLite provider, which the
-    visualisation service does not support.
+    Uses the same provider validation as the main RailHub CLI. Raises
+    CardConfigError if the YAML selects a non-SQLite provider (unsupported by the
+    visualisation service) or has invalid database settings.
     """
+    from nrod_railhub.db_backend import DatabaseConfigError, resolve_database_target
+
     cfg = load_config()
     provider = str(cfg.get("db_provider") or "sqlite").strip().lower()
-    if provider not in ("sqlite", "sqlite3"):
+    if provider in ("postgres", "postgresql", "pg"):
         raise CardConfigError(
             "The visualisation API only supports SQLite; db_provider in "
             f"{config_path()} is {provider!r}"
         )
-    db_path = cfg.get("db_path")
-    return os.path.expanduser(str(db_path)) if db_path else None
+    try:
+        return resolve_database_target(provider, cfg.get("db_path"), check_driver=False)
+    except DatabaseConfigError as exc:
+        raise CardConfigError(f"{config_path()}: {exc}") from exc
+
+
+def visualisation_settings() -> dict[str, Any]:
+    """Validated ``visualisation:`` section (``host``, ``port``) of the shared YAML."""
+    defaults: dict[str, Any] = {"host": DEFAULT_HOST, "port": DEFAULT_PORT}
+    section = load_config().get(SETTINGS_KEY)
+    if section is None:
+        return defaults
+    if not isinstance(section, dict):
+        raise CardConfigError(f"{SETTINGS_KEY!r} in {config_path()} must be a mapping")
+    unknown = sorted(set(section) - set(defaults))
+    if unknown:
+        raise CardConfigError(
+            f"unknown {SETTINGS_KEY} setting(s) in {config_path()}: {', '.join(map(str, unknown))} "
+            "(supported: host, port)"
+        )
+    settings = {**defaults, **{k: v for k, v in section.items() if v is not None}}
+    host = settings["host"]
+    if not isinstance(host, str) or not host.strip():
+        raise CardConfigError(f"{SETTINGS_KEY}.host in {config_path()} must be a non-empty string")
+    port = settings["port"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise CardConfigError(f"{SETTINGS_KEY}.port in {config_path()} must be an integer 1-65535")
+    settings["host"] = host.strip()
+    return settings
 
 
 class SequenceItem(BaseModel):

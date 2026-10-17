@@ -59,7 +59,23 @@ the path in `NROD_RAILHUB_CONFIG`). Saving rewrites only that key and keeps othe
 atomically, file permissions preserved; the API never returns other settings). PyYAML does not keep
 comments, so comments in the file are lost on save; an unreadable YAML file is never overwritten.
 When `NROD_RAILHUB_DB` is unset, the SQLite `db_path` from the same YAML is used (else `railhub.db`);
-`db_provider: postgres` is still unsupported by this service.
+`db_provider: postgres` is still unsupported by this service and fails with an error rather than
+falling back to another database.
+
+### Service settings
+
+The service reads an optional `visualisation:` section from the same shared YAML
+(see `config.sample.yaml`):
+
+```yaml
+visualisation:
+  host: 127.0.0.1   # bind address (default 127.0.0.1)
+  port: 8000        # 1-65535 (default 8000)
+```
+
+Start with `python3 -m app.visualisation.app` to use these settings (`uvicorn` command-line
+`--host/--port` still work and take precedence). The database is never configured here; it comes
+from the root-level `db_path` (or `NROD_RAILHUB_DB`). Unknown or invalid settings give an error.
 
 ### API
 
