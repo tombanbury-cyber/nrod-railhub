@@ -189,8 +189,7 @@ def _require_visualisation_schema(conn: Any) -> None:
     if missing:
         raise HTTPException(status_code=503, detail=f"missing visualisation tables: {', '.join(missing)}")
 
-
-def _json_or_empty(value: Any[str]) -> dict[str, Any]:
+def _json_or_empty(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     if not isinstance(value, str) or not value:
