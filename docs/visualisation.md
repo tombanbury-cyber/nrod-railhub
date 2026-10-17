@@ -30,6 +30,56 @@ The visualization PoC consists of:
                                            └──────────────────┘
 ```
 
+## Corridor Cards (berth-sequence cards)
+
+Open `http://127.0.0.1:8000/cards` to configure and view cards. Each card's
+**selected, ordered berth sequence is its source of truth**; the from/to stations
+only help discover and label candidate sequences.
+
+### Setup flow
+
+1. Enter from/to stations (name, CRS, STANOX or TIPLOC) and choose *Find candidate sequences*
+   (`GET /api/cards/suggest?from_station=..&to_station=..`; nothing is saved).
+2. Candidates are ranked with a method, confidence and per-berth provenance:
+   - `td_observed_movements`: shortest paths through observed `td_berth_movements`
+     (falling back to `td_berth_events`) from SMART berths of the first station to SMART berths
+     of the second, within one TD area. Confidence is `n/(n+2)` for the least-observed step `n`
+     (a heuristic, not a probability). Alternatives are found by excluding single steps of the best path.
+   - `historical_route_pattern`: only used when no observed path exists; berths/links not seen in
+     TD movements are marked `inferred`.
+   - If nothing is found, no sequence is invented and notes explain why. The count of CIF schedules
+     calling at both stations in order (`schedule_support`) is shown as supporting context only;
+     schedules are not mapped to berths.
+3. Pick a sequence, choose display options (stations, berth labels, occupancy, signals) and save.
+
+### Configuration storage
+
+Cards are stored under `visualisation_cards:` in the shared YAML (`nrod.yaml` in the project root, or
+the path in `NROD_RAILHUB_CONFIG`). Saving rewrites only that key and keeps other settings (written
+atomically, file permissions preserved; the API never returns other settings). PyYAML does not keep
+comments, so comments in the file are lost on save; an unreadable YAML file is never overwritten.
+When `NROD_RAILHUB_DB` is unset, the SQLite `db_path` from the same YAML is used (else `railhub.db`);
+`db_provider: postgres` is still unsupported by this service.
+
+### API
+
+`GET/POST /api/cards`, `GET/PUT/DELETE /api/cards/{id}`, and `GET /api/cards/{id}/state`.
+
+### Live view and limitations
+
+The page polls `/api/cards/{id}/state` every 5 seconds. It reads persisted `td_state` (the listener's
+writes), so it does not depend on `POST /event`/WebSocket. A train occupies the berth in
+`to_berth` (else `from_berth`); trains older than `max_age_s` (default 1800, `0` disables) are hidden
+and counted, and trains outside the sequence are only counted.
+Solid borders are observed, dashed amber borders are inferred.
+
+- **Signals** are listed only from `physical_signal_mappings` with status `confirmed`/`corrected`,
+  next to the mapped berth. **Live signal aspects are not shown**; there is no reliable
+  mapping to live signal state yet.
+- Station/platform labels need SMART (and CORPUS) data; berths without it show the raw berth id.
+- Sequences are single-TD-area. Next steps: multi-area sequences, schedule-to-berth mapping,
+  push updates (WebSocket) from the listener, live signal state.
+
 ## Quick Start
 
 ### 1. Initialize the Database
