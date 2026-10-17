@@ -5,6 +5,7 @@ train visualization on schematic layouts.
 """
 
 import asyncio
+import hmac
 import html
 import json
 import os
@@ -13,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -1322,6 +1323,20 @@ async def delete_signal(signal_id: str):
         return {"status": "deleted", "id": signal_id}
 
 
+WRITE_TOKEN_ENV_VAR = "NROD_RAILHUB_VIS_TOKEN"
+
+
+def require_write_token(request: Request) -> None:
+    """If NROD_RAILHUB_VIS_TOKEN is set, card writes need a matching bearer token header."""
+    token = os.environ.get(WRITE_TOKEN_ENV_VAR, "")
+    if not token:
+        return
+    supplied = request.headers.get("authorization", "")
+    expected = "Bearer " + token
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+
 def _card_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"card configuration unavailable: {exc}")
 
@@ -1350,6 +1365,16 @@ async def api_suggest_sequences(from_station: str, to_station: str):
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
+@app.get("/api/cards/chain")
+async def api_chain_sequence(td_area: str, headcode: str):
+    """Seed a manually edited sequence from one train's observed TD berth events."""
+    with get_conn() as conn:
+        try:
+            return sequences.chain_sequence(conn, td_area, headcode)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+
+
 @app.get("/api/cards/{card_id}")
 async def api_get_card(card_id: str):
     try:
@@ -1361,7 +1386,7 @@ async def api_get_card(card_id: str):
     return card
 
 
-@app.post("/api/cards", status_code=201)
+@app.post("/api/cards", status_code=201, dependencies=[Depends(require_write_token)])
 async def api_create_card(payload: card_store.CardPayload):
     try:
         return card_store.save_card(payload, create=True)
@@ -1371,7 +1396,7 @@ async def api_create_card(payload: card_store.CardPayload):
         raise _card_http_error(exc) from exc
 
 
-@app.put("/api/cards/{card_id}")
+@app.put("/api/cards/{card_id}", dependencies=[Depends(require_write_token)])
 async def api_update_card(card_id: str, payload: card_store.CardPayload):
     if payload.id != card_id:
         raise HTTPException(status_code=400, detail="card id in body does not match URL")
@@ -1383,7 +1408,7 @@ async def api_update_card(card_id: str, payload: card_store.CardPayload):
         raise _card_http_error(exc) from exc
 
 
-@app.delete("/api/cards/{card_id}")
+@app.delete("/api/cards/{card_id}", dependencies=[Depends(require_write_token)])
 async def api_delete_card(card_id: str):
     try:
         deleted = card_store.delete_card(card_id)
@@ -1395,7 +1420,7 @@ async def api_delete_card(card_id: str):
 
 
 @app.get("/api/cards/{card_id}/state")
-async def api_card_state(card_id: str, max_age_s: int = 1800):
+async def api_card_state(card_id: str, max_age_s: int = 1800, since_revision: str | None = None):
     """Live occupancy for a card, read from persisted TD tables (poll this)."""
     try:
         card = card_store.get_card(card_id)
@@ -1405,7 +1430,7 @@ async def api_card_state(card_id: str, max_age_s: int = 1800):
         raise HTTPException(status_code=404, detail="card not found")
     with get_conn() as conn:
         try:
-            return sequences.card_live_state(conn, card, max_age_s=max(0, max_age_s))
+            return sequences.card_live_state(conn, card, max_age_s=max(0, max_age_s), since_revision=since_revision)
         except sqlite3.OperationalError as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 

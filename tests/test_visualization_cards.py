@@ -177,3 +177,63 @@ def test_live_state_without_td_tables_degrades(env):
 def test_cards_page_served():
     r = TestClient(app).get("/cards")
     assert r.status_code == 200 and "Corridor Cards" in r.text
+
+
+def test_chain_import_builds_observed_sequence(env):
+    env["conn"].executescript(
+        """
+        INSERT INTO td_berth_events (id) VALUES (1);
+        ALTER TABLE td_berth_events ADD COLUMN td_area TEXT;
+        ALTER TABLE td_berth_events ADD COLUMN headcode TEXT;
+        ALTER TABLE td_berth_events ADD COLUMN from_berth TEXT;
+        ALTER TABLE td_berth_events ADD COLUMN to_berth TEXT;
+        ALTER TABLE td_berth_events ADD COLUMN ts_ms INTEGER;
+        INSERT INTO td_berth_events (td_area, headcode, from_berth, to_berth, ts_ms) VALUES
+          ('EK','1A01','0001','0002',1), ('EK','1A01','0002','0004',2), ('EK','9Z99','0009','0010',3);
+        """
+    )
+    env["conn"].commit()
+    client = TestClient(app)
+    r = client.get("/api/cards/chain", params={"td_area": "EK", "headcode": "1A01"}).json()
+    assert [i["berth"] for i in r["sequence"]] == ["0001", "0002", "0004"]
+    assert {i["provenance"] for i in r["sequence"]} == {"observed"}
+    assert r["sequence"][0]["station"] == "Alpha Town"
+    empty = client.get("/api/cards/chain", params={"td_area": "EK", "headcode": "NONE"}).json()
+    assert empty["sequence"] == [] and empty["notes"]
+
+
+def test_state_revision_unchanged_and_train_age(env):
+    env["conn"].execute("INSERT INTO td_state VALUES ('EK','1A01','U1',1,'t1','0001','0002')")
+    env["conn"].commit()
+    client = TestClient(app)
+    client.post("/api/cards", json=_card())
+    st = client.get("/api/cards/c1/state", params={"max_age_s": 0}).json()
+    assert st["revision"] and st["items"][1]["trains"][0]["age_s"] > 0
+    same = client.get("/api/cards/c1/state", params={"since_revision": st["revision"]}).json()
+    assert same == {"id": "c1", "unchanged": True, "revision": st["revision"]}
+    env["conn"].execute("UPDATE td_state SET last_time_ms=2, to_berth='0004'")
+    env["conn"].commit()
+    new = client.get("/api/cards/c1/state", params={"since_revision": st["revision"], "max_age_s": 0}).json()
+    assert "unchanged" not in new and new["revision"] != st["revision"]
+
+
+def test_write_token_protects_card_writes(env, monkeypatch):
+    def auth(token):
+        return {"Authorization": "Bearer " + token}
+
+    monkeypatch.setenv("NROD_RAILHUB_VIS_TOKEN", "tok")
+    client = TestClient(app)
+    assert client.post("/api/cards", json=_card()).status_code == 401
+    assert client.post("/api/cards", json=_card(), headers=auth("wrong")).status_code == 401
+    assert client.post("/api/cards", json=_card(), headers=auth("tok")).status_code == 201
+    assert client.get("/api/cards").status_code == 200
+    assert client.delete("/api/cards/c1").status_code == 401
+    assert client.delete("/api/cards/c1", headers=auth("tok")).status_code == 200
+
+
+def test_concurrent_saves_do_not_lose_cards(env):
+    import threading
+    client = TestClient(app)
+    ts = [threading.Thread(target=lambda n=n: client.post("/api/cards", json=_card(id=f"c{n}"))) for n in range(8)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(client.get("/api/cards").json()["cards"]) == 8

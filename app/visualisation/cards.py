@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import yaml
+
+try:  # POSIX only; falls back to the in-process lock elsewhere
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 from pydantic import BaseModel, Field, constr, field_validator
 
 CONFIG_ENV_VAR = "NROD_RAILHUB_CONFIG"
@@ -116,6 +121,27 @@ def _dump(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(exclude_none=True)
 
 
+class _FileLock:
+    """Advisory cross-process lock on a sidecar ``<config>.lock`` file."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path.with_name(path.name + ".lock")
+        self._fh = None
+
+    def __enter__(self):
+        if fcntl is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(self._path, "a")
+            fcntl.flock(self._fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self._fh is not None:
+            fcntl.flock(self._fh, fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+
+
 def _write_cards(cards: list[dict[str, Any]]) -> None:
     path = config_path()
     cfg = load_config(path)  # raises (and leaves file untouched) if unreadable
@@ -150,7 +176,7 @@ def get_card(card_id: str) -> Optional[dict[str, Any]]:
 def save_card(payload: CardPayload, *, create: bool) -> dict[str, Any]:
     """Create (rejecting duplicates) or replace a card; returns the stored dict."""
     card = _dump(payload)
-    with _lock:
+    with _lock, _FileLock(config_path()):
         cards = list_cards()
         index = next((i for i, c in enumerate(cards) if c["id"] == card["id"]), None)
         if create and index is not None:
@@ -166,7 +192,7 @@ def save_card(payload: CardPayload, *, create: bool) -> dict[str, Any]:
 
 
 def delete_card(card_id: str) -> bool:
-    with _lock:
+    with _lock, _FileLock(config_path()):
         cards = list_cards()
         remaining = [c for c in cards if c["id"] != card_id]
         if len(remaining) == len(cards):

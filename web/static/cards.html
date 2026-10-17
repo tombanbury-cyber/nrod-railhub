@@ -46,6 +46,14 @@
       <button id="suggest">Find candidate sequences</button>
     </div>
     <div id="notes" class="muted"></div>
+    <div>
+      <label>Or import from a train: TD area <input type="text" id="imp-area" size="3">
+      headcode <input type="text" id="imp-hc" size="5"></label>
+      <button id="import">Import observed chain</button>
+      <label>Add berth <input type="text" id="add-berth" size="6"> in area <input type="text" id="add-area" size="3"></label>
+      <button id="add">Add (marked inferred)</button>
+    </div>
+    <div id="editor"></div>
     <div id="candidates"></div>
     <div>
       <label><input type="checkbox" id="o-stations" checked> Stations</label>
@@ -63,6 +71,7 @@ const API = '';
 let chosen = null;      // {sequence, method, confidence, evidence}
 let editingId = null;
 let candidates = [];
+const revs = {}, lastFull = {};
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -71,8 +80,12 @@ function el(tag, cls, text) {
   return e;
 }
 async function api(path, opts) {
+  opts = opts || {};
+  const tok = sessionStorage.getItem('railhubToken');
+  if (tok && opts.method && opts.method !== 'GET') opts.headers = Object.assign({'Authorization': 'Bearer ' + tok}, opts.headers || {});
   const r = await fetch(API + path, opts);
   const body = await r.json().catch(() => ({}));
+  if (r.status === 401) { const t = prompt('API token required'); if (t) sessionStorage.setItem('railhubToken', t); }
   if (!r.ok) throw new Error(body.detail ? JSON.stringify(body.detail) : r.statusText);
   return body;
 }
@@ -121,7 +134,11 @@ async function refreshCards() {
       host.appendChild(panel);
     }
     try {
-      const st = await api('/api/cards/' + encodeURIComponent(card.id) + '/state');
+      const fresh = Date.now() - (lastFull[card.id] || 0) > 60000;
+      const rev = fresh ? '' : (revs[card.id] ? '?since_revision=' + encodeURIComponent(revs[card.id]) : '');
+      const st = await api('/api/cards/' + encodeURIComponent(card.id) + '/state' + rev);
+      if (st.unchanged) continue;
+      revs[card.id] = st.revision; lastFull[card.id] = Date.now();
       renderSequence(panel.querySelector('.body'), st.items, st.display, st.signals);
       const n = st.items.filter(i => i.provenance === 'inferred').length;
       panel.querySelector('.meta').textContent = [card.from_station, card.to_station].filter(Boolean).join(' → ')
@@ -138,7 +155,7 @@ function renderCandidates() {
     const box = el('div', 'cand');
     const radio = el('input'); radio.type = 'radio'; radio.name = 'cand';
     radio.onchange = () => { chosen = {sequence: c.sequence.map(i => ({berth: i.berth, td_area: i.td_area, provenance: i.provenance, source: i.source})),
-      method: c.method, confidence: c.confidence, evidence: {td_area: c.td_area}}; document.getElementById('save').disabled = false; };
+      method: c.method, confidence: c.confidence, evidence: {td_area: c.td_area}}; document.getElementById('save').disabled = false; renderEditor(); };
     const lbl = el('label', null, ' ' + c.method + ' · area ' + c.td_area + ' · ' + c.sequence.length + ' berths · confidence ' + c.confidence);
     lbl.prepend(radio); box.appendChild(lbl);
     const inf = c.sequence.filter(i => i.provenance === 'inferred').length;
@@ -159,6 +176,41 @@ document.getElementById('suggest').onclick = async () => {
     renderCandidates();
   } catch (e) { document.getElementById('notes').textContent = e.message; }
 };
+function renderEditor() {
+  const host = document.getElementById('editor'); host.textContent = '';
+  if (!chosen) return;
+  host.appendChild(el('div', 'muted', 'Chosen sequence (' + chosen.sequence.length + ' berths) - reorder or remove berths:'));
+  const seq = el('div', 'seq');
+  chosen.sequence.forEach((it, i) => {
+    const box = berthBox(it, {berth_labels: true}, []);
+    const mk = (t, fn) => { const b = el('button', null, t); b.onclick = fn; box.appendChild(b); };
+    mk('◀', () => { if (i > 0) { [chosen.sequence[i-1], chosen.sequence[i]] = [chosen.sequence[i], chosen.sequence[i-1]]; markManual(); } });
+    mk('▶', () => { if (i < chosen.sequence.length - 1) { [chosen.sequence[i+1], chosen.sequence[i]] = [chosen.sequence[i], chosen.sequence[i+1]]; markManual(); } });
+    mk('✕', () => { chosen.sequence.splice(i, 1); markManual(); });
+    seq.appendChild(box);
+  });
+  host.appendChild(seq);
+}
+function markManual() {
+  if (chosen.method && chosen.method.indexOf('manual') < 0) chosen.method = 'manual_edit:' + chosen.method;
+  document.getElementById('save').disabled = chosen.sequence.length === 0;
+  renderEditor();
+}
+document.getElementById('import').onclick = async () => {
+  const a = document.getElementById('imp-area').value.trim(), h = document.getElementById('imp-hc').value.trim();
+  try {
+    const r = await api('/api/cards/chain?td_area=' + encodeURIComponent(a) + '&headcode=' + encodeURIComponent(h));
+    document.getElementById('notes').textContent = r.notes.join(' ');
+    if (r.sequence.length) { chosen = {sequence: r.sequence, method: 'headcode_chain', confidence: null, evidence: {td_area: a, headcode: h}}; markManual(); chosen.method = 'headcode_chain'; }
+  } catch (e) { document.getElementById('notes').textContent = e.message; }
+};
+document.getElementById('add').onclick = () => {
+  const b = document.getElementById('add-berth').value.trim(), a = document.getElementById('add-area').value.trim();
+  if (!b || !a) return;
+  if (!chosen) chosen = {sequence: [], method: 'manual', confidence: null, evidence: {}};
+  chosen.sequence.push({berth: b, td_area: a, provenance: 'inferred', source: 'manual'});
+  markManual();
+};
 function opts() {
   const o = {};
   ['stations', 'berth_labels', 'occupancy', 'signals'].forEach(k => o[k] = document.getElementById('o-' + k).checked);
@@ -174,6 +226,7 @@ function startEdit(card) {
   ['stations', 'berth_labels', 'occupancy', 'signals'].forEach(k => document.getElementById('o-' + k).checked = d[k] === undefined ? k !== 'signals' : !!d[k]);
   chosen = {sequence: card.sequence, method: (card.sequence_source || {}).method, confidence: (card.sequence_source || {}).confidence, evidence: (card.sequence_source || {}).evidence || {}};
   document.getElementById('save').disabled = false;
+  renderEditor();
   document.getElementById('cancel').style.display = '';
   document.getElementById('notes').textContent = 'Keeping the saved sequence; search again to replace it.';
 }

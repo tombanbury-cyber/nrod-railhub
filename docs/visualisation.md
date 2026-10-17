@@ -65,20 +65,51 @@ When `NROD_RAILHUB_DB` is unset, the SQLite `db_path` from the same YAML is used
 
 `GET/POST /api/cards`, `GET/PUT/DELETE /api/cards/{id}`, and `GET /api/cards/{id}/state`.
 
-### Live view and limitations
+### Manual editing
+
+After choosing a candidate (or opening a saved card), berths can be reordered or removed. You can
+also import a train's observed chain (`GET /api/cards/chain?td_area=..&headcode=..`, all items
+`observed`), or add a berth by hand (always marked `inferred`, source `manual`). Edited sequences are
+saved with method `manual_edit:<original>`. This is the fallback when SMART/CORPUS data is missing.
+If `td_berth_movements` is sparse, backfill it with `RailDB.rebuild_td_berth_movements()` or let the
+listener run longer.
+
+### Live view
 
 The page polls `/api/cards/{id}/state` every 5 seconds. It reads persisted `td_state` (the listener's
-writes), so it does not depend on `POST /event`/WebSocket. A train occupies the berth in
-`to_berth` (else `from_berth`); trains older than `max_age_s` (default 1800, `0` disables) are hidden
-and counted, and trains outside the sequence are only counted.
-Solid borders are observed, dashed amber borders are inferred.
+writes), so it does not depend on `POST /event`/WebSocket. The response includes a `revision`
+(max `td_berth_events` id, max `td_state` time and row count); passing `?since_revision=<rev>` returns
+`{"unchanged": true}` when nothing changed, and the page does a full refresh at least every 60 s so
+staleness ages stay current. A train occupies the berth in `to_berth` (else `from_berth`); each train
+reports `age_s`. Trains older than `max_age_s` (default 1800, `0` disables) are hidden and counted;
+trains outside the sequence are only counted. Solid borders are observed, dashed amber are inferred.
 
-- **Signals** are listed only from `physical_signal_mappings` with status `confirmed`/`corrected`,
-  next to the mapped berth. **Live signal aspects are not shown**; there is no reliable
-  mapping to live signal state yet.
-- Station/platform labels need SMART (and CORPUS) data; berths without it show the raw berth id.
-- Sequences are single-TD-area. Next steps: multi-area sequences, schedule-to-berth mapping,
-  push updates (WebSocket) from the listener, live signal state.
+### Security
+
+If `NROD_RAILHUB_VIS_TOKEN` is set, card create/update/delete require a bearer token in the `Authorization` header
+(the page prompts for it). Unset means open, as before; the service still allows any CORS origin, so
+bind it to localhost. Card saves take an advisory file lock (`<config>.lock`, POSIX) as well as the
+in-process lock.
+
+### Remaining limitations and possible resolutions
+
+- **Single TD area per sequence**: needs cross-area links (boundary berth map, or headcodes seen in two
+  areas close in time) and a search over `(area, berth)` nodes.
+- **Schedules don't rank routes**: map CIF/VSTP stops (TIPLOC -> STANOX) to SMART berth events and
+  score candidates by matching scheduled services.
+- **Heuristic confidence**: `n/(n+2)` on the least-seen step; alternatives avoid one step only. Weight
+  by recency/direction, use k-shortest paths, filter by SMART line, calibrate on held-out movements.
+- **Inferred gaps** come only from `headcode_route_patterns`; run `rebuild_route_patterns` regularly or
+  use `topology_edges`/S-class evidence.
+- **Occupancy** comes from `td_state` (not per-berth events), so cancels/clears are not modelled;
+  derive from the latest event per berth instead.
+- **Signals**: only reviewed mappings are listed; no live aspects until bit-to-aspect decoding in
+  `td_sclass_state`/`td_signal_bytes` is confirmed.
+- **Storage**: PyYAML drops comments (use `ruamel.yaml` or a DB table); SQLite only (port to
+  `db_backend.connect`); the main CLI ignores the `visualisation_cards` key.
+- **Push updates**: still polling; a listener-to-WebSocket/SSE publisher would remove the lag.
+- **UI**: no schematic rendering of candidates, no browser tests.
+- Station/platform labels need SMART (and CORPUS) data; otherwise raw berth ids are shown.
 
 ## Quick Start
 

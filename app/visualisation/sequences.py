@@ -267,6 +267,43 @@ def _schedule_support(conn: sqlite3.Connection, a: dict[str, Any], b: dict[str, 
     return int(row[0])
 
 
+def chain_sequence(conn: sqlite3.Connection, td_area: str, headcode: str) -> dict[str, Any]:
+    """Ordered, de-duplicated berth sequence taken from one train's observed TD events.
+
+    Used to seed a manually edited card; every item is ``observed``.
+    """
+    area, hc = (td_area or "").strip(), (headcode or "").strip()
+    notes: list[str] = []
+    steps: list[str] = []
+    if area and hc and _exists(conn, "td_berth_events"):
+        for fb, tb in conn.execute(
+            """SELECT from_berth, to_berth FROM td_berth_events
+               WHERE td_area = ? AND headcode = ? ORDER BY ts_ms ASC, id ASC""",
+            (area, hc),
+        ).fetchall():
+            for b in (fb, tb):
+                if b and (not steps or steps[-1] != b):
+                    steps.append(b)
+    if not steps:
+        notes.append("No TD berth events found for that area and headcode.")
+    steps = steps[:MAX_SEQUENCE_LEN]
+    items = [{"berth": b, "td_area": area, "provenance": "observed", "source": "td_berth_events"} for b in steps]
+    labels = berth_labels(conn, items)
+    for item in items:
+        item.update({k: v for k, v in (labels.get((area, item["berth"])) or {}).items() if v})
+    return {"td_area": area, "headcode": hc, "sequence": items, "notes": notes}
+
+
+def _revision(conn: sqlite3.Connection) -> Optional[str]:
+    parts = []
+    if _exists(conn, "td_berth_events"):
+        parts.append(str(conn.execute("SELECT MAX(id) FROM td_berth_events").fetchone()[0]))
+    if _exists(conn, "td_state"):
+        r = conn.execute("SELECT MAX(last_time_ms), COUNT(*) FROM td_state").fetchone()
+        parts += [str(r[0]), str(r[1])]
+    return ":".join(parts) if parts else None
+
+
 def suggest_sequences(conn: sqlite3.Connection, from_station: str, to_station: str) -> dict[str, Any]:
     """Return ranked candidate berth sequences between two stations, with provenance."""
     result: dict[str, Any] = {
@@ -320,8 +357,16 @@ def suggest_sequences(conn: sqlite3.Connection, from_station: str, to_station: s
     return result
 
 
-def card_live_state(conn: sqlite3.Connection, card: dict[str, Any], max_age_s: int = 1800) -> dict[str, Any]:
-    """Occupancy along the card's saved sequence, from persisted TD state."""
+def card_live_state(conn: sqlite3.Connection, card: dict[str, Any], max_age_s: int = 1800,
+                    since_revision: Optional[str] = None) -> dict[str, Any]:
+    """Occupancy along the card's saved sequence, from persisted TD state.
+
+    If ``since_revision`` equals the current TD revision, a small ``unchanged``
+    response is returned instead of recomputing the card.
+    """
+    revision = _revision(conn)
+    if since_revision and revision is not None and since_revision == revision:
+        return {"id": card.get("id"), "unchanged": True, "revision": revision}
     seq = card.get("sequence") or []
     display = card.get("display") or {}
     labels = berth_labels(conn, seq)
@@ -338,7 +383,7 @@ def card_live_state(conn: sqlite3.Connection, card: dict[str, Any], max_age_s: i
     state: dict[str, Any] = {
         "id": card.get("id"), "name": card.get("name"), "display": display,
         "td_data_available": _exists(conn, "td_state"),
-        "updated_at": None, "revision": None, "items": items,
+        "updated_at": None, "revision": revision, "items": items,
         "stations": [], "signals": [], "signal_live_state": False,
         "off_sequence_trains": 0, "stale_trains_hidden": 0, "notes": [],
     }
@@ -372,9 +417,10 @@ def card_live_state(conn: sqlite3.Connection, card: dict[str, Any], max_age_s: i
             if max_age_s and ms and now_ms - ms > max_age_s * 1000:
                 state["stale_trains_hidden"] += 1
                 continue
-            item["trains"].append({"headcode": hc, "uid": uid, "last_time_iso": iso, "last_time_ms": ms})
-        if _exists(conn, "td_berth_events"):
-            state["revision"] = conn.execute("SELECT MAX(id) FROM td_berth_events").fetchone()[0]
+            item["trains"].append({
+                "headcode": hc, "uid": uid, "last_time_iso": iso, "last_time_ms": ms,
+                "age_s": int((now_ms - ms) / 1000) if ms else None,
+            })
     elif not state["td_data_available"]:
         state["notes"].append("No td_state table: TD occupancy is unavailable in this database.")
 
