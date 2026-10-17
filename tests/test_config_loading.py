@@ -104,6 +104,37 @@ def test_parse_args_loads_toc_filter_from_config(monkeypatch, tmp_path):
     assert args.toc_filter == ['SE', 'SW']
 
 
+def test_parse_args_loads_toc_td_areas_from_config(monkeypatch, tmp_path):
+    """Test that configured TOC-TD area mappings are normalized."""
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump({
+        'user': 'test@example.com',
+        'password': 'testpass',
+        'db_path': str(tmp_path / 'railhub.db'),
+        'toc_td_areas': {'se': ['ek', 'WK', 'EK'], 'SW': 'WR'},
+    }))
+    monkeypatch.setattr('sys.argv', ['nrod_railhub', '--config', str(config_path)])
+
+    args = parse_args()
+
+    assert args.toc_td_areas == [('SE', 'EK'), ('SE', 'WK'), ('SW', 'WR')]
+
+
+def test_parse_args_rejects_invalid_toc_td_areas(monkeypatch, tmp_path):
+    """Test that malformed TOC-TD area configuration is rejected."""
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump({
+        'user': 'test@example.com',
+        'password': 'testpass',
+        'db_path': str(tmp_path / 'railhub.db'),
+        'toc_td_areas': ['SE', 'EK'],
+    }))
+    monkeypatch.setattr('sys.argv', ['nrod_railhub', '--config', str(config_path)])
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_merge_config_with_args_basic():
     """Test merging config values into args namespace."""
     args = argparse.Namespace(

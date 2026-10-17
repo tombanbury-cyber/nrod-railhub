@@ -226,6 +226,36 @@ def test_get_tocs_for_td_area():
         os.unlink(db_path)
 
 
+def test_sync_toc_td_areas_reconciles_yaml_rows_only():
+    """Test YAML mappings are replaced while other mapping sources are preserved."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
+        db_path = tmp_db.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.upsert_toc_td_area("SE", "EK", source="yaml")
+        db.upsert_toc_td_area("SE", "WK", source="yaml")
+        db.upsert_toc_td_area("SW", "WR", source="web_ui")
+
+        db.sync_toc_td_areas([("SE", "EK"), ("GW", "P1")])
+
+        mappings = db.get_toc_td_areas()
+        assert {(row["toc_code"], row["td_area"], row["source"]) for row in mappings} == {
+            ("SE", "EK", "yaml"),
+            ("GW", "P1", "yaml"),
+            ("SW", "WR", "web_ui"),
+        }
+
+        db.sync_toc_td_areas([])
+
+        mappings = db.get_toc_td_areas()
+        assert [(row["toc_code"], row["td_area"], row["source"]) for row in mappings] == [
+            ("SW", "WR", "web_ui"),
+        ]
+    finally:
+        os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_toc_td_areas_schema_creation()
     test_upsert_toc_td_area()
