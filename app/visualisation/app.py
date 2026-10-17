@@ -190,14 +190,18 @@ def _require_visualisation_schema(conn: Any) -> None:
         raise HTTPException(status_code=503, detail=f"missing visualisation tables: {', '.join(missing)}")
 
 
-def _json_or_empty(value: Optional[str]) -> dict[str, Any]:
-    if not value:
+def _json_or_empty(value: Any[str]) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
         return {}
     try:
         parsed = json.loads(value)
         return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    except (json.JSONDecodeError, TypeError):
+         return {}
+
+
 
 
 def _model_dump(model: BaseModel) -> dict[str, Any]:
@@ -1492,7 +1496,7 @@ async def get_layout(layout_id: str):
             "id": row["id"],
             "name": row["name"],
             "description": row["description"],
-            "data": json.loads(row["data"]) if row["data"] else {},
+            "data": _json_or_empty(row["data"]),
             "created_at": row["created_at"]
         }
 
