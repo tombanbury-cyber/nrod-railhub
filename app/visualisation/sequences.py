@@ -54,7 +54,7 @@ def resolve_stations(conn: Any, query: str, limit: int = 20) -> list[dict[str, A
             WHERE stanox IS NOT NULL AND stanox != ''
               AND (UPPER(crs) = UPPER(?) OR stanox = ? OR UPPER(tiploc) = UPPER(?) OR name LIKE ?)
             GROUP BY stanox
-            ORDER BY (UPPER(crs) = UPPER(?)) DESC, name
+            ORDER BY MAX(CASE WHEN UPPER(crs) = UPPER(?) THEN 1 ELSE 0 END) DESC, name
             LIMIT ?
             """,
             (query, query, query, like, query, limit),
