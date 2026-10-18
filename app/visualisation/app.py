@@ -10,11 +10,12 @@ import html
 import json
 import os
 import sqlite3
+import urllib.parse
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -232,556 +233,622 @@ def _normalise_import_berth_ids(berth_ids: list[str]) -> list[str]:
     return cleaned
 
 
-def _render_admin_page(layout_rows: list[Any], berth_rows: list[Any], signal_rows: list[Any]) -> str:
+_ADMIN_CSS = """
+    :root{--fg:#1f2937;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--danger:#dc2626}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,Arial,sans-serif;margin:0;background:#f6f8fb;color:var(--fg)}
+    main{max-width:1400px;margin:0 auto;padding:24px}
+    h1,h2,h3{margin:0 0 12px}
+    section,.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 20px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+    .cards .card{margin:0}
+    label{display:flex;flex-direction:column;gap:4px;font-size:14px}
+    input,textarea,select,button,.button{font:inherit;padding:8px;border:1px solid #cbd5e1;border-radius:8px}
+    button,.button{cursor:pointer;background:var(--accent);color:#fff;border-color:var(--accent);text-decoration:none;display:inline-block}
+    button.danger{background:var(--danger);border-color:var(--danger)}
+    button.secondary,.button.secondary{background:#fff;color:var(--fg);border-color:#cbd5e1}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    :focus-visible{outline:3px solid #f59e0b;outline-offset:2px}
+    .table-wrap{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border-bottom:1px solid var(--line);padding:6px;vertical-align:top;text-align:left}
+    th{background:#f8fafc}
+    td input,td select{width:100%;min-width:70px}
+    td.actions{white-space:nowrap}
+    .hint{color:var(--muted);font-size:13px;margin-top:4px}
+    .section-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;flex-wrap:wrap}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:flex-end}
+    .pager{display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap}
+    .status-message{margin-top:10px;font-size:14px;color:var(--accent)}
+    .status-message.error{color:var(--danger)}
+    .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+    dialog{max-width:min(960px,95vw);width:100%;border:1px solid var(--line);border-radius:12px;padding:16px}
+    dialog::backdrop{background:rgba(0,0,0,.4)}
+    @media (max-width:600px){main{padding:12px}}
+"""
+
+_ADMIN_COMMON_JS = """
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  Object.entries(props || {}).forEach(([k, v]) => {
+    if (k === "text") node.textContent = v;
+    else if (k === "class") node.className = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  });
+  (children || []).forEach((c) => node.appendChild(c));
+  return node;
+}
+
+function setStatus(id, message, isError) {
+  const status = document.getElementById(id);
+  if (!status) return;
+  status.textContent = message || "";
+  status.className = isError ? "status-message error" : "status-message";
+}
+
+async function submitJson(url, method, payload) {
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let detail = text || response.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed.detail === "string") detail = parsed.detail;
+      else if (Array.isArray(parsed.detail)) detail = parsed.detail.map((d) => (d.loc || []).join(".") + ": " + d.msg).join("; ");
+    } catch (e) { /* keep raw text */ }
+    throw new Error(detail);
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+function textCell(text) {
+  return el("td", { text: text || "" });
+}
+
+function messageRow(colspan, text) {
+  const cell = el("td", { text, colspan: String(colspan) });
+  return el("tr", {}, [cell]);
+}
+
+/* ---------- headcode chain import dialog ---------- */
+let headcodeRows = [];
+let currentChain = [];
+
+function trainChainUrl(train) {
+  if (train.td_area && train.headcode) {
+    return `/td/${encodeURIComponent(train.td_area)}/${encodeURIComponent(train.headcode)}/chain`;
+  }
+  return `/train/${encodeURIComponent(train.id)}/chain`;
+}
+
+function renderHeadcodeResults() {
+  const tbody = document.getElementById("headcode-results");
+  const query = document.getElementById("headcode-search").value.trim().toLowerCase();
+  tbody.replaceChildren();
+  const liveKeys = new Set(
+    headcodeRows.filter((t) => t.source === "td_state" && t.duplicate_key).map((t) => t.duplicate_key)
+  );
+  const filtered = headcodeRows.filter((train) => {
+    if (train.source === "train" && train.duplicate_key && liveKeys.has(train.duplicate_key)) return false;
+    return [train.headcode, train.td_area, train.id, train.description, train.current_berth]
+      .some((v) => String(v || "").toLowerCase().includes(query));
+  });
+  if (!filtered.length) {
+    tbody.appendChild(messageRow(6, "No headcodes matched the search."));
+    return;
+  }
+  filtered.slice(0, 100).forEach((train) => {
+    const button = el("button", { type: "button", class: "secondary", text: "View chain" });
+    button.addEventListener("click", () => loadTrainChain(train));
+    tbody.appendChild(el("tr", {}, [
+      textCell(train.headcode), textCell(train.td_area), textCell(train.id),
+      textCell(train.description), textCell(train.current_berth),
+      el("td", {}, [button]),
+    ]));
+  });
+  if (filtered.length > 100) {
+    tbody.appendChild(messageRow(6, `Showing first 100 of ${filtered.length} matches; refine the search.`));
+  }
+}
+
+function renderChainRows(chainData, train) {
+  currentChain = Array.isArray(chainData.chain) ? chainData.chain : [];
+  const tbody = document.getElementById("chain-results");
+  tbody.replaceChildren();
+  const label = [train.headcode || chainData.headcode || train.id, train.td_area || chainData.td_area]
+    .filter(Boolean).join(" • ");
+  document.getElementById("chain-summary").textContent = label ? `Chain for ${label}` : "Selected berth chain";
+  if (!currentChain.length) {
+    tbody.appendChild(messageRow(5, "No berth chain is available for the selected headcode."));
+    return;
+  }
+  currentChain.forEach((item, index) => {
+    const checkbox = el("input", {
+      type: "checkbox", class: "chain-import-checkbox",
+      "aria-label": `Import berth ${item.berth_id || index + 1}`,
+    });
+    checkbox.checked = Boolean(item.berth_id);
+    checkbox.dataset.berthId = item.berth_id || "";
+    tbody.appendChild(el("tr", {}, [
+      el("td", {}, [checkbox]), textCell(item.berth_id),
+      textCell(item.enter_time || item.last_time_iso), textCell(item.source), textCell(item.reason),
+    ]));
+  });
+}
+
+async function loadHeadcodes() {
+  setStatus("chain-import-status", "");
+  const tbody = document.getElementById("headcode-results");
+  tbody.replaceChildren(messageRow(6, "Loading headcodes…"));
+  try {
+    const response = await fetch("/trains");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    headcodeRows = await response.json();
+    renderHeadcodeResults();
+  } catch (error) {
+    console.error(error);
+    tbody.replaceChildren(messageRow(6, "Failed to load headcodes."));
+  }
+}
+
+async function loadTrainChain(train) {
+  setStatus("chain-import-status", "Loading berth chain…");
+  try {
+    const response = await fetch(trainChainUrl(train));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderChainRows(await response.json(), train);
+    setStatus("chain-import-status", `Loaded ${currentChain.length} berth item(s).`);
+  } catch (error) {
+    console.error(error);
+    setStatus("chain-import-status", "Failed to load the berth chain.", true);
+  }
+}
+
+function setAllChainSelections(selected) {
+  document.querySelectorAll(".chain-import-checkbox").forEach((cb) => { cb.checked = selected; });
+}
+
+async function importSelectedChainBerths() {
+  const layoutId = document.getElementById("chain-import-layout_id").value;
+  const berthIds = Array.from(document.querySelectorAll(".chain-import-checkbox"))
+    .filter((cb) => cb.checked && cb.dataset.berthId).map((cb) => cb.dataset.berthId);
+  if (!layoutId) return setStatus("chain-import-status", "Choose a layout before importing berths.", true);
+  if (!berthIds.length) return setStatus("chain-import-status", "Select at least one berth to import.", true);
+  try {
+    const result = await submitJson("/api/berths/import-chain", "POST", { layout_id: layoutId, berth_ids: berthIds });
+    const imported = Array.isArray(result.imported) ? result.imported.length : 0;
+    const skipped = Array.isArray(result.skipped_existing) ? result.skipped_existing.length : 0;
+    setStatus("chain-import-status", `Imported ${imported} berth(s) into ${layoutId}${skipped ? `; skipped ${skipped} existing.` : "."}`);
+    document.dispatchEvent(new CustomEvent("berths-imported", { detail: { layoutId } }));
+  } catch (error) {
+    console.error(error);
+    setStatus("chain-import-status", `Failed to import selected berths: ${error.message}`, true);
+  }
+}
+
+async function populateImportLayouts(defaultLayout) {
+  const select = document.getElementById("chain-import-layout_id");
+  const response = await fetch("/api/layouts");
+  const layouts = response.ok ? await response.json() : [];
+  select.replaceChildren();
+  layouts.forEach((layout) => {
+    const option = el("option", { value: layout.id, text: `${layout.id} — ${layout.name}` });
+    if (layout.id === defaultLayout) option.selected = true;
+    select.appendChild(option);
+  });
+}
+
+async function openImportDialog(defaultLayout) {
+  const dialog = document.getElementById("import-dialog");
+  await populateImportLayouts(defaultLayout);
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  loadHeadcodes();
+  document.getElementById("headcode-search").focus();
+}
+
+function closeImportDialog() {
+  const dialog = document.getElementById("import-dialog");
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+"""
+
+_ADMIN_IMPORT_DIALOG = """
+<dialog id="import-dialog" aria-labelledby="import-title">
+  <div class="section-head">
+    <div>
+      <h2 id="import-title">Import berths from headcode chain</h2>
+      <div class="hint">Search headcodes, inspect the berth chain, then choose exactly which berths to import into a layout.</div>
+    </div>
+    <button type="button" class="secondary" onclick="closeImportDialog()">Close</button>
+  </div>
+  <div class="toolbar">
+    <label>Search headcodes
+      <input id="headcode-search" placeholder="2C90, EK, BRTH_1…" oninput="renderHeadcodeResults()" />
+    </label>
+    <label>Import into layout
+      <select id="chain-import-layout_id"></select>
+    </label>
+    <button type="button" class="secondary" onclick="loadHeadcodes()">Refresh headcodes</button>
+  </div>
+  <h3>Matching headcodes</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Headcode</th><th>TD area</th><th>Train ID</th><th>Description</th><th>Current berth</th><th>Action</th></tr></thead>
+    <tbody id="headcode-results"></tbody>
+  </table></div>
+  <h3 style="margin-top:16px">Selected berth chain</h3>
+  <div class="hint" id="chain-summary">Select a headcode to view its berth chain.</div>
+  <div class="toolbar">
+    <button type="button" class="secondary" onclick="setAllChainSelections(true)">Select all</button>
+    <button type="button" class="secondary" onclick="setAllChainSelections(false)">Clear all</button>
+    <button type="button" onclick="importSelectedChainBerths()">Import selected berths</button>
+  </div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Import</th><th>Berth</th><th>Entered</th><th>Source</th><th>Reason</th></tr></thead>
+    <tbody id="chain-results"><tr><td colspan="5">No berth chain loaded.</td></tr></tbody>
+  </table></div>
+  <div id="chain-import-status" class="status-message" role="status" aria-live="polite"></div>
+</dialog>
+"""
+
+_ADMIN_LIST_JS = """
+async function deleteLayout(layoutId) {
+  if (!confirm(`Delete layout ${layoutId} and all of its berths and signals? This cannot be undone.`)) return;
+  try {
+    await submitJson(`/api/layouts/${encodeURIComponent(layoutId)}`, "DELETE");
+    window.location.reload();
+  } catch (error) {
+    setStatus("admin-status", `Failed to delete layout ${layoutId}: ${error.message}`, true);
+  }
+}
+document.querySelectorAll("[data-delete-layout]").forEach((btn) => {
+  btn.addEventListener("click", () => deleteLayout(btn.dataset.deleteLayout));
+});
+document.getElementById("open-import").addEventListener("click", () => openImportDialog(""));
+"""
+
+
+def _render_admin_page(layout_rows: list[Any], counts: Optional[dict[str, dict[str, int]]] = None) -> str:
+    """Render the layout landing/list page."""
+    counts = counts or {}
+
     def esc(value: Any) -> str:
         return html.escape("" if value is None else str(value), quote=True)
 
-    def json_text(value: Any) -> str:
-        return esc(json.dumps(value if value is not None else {}, indent=2, sort_keys=True))
-
-    def layout_options(selected: Optional[str] = None) -> str:
-        return "".join(
-            f"<option value='{esc(row['id'])}'{' selected' if row['id'] == selected else ''}>{esc(row['id'])} — {esc(row['name'])}</option>"
-            for row in layout_rows
+    cards = []
+    for row in layout_rows:
+        lid = row["id"]
+        c = counts.get(lid, {})
+        cards.append(
+            f"""<article class="card" aria-label="Layout {esc(lid)}">
+  <h2>{esc(row['name'])}</h2>
+  <div class="hint">ID: {esc(lid)}</div>
+  <p>{esc(row['description']) or '<span class="hint">No description</span>'}</p>
+  <div class="hint">{int(c.get('berths', 0))} berth(s) · {int(c.get('signals', 0))} signal(s)</div>
+  <div class="toolbar">
+    <a class="button" href="/admin/layouts/{esc(urllib.parse.quote(str(lid), safe=''))}">Edit</a>
+    <button type="button" class="danger" data-delete-layout="{esc(lid)}">Delete</button>
+  </div>
+</article>"""
         )
-
-    def layout_rows_html() -> str:
-        rows = []
-        for idx, row in enumerate(layout_rows):
-            row_key = f"layout-row-{idx}"
-            rows.append(
-                """
-                <tr>
-                  <td><input id="{row_key}-id" value="{id}" /></td>
-                  <td><input id="{row_key}-name" value="{name}" /></td>
-                  <td><input id="{row_key}-description" value="{description}" /></td>
-                  <td><textarea id="{row_key}-data" rows="3">{data}</textarea></td>
-                  <td class="actions">
-                    <input id="{row_key}-original" type="hidden" value="{id}" />
-                    <button type="button" onclick="saveLayout('{row_key}')">Save</button>
-                    <button type="button" onclick="deleteLayout('{row_key}')">Delete</button>
-                  </td>
-                </tr>
-                """.format(
-                    row_key=row_key,
-                    id=esc(row["id"]),
-                    name=esc(row["name"]),
-                    description=esc(row["description"]),
-                    data=json_text(_json_or_empty(row["data"])),
-                )
-            )
-        return "".join(rows)
-
-    def berth_rows_html() -> str:
-        rows = []
-        for idx, row in enumerate(berth_rows):
-            row_key = f"berth-row-{idx}"
-            rows.append(
-                """
-                <tr>
-                  <td><input id="{row_key}-id" value="{id}" /></td>
-                  <td><select id="{row_key}-layout_id">{layout_opts}</select></td>
-                  <td><input id="{row_key}-name" value="{name}" /></td>
-                  <td><input id="{row_key}-x" type="number" value="{x}" /></td>
-                  <td><input id="{row_key}-y" type="number" value="{y}" /></td>
-                  <td><input id="{row_key}-width" type="number" value="{width}" /></td>
-                  <td><input id="{row_key}-height" type="number" value="{height}" /></td>
-                  <td><input id="{row_key}-berth_type" value="{berth_type}" /></td>
-                  <td class="actions">
-                    <input id="{row_key}-original" type="hidden" value="{id}" />
-                    <button type="button" onclick="saveBerth('{row_key}')">Save</button>
-                    <button type="button" onclick="deleteBerth('{row_key}')">Delete</button>
-                  </td>
-                </tr>
-                """.format(
-                    row_key=row_key,
-                    id=esc(row["id"]),
-                    layout_opts=layout_options(row["layout_id"]),
-                    name=esc(row["name"]),
-                    x=esc(row["x"]),
-                    y=esc(row["y"]),
-                    width=esc(row["width"]),
-                    height=esc(row["height"]),
-                    berth_type=esc(row["berth_type"]),
-                )
-            )
-        return "".join(rows)
-
-    def signal_rows_html() -> str:
-        rows = []
-        for idx, row in enumerate(signal_rows):
-            row_key = f"signal-row-{idx}"
-            rows.append(
-                """
-                <tr>
-                  <td><input id="{row_key}-id" value="{id}" /></td>
-                  <td><select id="{row_key}-layout_id">{layout_opts}</select></td>
-                  <td><input id="{row_key}-name" value="{name}" /></td>
-                  <td><input id="{row_key}-x" type="number" value="{x}" /></td>
-                  <td><input id="{row_key}-y" type="number" value="{y}" /></td>
-                  <td><input id="{row_key}-signal_type" value="{signal_type}" /></td>
-                  <td class="actions">
-                    <input id="{row_key}-original" type="hidden" value="{id}" />
-                    <button type="button" onclick="saveSignal('{row_key}')">Save</button>
-                    <button type="button" onclick="deleteSignal('{row_key}')">Delete</button>
-                  </td>
-                </tr>
-                """.format(
-                    row_key=row_key,
-                    id=esc(row["id"]),
-                    layout_opts=layout_options(row["layout_id"]),
-                    name=esc(row["name"]),
-                    x=esc(row["x"]),
-                    y=esc(row["y"]),
-                    signal_type=esc(row["signal_type"]),
-                )
-            )
-        return "".join(rows)
-
-    return f"""
-<!doctype html>
+    body = "".join(cards) or '<p class="hint">No layouts yet. Create one to get started.</p>'
+    return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Visualisation admin</title>
-  <style>
-    body{{font-family:system-ui,Arial,sans-serif;margin:0;background:#f6f8fb;color:#1f2937}}
-    main{{max-width:1400px;margin:0 auto;padding:24px}}
-    h1,h2,h3{{margin:0 0 12px}}
-    section{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 20px;box-shadow:0 1px 2px rgba(0,0,0,.04)}}
-    .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}}
-    label{{display:flex;flex-direction:column;gap:4px;font-size:14px}}
-    input,textarea,select,button{{font:inherit;padding:8px;border:1px solid #cbd5e1;border-radius:8px}}
-    textarea{{min-height:92px}}
-    button{{cursor:pointer;background:#2563eb;color:#fff;border-color:#2563eb}}
-    button.delete{{background:#dc2626;border-color:#dc2626}}
-    button.secondary{{background:#fff;color:#1f2937}}
-    table{{width:100%;border-collapse:collapse;margin-top:12px}}
-    th,td{{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;text-align:left}}
-    th{{background:#f8fafc}}
-    td.actions{{white-space:nowrap}}
-    .hint{{color:#6b7280;font-size:13px;margin-top:4px}}
-    .section-head{{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;flex-wrap:wrap}}
-    .layout-editor, .berth-editor, .signal-editor{{margin-top:14px}}
-    .search-grid{{margin-top:14px}}
-    .search-results, .chain-view{{margin-top:14px}}
-    .toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}
-    .status-message{{margin-top:10px;font-size:14px;color:#2563eb}}
-    .status-message.error{{color:#dc2626}}
-  </style>
+  <style>{_ADMIN_CSS}</style>
 </head>
 <body>
 <main>
-  <h1>Visualisation admin</h1>
-  <p class="hint">Edit layout, berth, and signal rows in the SQLite database.</p>
-  <section>
-    <div class="section-head">
-      <div>
-        <h2>Headcode chain import</h2>
-        <div class="hint">Search headcodes, inspect the berth chain, then choose exactly which berths to import into a layout.</div>
-      </div>
-      <button type="button" class="secondary" onclick="loadHeadcodes()">Refresh headcodes</button>
+  <div class="section-head">
+    <div>
+      <h1>Visualisation admin</h1>
+      <p class="hint">Manage layouts. Open a layout to edit its settings, berths and signals.</p>
     </div>
-    <div class="search-grid grid">
-      <label>Search headcodes
-        <input id="headcode-search" placeholder="2C90, EK, BRTH_1…" oninput="renderHeadcodeResults()" />
-      </label>
-      <label>Import into layout
-        <select id="chain-import-layout_id">{layout_options()}</select>
-      </label>
+    <div class="toolbar">
+      <a class="button" href="/admin/new-layout">Create layout</a>
+      <button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>
     </div>
-    <div class="search-results">
-      <h3>Matching headcodes</h3>
-      <table>
-        <thead><tr><th>Headcode</th><th>TD area</th><th>Train ID</th><th>Description</th><th>Current berth</th><th>Action</th></tr></thead>
-        <tbody id="headcode-results"><tr><td colspan="6">Loading headcodes…</td></tr></tbody>
-      </table>
-    </div>
-    <div class="chain-view">
-      <div class="section-head">
-        <div>
-          <h3>Selected berth chain</h3>
-          <div class="hint" id="chain-summary">Select a headcode to view its berth chain.</div>
-        </div>
-      </div>
-      <div class="toolbar">
-        <button type="button" class="secondary" onclick="setAllChainSelections(true)">Select all</button>
-        <button type="button" class="secondary" onclick="setAllChainSelections(false)">Clear all</button>
-        <button type="button" onclick="importSelectedChainBerths()">Import selected berths</button>
-      </div>
-      <table>
-        <thead><tr><th>Import</th><th>Berth</th><th>Entered</th><th>Source</th><th>Reason</th></tr></thead>
-        <tbody id="chain-results"><tr><td colspan="5">No berth chain loaded.</td></tr></tbody>
-      </table>
-      <div id="chain-import-status" class="status-message"></div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <div>
-        <h2>Layout editor</h2>
-        <div class="hint">Create a layout, then edit its ID/name/description/JSON metadata inline.</div>
-      </div>
-    </div>
-    <div class="layout-editor grid">
-      <label>ID <input id="new-layout-id" /></label>
-      <label>Name <input id="new-layout-name" /></label>
-      <label>Description <input id="new-layout-description" /></label>
-      <label>Data <textarea id="new-layout-data">{{}}</textarea></label>
-    </div>
-    <p><button type="button" onclick="createLayout()">Create layout</button></p>
-    <table>
-      <thead><tr><th>ID</th><th>Name</th><th>Description</th><th>Data</th><th>Actions</th></tr></thead>
-      <tbody>{layout_rows_html()}</tbody>
-    </table>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <div>
-        <h2>Berth editor</h2>
-        <div class="hint">Berths belong to a layout and can be moved or renamed inline.</div>
-      </div>
-    </div>
-    <div class="berth-editor grid">
-      <label>ID <input id="new-berth-id" /></label>
-      <label>Layout <select id="new-berth-layout_id">{layout_options()}</select></label>
-      <label>Name <input id="new-berth-name" /></label>
-      <label>X <input id="new-berth-x" type="number" value="0" /></label>
-      <label>Y <input id="new-berth-y" type="number" value="0" /></label>
-      <label>Width <input id="new-berth-width" type="number" value="{DEFAULT_BERTH_WIDTH}" /></label>
-      <label>Height <input id="new-berth-height" type="number" value="{DEFAULT_BERTH_HEIGHT}" /></label>
-      <label>Type <input id="new-berth-berth_type" value="normal" /></label>
-    </div>
-    <p><button type="button" onclick="createBerth()">Create berth</button></p>
-    <table>
-      <thead><tr><th>ID</th><th>Layout</th><th>Name</th><th>X</th><th>Y</th><th>Width</th><th>Height</th><th>Type</th><th>Actions</th></tr></thead>
-      <tbody>{berth_rows_html()}</tbody>
-    </table>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <div>
-        <h2>Signal editor</h2>
-        <div class="hint">Signals can be created, moved, renamed, or deleted from the browser.</div>
-      </div>
-    </div>
-    <div class="signal-editor grid">
-      <label>ID <input id="new-signal-id" /></label>
-      <label>Layout <select id="new-signal-layout_id">{layout_options()}</select></label>
-      <label>Name <input id="new-signal-name" /></label>
-      <label>X <input id="new-signal-x" type="number" value="0" /></label>
-      <label>Y <input id="new-signal-y" type="number" value="0" /></label>
-      <label>Type <input id="new-signal-signal_type" value="auto" /></label>
-    </div>
-    <p><button type="button" onclick="createSignal()">Create signal</button></p>
-    <table>
-      <thead><tr><th>ID</th><th>Layout</th><th>Name</th><th>X</th><th>Y</th><th>Type</th><th>Actions</th></tr></thead>
-      <tbody>{signal_rows_html()}</tbody>
-    </table>
-  </section>
+  </div>
+  <div id="admin-status" class="status-message" role="alert"></div>
+  <h2 class="sr-only">Layouts</h2>
+  <div class="cards">{body}</div>
 </main>
+{_ADMIN_IMPORT_DIALOG}
 <script>
-let headcodeRows = [];
-let currentChain = [];
-
-function rowValue(rowKey, field) {{
-  const el = document.getElementById(`${{rowKey}}-${{field}}`);
-  return el ? el.value.trim() : "";
-}}
-
-function rowNumber(rowKey, field) {{
-  return Number(rowValue(rowKey, field));
-}}
-
-async function submitJson(url, method, payload) {{
-  const response = await fetch(url, {{
-    method,
-    headers: {{ "Content-Type": "application/json" }},
-    body: JSON.stringify(payload),
-  }});
-  const text = await response.text();
-  if (!response.ok) {{
-    throw new Error(text || response.statusText);
-  }}
-  return text ? JSON.parse(text) : {{}};
-}}
-
-function parseLayoutData(inputId) {{
-  const raw = document.getElementById(inputId).value.trim() || "{{}}";
-  return JSON.parse(raw);
-}}
-
-function setChainStatus(message, isError = false) {{
-  const status = document.getElementById("chain-import-status");
-  status.textContent = message;
-  status.className = isError ? "status-message error" : "status-message";
-}}
-
-function createTextCell(text) {{
-  const cell = document.createElement("td");
-  cell.textContent = text || "";
-  return cell;
-}}
-
-function trainChainUrl(train) {{
-  if (train.td_area && train.headcode) {{
-    return `/td/${{encodeURIComponent(train.td_area)}}/${{encodeURIComponent(train.headcode)}}/chain`;
-  }}
-  return `/train/${{encodeURIComponent(train.id)}}/chain`;
-}}
-
-function renderHeadcodeResults() {{
-  const tbody = document.getElementById("headcode-results");
-  const query = document.getElementById("headcode-search").value.trim().toLowerCase();
-  tbody.innerHTML = "";
-  const liveDuplicateKeys = new Set(
-    headcodeRows
-      .filter(train => train.source === "td_state" && train.duplicate_key)
-      .map(train => train.duplicate_key)
-  );
-  const filtered = headcodeRows.filter(train => {{
-    if (train.source === "train" && train.duplicate_key && liveDuplicateKeys.has(train.duplicate_key)) {{
-      return false;
-    }}
-    return [train.headcode, train.td_area, train.id, train.description, train.current_berth]
-      .some(value => String(value || "").toLowerCase().includes(query));
-  }});
-  if (!filtered.length) {{
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 6;
-    cell.textContent = "No headcodes matched the search.";
-    row.appendChild(cell);
-    tbody.appendChild(row);
-    return;
-  }}
-  filtered.forEach(train => {{
-    const row = document.createElement("tr");
-    row.appendChild(createTextCell(train.headcode || ""));
-    row.appendChild(createTextCell(train.td_area || ""));
-    row.appendChild(createTextCell(train.id || ""));
-    row.appendChild(createTextCell(train.description || ""));
-    row.appendChild(createTextCell(train.current_berth || ""));
-    const actionCell = document.createElement("td");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "secondary";
-    button.textContent = "View chain";
-    button.addEventListener("click", () => loadTrainChain(train));
-    actionCell.appendChild(button);
-    row.appendChild(actionCell);
-    tbody.appendChild(row);
-  }});
-}}
-
-function renderChainRows(chainData, train) {{
-  currentChain = Array.isArray(chainData.chain) ? chainData.chain : [];
-  const tbody = document.getElementById("chain-results");
-  const summary = document.getElementById("chain-summary");
-  tbody.innerHTML = "";
-  const label = [train.headcode || chainData.headcode || train.id, train.td_area || chainData.td_area]
-    .filter(Boolean)
-    .join(" • ");
-  summary.textContent = label ? `Chain for ${{label}}` : "Selected berth chain";
-  if (!currentChain.length) {{
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 5;
-    cell.textContent = "No berth chain is available for the selected headcode.";
-    row.appendChild(cell);
-    tbody.appendChild(row);
-    return;
-  }}
-  currentChain.forEach((item, index) => {{
-    const row = document.createElement("tr");
-    const checkboxCell = document.createElement("td");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(item.berth_id);
-    checkbox.className = "chain-import-checkbox";
-    checkbox.dataset.berthId = item.berth_id || "";
-    checkbox.dataset.chainIndex = String(index);
-    checkbox.setAttribute("aria-label", `Import berth ${{item.berth_id || index + 1}}`);
-    checkboxCell.appendChild(checkbox);
-    row.appendChild(checkboxCell);
-    row.appendChild(createTextCell(item.berth_id || ""));
-    row.appendChild(createTextCell(item.enter_time || item.last_time_iso || ""));
-    row.appendChild(createTextCell(item.source || ""));
-    row.appendChild(createTextCell(item.reason || ""));
-    tbody.appendChild(row);
-  }});
-}}
-
-async function loadHeadcodes() {{
-  setChainStatus("");
-  try {{
-    const response = await fetch("/trains");
-    if (!response.ok) {{
-      throw new Error(`HTTP ${{response.status}}`);
-    }}
-    headcodeRows = await response.json();
-    renderHeadcodeResults();
-  }} catch (error) {{
-    console.error(error);
-    const tbody = document.getElementById("headcode-results");
-    tbody.innerHTML = '<tr><td colspan="6">Failed to load headcodes.</td></tr>';
-  }}
-}}
-
-async function loadTrainChain(train) {{
-  setChainStatus("Loading berth chain…");
-  try {{
-    const response = await fetch(trainChainUrl(train));
-    if (!response.ok) {{
-      throw new Error(`HTTP ${{response.status}}`);
-    }}
-    const chainData = await response.json();
-    renderChainRows(chainData, train);
-    setChainStatus(`Loaded ${{currentChain.length}} berth item(s).`);
-  }} catch (error) {{
-    console.error(error);
-    setChainStatus("Failed to load the berth chain.", true);
-  }}
-}}
-
-function setAllChainSelections(selected) {{
-  document.querySelectorAll(".chain-import-checkbox").forEach((checkbox) => {{
-    checkbox.checked = selected;
-  }});
-}}
-
-async function importSelectedChainBerths() {{
-  const layoutId = document.getElementById("chain-import-layout_id").value;
-  const berthIds = Array.from(document.querySelectorAll(".chain-import-checkbox"))
-    .filter((checkbox) => checkbox.checked && checkbox.dataset.berthId)
-    .map((checkbox) => checkbox.dataset.berthId);
-  if (!layoutId) {{
-    setChainStatus("Choose a layout before importing berths.", true);
-    return;
-  }}
-  if (!berthIds.length) {{
-    setChainStatus("Select at least one berth to import.", true);
-    return;
-  }}
-  try {{
-    const result = await submitJson("/api/berths/import-chain", "POST", {{
-      layout_id: layoutId,
-      berth_ids: berthIds,
-    }});
-    const importedCount = Array.isArray(result.imported) ? result.imported.length : 0;
-    const skippedCount = Array.isArray(result.skipped_existing) ? result.skipped_existing.length : 0;
-    setChainStatus(`Imported ${{importedCount}} berth(s) into ${{layoutId}}${{skippedCount ? `; skipped ${{skippedCount}} existing.` : "."}} Refresh to see them in the berth editor.`);
-  }} catch (error) {{
-    console.error(error);
-    setChainStatus("Failed to import selected berths.", true);
-  }}
-}}
-
-async function createLayout() {{
-  await submitJson("/api/layouts", "POST", {{
-    id: rowValue("new-layout", "id"),
-    name: rowValue("new-layout", "name"),
-    description: rowValue("new-layout", "description") || null,
-    data: parseLayoutData("new-layout-data"),
-  }});
-  window.location.reload();
-}}
-
-async function saveLayout(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  await submitJson(`/api/layouts/${{encodeURIComponent(originalId)}}`, "PUT", {{
-    id: rowValue(rowKey, "id"),
-    name: rowValue(rowKey, "name"),
-    description: rowValue(rowKey, "description") || null,
-    data: parseLayoutData(`${{rowKey}}-data`),
-  }});
-  window.location.reload();
-}}
-
-async function deleteLayout(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  if (!confirm(`Delete layout ${{originalId}}?`)) return;
-  await submitJson(`/api/layouts/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
-  window.location.reload();
-}}
-
-async function createBerth() {{
-  await submitJson("/api/berths", "POST", {{
-    id: rowValue("new-berth", "id"),
-    layout_id: rowValue("new-berth", "layout_id"),
-    name: rowValue("new-berth", "name"),
-    x: rowNumber("new-berth", "x"),
-    y: rowNumber("new-berth", "y"),
-    width: rowNumber("new-berth", "width"),
-    height: rowNumber("new-berth", "height"),
-    berth_type: rowValue("new-berth", "berth_type"),
-  }});
-  window.location.reload();
-}}
-
-async function saveBerth(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  await submitJson(`/api/berths/${{encodeURIComponent(originalId)}}`, "PUT", {{
-    id: rowValue(rowKey, "id"),
-    layout_id: rowValue(rowKey, "layout_id"),
-    name: rowValue(rowKey, "name"),
-    x: rowNumber(rowKey, "x"),
-    y: rowNumber(rowKey, "y"),
-    width: rowNumber(rowKey, "width"),
-    height: rowNumber(rowKey, "height"),
-    berth_type: rowValue(rowKey, "berth_type"),
-  }});
-  window.location.reload();
-}}
-
-async function deleteBerth(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  if (!confirm(`Delete berth ${{originalId}}?`)) return;
-  await submitJson(`/api/berths/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
-  window.location.reload();
-}}
-
-async function createSignal() {{
-  await submitJson("/api/signals", "POST", {{
-    id: rowValue("new-signal", "id"),
-    layout_id: rowValue("new-signal", "layout_id"),
-    name: rowValue("new-signal", "name"),
-    x: rowNumber("new-signal", "x"),
-    y: rowNumber("new-signal", "y"),
-    signal_type: rowValue("new-signal", "signal_type"),
-  }});
-  window.location.reload();
-}}
-
-async function saveSignal(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  await submitJson(`/api/signals/${{encodeURIComponent(originalId)}}`, "PUT", {{
-    id: rowValue(rowKey, "id"),
-    layout_id: rowValue(rowKey, "layout_id"),
-    name: rowValue(rowKey, "name"),
-    x: rowNumber(rowKey, "x"),
-    y: rowNumber(rowKey, "y"),
-    signal_type: rowValue(rowKey, "signal_type"),
-  }});
-  window.location.reload();
-}}
-
-async function deleteSignal(rowKey) {{
-  const originalId = rowValue(rowKey, "original");
-  if (!confirm(`Delete signal ${{originalId}}?`)) return;
-  await submitJson(`/api/signals/${{encodeURIComponent(originalId)}}`, "DELETE", {{}});
-  window.location.reload();
-}}
-
-loadHeadcodes();
+{_ADMIN_COMMON_JS}
+{_ADMIN_LIST_JS}
 </script>
 </body>
 </html>
 """
+
+
+_ADMIN_LAYOUT_JS = """
+const body = document.body;
+let layoutId = body.dataset.layoutId || "";
+const isNew = body.dataset.mode === "new";
+
+const TABLES = {
+  berth: {
+    api: "/api/berths", status: "berth-status", body: "berth-rows", cols: 9,
+    fields: [["id","text"],["name","text"],["x","number"],["y","number"],["width","number"],["height","number"],["berth_type",["normal","platform","siding"]]],
+  },
+  signal: {
+    api: "/api/signals", status: "signal-status", body: "signal-rows", cols: 7,
+    fields: [["id","text"],["name","text"],["x","number"],["y","number"],["signal_type",["auto","controlled","shunt"]]],
+  },
+};
+const tableState = { berth: { page: 1 }, signal: { page: 1 } };
+
+function readLayoutForm() {
+  const raw = document.getElementById("layout-data").value.trim() || "{}";
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { throw new Error("Layout data is not valid JSON."); }
+  return {
+    id: document.getElementById("layout-id").value.trim(),
+    name: document.getElementById("layout-name").value.trim(),
+    description: document.getElementById("layout-description").value.trim() || null,
+    data,
+  };
+}
+
+async function saveLayout(event) {
+  event.preventDefault();
+  try {
+    const payload = readLayoutForm();
+    if (isNew) await submitJson("/api/layouts", "POST", payload);
+    else await submitJson(`/api/layouts/${encodeURIComponent(layoutId)}`, "PUT", payload);
+    window.location.href = `/admin/layouts/${encodeURIComponent(payload.id)}`;
+  } catch (error) {
+    setStatus("layout-status", `Failed to save layout: ${error.message}`, true);
+  }
+}
+
+async function loadLayout() {
+  try {
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const layout = await response.json();
+    document.getElementById("layout-id").value = layout.id;
+    document.getElementById("layout-name").value = layout.name;
+    document.getElementById("layout-description").value = layout.description || "";
+    document.getElementById("layout-data").value = JSON.stringify(layout.data || {}, null, 2);
+  } catch (error) {
+    setStatus("layout-status", `Failed to load layout: ${error.message}`, true);
+  }
+}
+
+async function deleteLayout() {
+  if (!confirm(`Delete layout ${layoutId} and all of its berths and signals? This cannot be undone.`)) return;
+  try {
+    await submitJson(`/api/layouts/${encodeURIComponent(layoutId)}`, "DELETE");
+    window.location.href = "/admin";
+  } catch (error) {
+    setStatus("layout-status", `Failed to delete layout: ${error.message}`, true);
+  }
+}
+
+function fieldInput(name, kind, value, label) {
+  let input;
+  if (Array.isArray(kind)) {
+    input = el("select", { "aria-label": label });
+    kind.forEach((opt) => input.appendChild(el("option", { value: opt, text: opt })));
+  } else {
+    input = el("input", { type: kind, "aria-label": label });
+  }
+  input.name = name;
+  if (value !== undefined && value !== null) input.value = value;
+  return input;
+}
+
+function collect(kind, container) {
+  const payload = { layout_id: layoutId };
+  TABLES[kind].fields.forEach(([name, type]) => {
+    const input = container.querySelector(`[name="${name}"]`);
+    payload[name] = type === "number" ? Number(input.value) : input.value.trim();
+  });
+  return payload;
+}
+
+async function reloadAfter(kind, action, okMessage) {
+  const cfg = TABLES[kind];
+  try {
+    await action();
+    setStatus(cfg.status, okMessage);
+    await loadTable(kind);
+  } catch (error) {
+    setStatus(cfg.status, `Failed: ${error.message}`, true);
+  }
+}
+
+function renderRow(kind, item) {
+  const cfg = TABLES[kind];
+  const tr = el("tr");
+  tr.dataset.originalId = item.id;
+  cfg.fields.forEach(([name, type]) => {
+    tr.appendChild(el("td", {}, [fieldInput(name, type, item[name], `${kind} ${item.id} ${name}`)]));
+  });
+  const save = el("button", { type: "button", text: "Save" });
+  save.addEventListener("click", () => reloadAfter(kind,
+    () => submitJson(`${cfg.api}/${encodeURIComponent(item.id)}`, "PUT", collect(kind, tr)), `Saved ${kind} ${item.id}.`));
+  const del = el("button", { type: "button", class: "danger", text: "Delete" });
+  del.addEventListener("click", () => {
+    if (!confirm(`Delete ${kind} ${item.id}?`)) return;
+    reloadAfter(kind, () => submitJson(`${cfg.api}/${encodeURIComponent(item.id)}`, "DELETE"), `Deleted ${kind} ${item.id}.`);
+  });
+  tr.appendChild(el("td", { class: "actions" }, [save, document.createTextNode(" "), del]));
+  return tr;
+}
+
+async function loadTable(kind) {
+  const cfg = TABLES[kind];
+  const tbody = document.getElementById(cfg.body);
+  const q = document.getElementById(`${kind}-q`).value.trim();
+  const type = document.getElementById(`${kind}-type`).value;
+  const size = document.getElementById(`${kind}-page-size`).value;
+  const params = new URLSearchParams({ page: tableState[kind].page, page_size: size });
+  if (q) params.set("q", q);
+  if (type) params.set("type", type);
+  tbody.setAttribute("aria-busy", "true");
+  tbody.replaceChildren(messageRow(cfg.fields.length + 1, "Loading…"));
+  try {
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/${kind}s?${params}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    tableState[kind].page = data.page;
+    tbody.replaceChildren();
+    if (!data.items.length) {
+      tbody.appendChild(messageRow(cfg.fields.length + 1, q || type ? `No ${kind}s match the filters.` : `No ${kind}s in this layout yet.`));
+    }
+    data.items.forEach((item) => tbody.appendChild(renderRow(kind, item)));
+    document.getElementById(`${kind}-page-info`).textContent =
+      `Page ${data.page} of ${data.pages} · ${data.total} ${kind}(s)`;
+    document.getElementById(`${kind}-prev`).disabled = data.page <= 1;
+    document.getElementById(`${kind}-next`).disabled = data.page >= data.pages;
+  } catch (error) {
+    console.error(error);
+    tbody.replaceChildren(messageRow(cfg.fields.length + 1, "Failed to load data."));
+    setStatus(cfg.status, `Failed to load ${kind}s: ${error.message}`, true);
+  } finally {
+    tbody.removeAttribute("aria-busy");
+  }
+}
+
+function setupTable(kind) {
+  const cfg = TABLES[kind];
+  const reset = () => { tableState[kind].page = 1; loadTable(kind); };
+  let timer = null;
+  document.getElementById(`${kind}-q`).addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(reset, 250); });
+  document.getElementById(`${kind}-type`).addEventListener("change", reset);
+  document.getElementById(`${kind}-page-size`).addEventListener("change", reset);
+  document.getElementById(`${kind}-prev`).addEventListener("click", () => { tableState[kind].page -= 1; loadTable(kind); });
+  document.getElementById(`${kind}-next`).addEventListener("click", () => { tableState[kind].page += 1; loadTable(kind); });
+  const form = document.getElementById(`${kind}-create`);
+  cfg.fields.forEach(([name, type]) => {
+    const defaults = { x: 0, y: 0, width: 60, height: 30, berth_type: "normal", signal_type: "auto" };
+    const input = fieldInput(name, type, defaults[name], name);
+    const label = el("label", { text: name.replace("_", " ") });
+    label.appendChild(input);
+    form.querySelector(".fields").appendChild(label);
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    reloadAfter(kind, () => submitJson(cfg.api, "POST", collect(kind, form)), `Created ${kind}.`);
+  });
+  loadTable(kind);
+}
+
+document.getElementById("layout-form").addEventListener("submit", saveLayout);
+if (!isNew) {
+  loadLayout();
+  document.getElementById("delete-layout").addEventListener("click", deleteLayout);
+  setupTable("berth");
+  setupTable("signal");
+  document.getElementById("open-import").addEventListener("click", () => openImportDialog(layoutId));
+  document.addEventListener("berths-imported", () => loadTable("berth"));
+}
+"""
+
+
+def _render_layout_page(layout_id: Optional[str]) -> str:
+    """Render the layout create/edit page. ``layout_id`` is None when creating."""
+    is_new = layout_id is None
+    esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
+
+    def table_section(kind: str, title: str, headers: list[str], types: list[str]) -> str:
+        head = "".join(f"<th scope='col'>{esc(h)}</th>" for h in headers + ["Actions"])
+        type_opts = "".join(f"<option value='{t}'>{t}</option>" for t in types)
+        return f"""
+  <section aria-labelledby="{kind}-heading">
+    <h2 id="{kind}-heading">{title}</h2>
+    <details>
+      <summary>Add {kind}</summary>
+      <form id="{kind}-create" class="toolbar">
+        <div class="fields grid" style="flex:1"></div>
+        <button type="submit">Create {kind}</button>
+      </form>
+    </details>
+    <div class="toolbar">
+      <label>Search <input id="{kind}-q" type="search" placeholder="ID or name" /></label>
+      <label>Type <select id="{kind}-type"><option value="">All types</option>{type_opts}</select></label>
+      <label>Per page <select id="{kind}-page-size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></label>
+    </div>
+    <div id="{kind}-status" class="status-message" role="status" aria-live="polite"></div>
+    <div class="table-wrap"><table>
+      <caption class="sr-only">{title}</caption>
+      <thead><tr>{head}</tr></thead>
+      <tbody id="{kind}-rows"></tbody>
+    </table></div>
+    <div class="pager">
+      <button type="button" class="secondary" id="{kind}-prev">Previous</button>
+      <span id="{kind}-page-info" aria-live="polite"></span>
+      <button type="button" class="secondary" id="{kind}-next">Next</button>
+    </div>
+  </section>"""
+
+    related = ""
+    actions = ""
+    if not is_new:
+        related = table_section(
+            "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"], ["normal", "platform", "siding"]
+        ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"])
+        actions = (
+            '<button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>'
+            '<button type="button" class="danger" id="delete-layout">Delete layout</button>'
+        )
+    mode = "new" if is_new else "edit"
+    lid_attr = "" if is_new else f' data-layout-id="{esc(layout_id)}"'
+    title = "Create layout" if is_new else f"Edit layout {esc(layout_id)}"
+    dialog = "" if is_new else _ADMIN_IMPORT_DIALOG
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{title} – Visualisation admin</title>
+  <style>{_ADMIN_CSS}</style>
+</head>
+<body data-mode="{mode}"{lid_attr}>
+<main>
+  <p><a href="/admin">← All layouts</a></p>
+  <h1>{title}</h1>
+  <section aria-labelledby="settings-heading">
+    <h2 id="settings-heading">Layout settings</h2>
+    <form id="layout-form">
+      <div class="grid">
+        <label>ID <input id="layout-id" required /></label>
+        <label>Name <input id="layout-name" required /></label>
+        <label>Description <input id="layout-description" /></label>
+        <label>Metadata (JSON) <textarea id="layout-data" rows="5">{{}}</textarea></label>
+      </div>
+      <div class="toolbar">
+        <button type="submit">{'Create layout' if is_new else 'Save layout'}</button>
+        {actions}
+      </div>
+      <div id="layout-status" class="status-message" role="alert"></div>
+    </form>
+  </section>
+  {related}
+</main>
+{dialog}
+<script>
+{_ADMIN_COMMON_JS}
+{_ADMIN_LAYOUT_JS}
+</script>
+</body>
+</html>
+"""
+
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -1040,15 +1107,124 @@ def _fetch_td_chain(
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
+def _paged_children(
+    table: str,
+    type_column: str,
+    allowed_types: tuple[str, ...],
+    layout_id: str,
+    q: Optional[str],
+    type_: Optional[str],
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
+    """Return a filtered, paged slice of berth/signal rows for a layout."""
+    if type_ and type_ not in allowed_types:
+        raise HTTPException(status_code=422, detail="Invalid type filter")
+    where = "layout_id = ?"
+    params: list[Any] = [layout_id]
+    if q and q.strip():
+        like = f"%{_escape_like(q.strip().lower())}%"
+        where += " AND (LOWER(id) LIKE ? ESCAPE '!' OR LOWER(name) LIKE ? ESCAPE '!')"
+        params.extend([like, like])
+    if type_:
+        where += f" AND {type_column} = ?"
+        params.append(type_)
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+        total = int(conn.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE {where}", params).fetchone()["n"])
+        pages = max(1, -(-total // page_size))
+        page = min(page, pages)
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE {where} ORDER BY name, id LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+        return {
+            "items": [_row_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+        }
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin():
-    """Render a lightweight browser CRUD UI for layout, berth, and signal tables."""
+    """Render the layout landing page with CRUD controls."""
     with get_conn() as conn:
         _require_visualisation_schema(conn)
         layout_rows = conn.execute("SELECT * FROM layout ORDER BY id").fetchall()
-        berth_rows = conn.execute("SELECT * FROM berth ORDER BY layout_id, name").fetchall()
-        signal_rows = conn.execute("SELECT * FROM signal ORDER BY layout_id, name").fetchall()
-        return _render_admin_page(layout_rows, berth_rows, signal_rows)
+        counts: dict[str, dict[str, int]] = {}
+        for table, key in (("berth", "berths"), ("signal", "signals")):
+            for row in conn.execute(f"SELECT layout_id, COUNT(*) AS n FROM {table} GROUP BY layout_id").fetchall():
+                counts.setdefault(row["layout_id"], {})[key] = int(row["n"])
+        return _render_admin_page(layout_rows, counts)
+
+
+@app.get("/admin/new-layout", response_class=HTMLResponse)
+async def admin_new_layout():
+    """Render the create-layout page."""
+    return _render_layout_page(None)
+
+
+@app.get("/admin/layouts/{layout_id}", response_class=HTMLResponse)
+async def admin_edit_layout(layout_id: str):
+    """Render the layout edit page with paged berth and signal tables."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+    return _render_layout_page(layout_id)
+
+
+@app.get("/api/layouts")
+async def list_layouts():
+    """List all layouts."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        rows = conn.execute("SELECT * FROM layout ORDER BY id").fetchall()
+        return [
+            {"id": r["id"], "name": r["name"], "description": r["description"], "data": _json_or_empty(r["data"])}
+            for r in rows
+        ]
+
+
+@app.get("/api/layouts/{layout_id}")
+async def read_layout(layout_id: str):
+    """Return a single layout."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        r = conn.execute("SELECT * FROM layout WHERE id = ?", (layout_id,)).fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="Layout not found")
+        return {"id": r["id"], "name": r["name"], "description": r["description"], "data": _json_or_empty(r["data"])}
+
+
+@app.get("/api/layouts/{layout_id}/berths")
+async def list_layout_berths(
+    layout_id: str,
+    q: Optional[str] = None,
+    type: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+):
+    """List a layout's berths with search, type filter and paging."""
+    return _paged_children("berth", "berth_type", ("normal", "platform", "siding"), layout_id, q, type, page, page_size)
+
+
+@app.get("/api/layouts/{layout_id}/signals")
+async def list_layout_signals(
+    layout_id: str,
+    q: Optional[str] = None,
+    type: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+):
+    """List a layout's signals with search, type filter and paging."""
+    return _paged_children("signal", "signal_type", ("auto", "controlled", "shunt"), layout_id, q, type, page, page_size)
 
 
 @app.post("/api/layouts")
