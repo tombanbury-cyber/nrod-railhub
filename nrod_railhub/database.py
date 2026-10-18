@@ -85,7 +85,9 @@ class RailDB:
         # Raw JSON storage setting
         self.save_raw_json = save_raw_json
         self._td_movement_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        
+        self._sclass_score_refresh_lock = threading.Lock()
+        self._sclass_score_refresh_at: Dict[str, float] = {}
+
         self.enable_mapper = enable_mapper
         if enable_mapper:
             self.ensure_mapper_schema()
@@ -3063,6 +3065,27 @@ class RailDB:
                 "summary_count": summary_count,
                 "area": td_area,
             }
+            
+    def _refresh_td_sclass_movement_scores_if_due(
+        self, td_area: str, min_interval_s: float = 10.0
+    ) -> Optional[dict]:
+        """Limit expensive full-area score rebuilds during live event processing."""
+        area = self._norm_text(td_area, upper=True)
+        now = time.monotonic()
+        with self._sclass_score_refresh_lock:
+            last_refresh = self._sclass_score_refresh_at.get(area, 0.0)
+            if now - last_refresh < min_interval_s:
+                return None
+            self._sclass_score_refresh_at[area] = now
+
+        try:
+            return self._refresh_td_sclass_movement_scores(area)
+        except Exception:
+            with self._sclass_score_refresh_lock:
+                self._sclass_score_refresh_at.pop(area, None)
+            raise
+
+
 
     def _build_td_sclass_observation(self, movement: dict, change: dict, tau_ms: int) -> dict:
         dt_ms = int(change["ts_ms"]) - int(movement["ts_ms"])
@@ -3107,6 +3130,7 @@ class RailDB:
         pre_ms, post_ms, tau_ms = self._get_sclass_correlation_window()
         start_ts = int(movement["ts_ms"]) - pre_ms
         end_ts = int(movement["ts_ms"]) + post_ms
+        query_started = time.perf_counter()
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -3119,6 +3143,11 @@ class RailDB:
                 (movement["td_area"], start_ts, end_ts),
             )
             changes = cursor.fetchall()
+            
+        query_s = time.perf_counter() - query_started
+
+        insert_started = time.perf_counter()
+            
         inserted = 0
         for change_row in changes:
             change = {
@@ -3136,14 +3165,31 @@ class RailDB:
             observation = self._build_td_sclass_observation(movement, change, tau_ms)
             if self._insert_td_sclass_movement_observation(observation):
                 inserted += 1
-        if inserted:
-            self._refresh_td_sclass_movement_scores(movement["td_area"])
+        insert_s = time.perf_counter() - insert_started
+
+        score_s = 0.0      
+                
+        #if inserted:
+            #score_started = time.perf_counter()
+            #self._refresh_td_sclass_movement_scores_if_due(movement["td_area"])
+            #score_s = time.perf_counter() - score_started
+            
+        #if max(query_s, insert_s, score_s) >= 1.0:
+        #    logger.warning(
+        #        "S-class correlation timing: direction=berth_to_signal area=%s "
+        #        "matches=%d inserted=%d query=%.3fs observations=%.3fs "
+        #        "score_refresh=%.3fs",
+        #        movement["td_area"], len(changes), inserted,
+        #        query_s, insert_s, score_s,
+        #    )
+            
         return inserted
 
     def _correlate_td_sclass_change_with_berth_movements(self, change: dict) -> int:
         pre_ms, post_ms, tau_ms = self._get_sclass_correlation_window()
         start_ts = int(change["ts_ms"]) - post_ms
         end_ts = int(change["ts_ms"]) + pre_ms
+        query_started = time.perf_counter()
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -3156,6 +3202,11 @@ class RailDB:
                 (change["td_area"], start_ts, end_ts),
             )
             movements = cursor.fetchall()
+            
+        query_s = time.perf_counter() - query_started
+
+        insert_started = time.perf_counter()            
+            
         inserted = 0
         for movement_row in movements:
             movement = {
@@ -3171,8 +3222,25 @@ class RailDB:
             observation = self._build_td_sclass_observation(movement, change, tau_ms)
             if self._insert_td_sclass_movement_observation(observation):
                 inserted += 1
-        if inserted:
-            self._refresh_td_sclass_movement_scores(change["td_area"])
+                
+        insert_s = time.perf_counter() - insert_started
+
+        score_s = 0.0
+                
+        #if inserted:
+            #score_started = time.perf_counter()
+            #self._refresh_td_sclass_movement_scores_if_due(change["td_area"])
+            #score_s = time.perf_counter() - score_started
+            
+        #if max(query_s, insert_s, score_s) >= 1.0:
+        #    logger.warning(
+        #        "S-class correlation timing: direction=signal_to_berth area=%s "
+        #        "matches=%d inserted=%d query=%.3fs observations=%.3fs "
+        #        "score_refresh=%.3fs",
+        #        change["td_area"], len(movements), inserted,
+        #        query_s, insert_s, score_s,
+        #    )            
+            
         return inserted
 
     def rebuild_td_sclass_correlations(self, td_area: Optional[str] = None) -> dict:
