@@ -95,6 +95,7 @@ class Listener(stomp.ConnectionListener):
         self._lifecycle_lock = threading.Lock()
         self._reconnect_count = 0
         self._db_work_q: Queue[Dict[str, Any]] = Queue()
+        self._last_db_queue_log_at = 0.0
         self._db_worker_stop = threading.Event()
         self._db_worker_thread: Optional[threading.Thread] = None
 
@@ -319,17 +320,58 @@ class Listener(stomp.ConnectionListener):
             self._db_worker_thread.start()
 
     def _db_worker_loop(self) -> None:
+
+        stats: dict[str, dict[str, float | int]] = {}
+        report_interval_s = 10.0
+        next_report_at = time.monotonic() + report_interval_s        
+        
         while not self._db_worker_stop.is_set():
             try:
                 work_item = self._db_work_q.get(timeout=0.5)
             except Empty:
                 continue
+                
+            started_at = time.monotonic()
+            kind = str(work_item.get("kind") or "unknown")
+            failed = False
+                
             try:
                 self._process_db_work_item(work_item)
             except Exception as e:
+                failed = True
                 self._log_db_worker_error("Background database persistence failed", e)
             finally:
+                elapsed_s = time.monotonic() - started_at
+                bucket = stats.setdefault(
+                    kind, {"count": 0, "total_s": 0.0, "max_s": 0.0, "errors": 0}
+                )
+                bucket["count"] += 1
+                bucket["total_s"] += elapsed_s
+                bucket["max_s"] = max(bucket["max_s"], elapsed_s)
+                bucket["errors"] += int(failed)                
+                
                 self._db_work_q.task_done()
+                
+
+            now = time.monotonic()
+            if now >= next_report_at:
+                summaries = []
+                for item_kind, values in sorted(stats.items()):
+                    count = int(values["count"])
+                    avg_ms = float(values["total_s"]) * 1000 / count
+                    max_ms = float(values["max_s"]) * 1000
+                    summaries.append(
+                        f"{item_kind}: n={count}, avg={avg_ms:.1f}ms, "
+                        f"max={max_ms:.1f}ms, errors={values['errors']}"
+                    )
+                logger.debug(
+                    "DB worker stats (~10s): queue_depth=%d; %s",
+                    self._db_work_q.qsize(),
+                    "; ".join(summaries) or "no work processed",
+                )
+                stats.clear()
+                next_report_at = now + report_interval_s
+                
 
     def _queue_db_work(self, work_item: Dict[str, Any]) -> None:
         """Queue database persistence work off the receiver thread."""
@@ -338,6 +380,13 @@ class Listener(stomp.ConnectionListener):
         self._ensure_db_worker()
         try:
             self._db_work_q.put_nowait(work_item)
+            now = time.monotonic()
+            if now - self._last_db_queue_log_at >= 10:
+                self._last_db_queue_log_at = now
+                logger.debug(
+                    "DB persistence queue depth: %d",
+                    self._db_work_q.qsize(),
+                )
         except Exception as e:
             self._log_db_worker_error("Database work enqueue failed", e)
 
