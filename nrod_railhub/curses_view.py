@@ -87,6 +87,7 @@ class InteractiveDashboardState:
 
     # Selected area / filter for berth-signal view
     berth_signal_area: Optional[str] = None
+    _berth_signal_refresh_at: float = 0.0
     
     # Message rate tracking
     _rx_times: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
@@ -482,11 +483,23 @@ def dashboard_loop(stdscr, state: InteractiveDashboardState, listener: Listener,
                     except queue.Empty:
                         pass
 
-            db = queues.get("db_handle")
-            state.berth_signal_lines.clear()
-            for line in _collect_berth_signal_lines(db, state.td_area_filter):
-                state.add_berth_signal_line(line)
-        
+#            db = queues.get("db_handle")
+#            state.berth_signal_lines.clear()
+#            for line in _collect_berth_signal_lines(db, state.td_area_filter):
+#                state.add_berth_signal_line(line)
+            # This query decodes signal state from event history. Only refresh it
+            # while its page is visible, and avoid running it on every UI redraw.
+            now = time.monotonic()
+            if (
+                state.current_page == 7
+                and now >= state._berth_signal_refresh_at
+            ):
+                db = queues.get("db_handle")
+                state.berth_signal_lines.clear()
+                for line in _collect_berth_signal_lines(db, state.td_area_filter):
+                    state.add_berth_signal_line(line)
+                state._berth_signal_refresh_at = now + 1.0
+
         # Check if periodic redraw is needed
         current_time = time.time()
         if current_time - state.last_redraw >= REDRAW_INTERVAL:
