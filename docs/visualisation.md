@@ -261,9 +261,13 @@ curl http://127.0.0.1:8000/berths/demo
 ```
 
 #### `GET /admin`
-Open the browser-based CRUD interface for layout, berth, and signal rows.
-The admin page also includes a searchable headcode list, berth-chain viewer,
-and selective berth import controls for importing chain items into a layout.
+Browser admin landing page listing layouts with Edit/Delete controls. Use
+`/admin/new-layout` to create a layout and `/admin/layouts/{layout_id}` to edit
+its settings/metadata and its paged, searchable Berths and Signals tables
+(`GET /api/layouts/{id}/berths` and `/signals` accept `q`, `type`, `page`,
+`page_size`). The headcode-chain berth import (searchable headcodes, chain
+viewer, selective import) is a modal dialog on both pages.
+`GET /api/layouts` and `GET /api/layouts/{layout_id}` return layout JSON.
 
 #### `POST /api/layouts`
 Create a layout. `PUT /api/layouts/{layout_id}` updates it, and

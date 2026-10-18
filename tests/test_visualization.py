@@ -417,8 +417,8 @@ def test_state_endpoint_returns_503_for_database_errors(monkeypatch):
     assert response.json()["detail"] == "database unavailable: database is locked"
 
 
-def test_admin_page_renders_editors(monkeypatch):
-    """Test the browser CRUD page renders the expected editing sections."""
+def test_admin_page_lists_layouts(monkeypatch):
+    """The /admin landing page lists layouts with CRUD controls and the import dialog."""
     db_path = _create_visualisation_db()
     try:
         import app.visualisation.app as app_module
@@ -430,13 +430,90 @@ def test_admin_page_renders_editors(monkeypatch):
         assert response.status_code == 200
         page = response.text
         assert "Visualisation admin" in page
-        assert "Headcode chain import" in page
+        assert "Demo Station" in page
+        assert "/admin/new-layout" in page
+        assert "data-delete-layout" in page
+        assert "<dialog" in page
         assert "Search headcodes" in page
         assert "Import selected berths" in page
-        assert "Layout editor" in page
-        assert "Berth editor" in page
-        assert "Signal editor" in page
-        assert "Demo Station" in page
+        # Editors moved off the landing page
+        assert "Berth editor" not in page
+        assert "Signal editor" not in page
+    finally:
+        Path(db_path).unlink()
+
+
+def test_admin_layout_pages(monkeypatch):
+    """Create and edit pages render; unknown layouts 404."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        new_page = client.get("/admin/new-layout")
+        assert new_page.status_code == 200
+        assert "Layout settings" in new_page.text
+        assert 'id="berth-rows"' not in new_page.text
+
+        layouts = client.get("/api/layouts").json()
+        layout_id = layouts[0]["id"]
+        edit = client.get(f"/admin/layouts/{layout_id}")
+        assert edit.status_code == 200
+        assert "Layout settings" in edit.text
+        assert 'id="berth-rows"' in edit.text
+        assert 'id="signal-rows"' in edit.text
+        assert "Import berths from headcode chain" in edit.text
+
+        assert client.get("/admin/layouts/missing").status_code == 404
+        assert client.get("/api/layouts/missing").status_code == 404
+        assert client.get(f"/api/layouts/{layout_id}").json()["id"] == layout_id
+    finally:
+        Path(db_path).unlink()
+
+
+def test_layout_berth_and_signal_tables_page_and_filter(monkeypatch):
+    """Berth/signal list endpoints support paging, search and type filters."""
+    db_path = _create_visualisation_db()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO layout (id, name, description, data) VALUES ('pg', 'Paged', '', '{}')")
+        for i in range(12):
+            conn.execute(
+                "INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type) VALUES (?, 'pg', ?, 0, 0, 60, 30, ?)",
+                (f"B{i:02d}", f"Berth {i:02d}", "platform" if i % 2 else "normal"),
+            )
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO signal (id, layout_id, name, x, y, signal_type) VALUES (?, 'pg', ?, 0, 0, ?)",
+                (f"S{i}", f"Sig_{i}", "shunt" if i == 0 else "auto"),
+            )
+        conn.commit()
+        conn.close()
+
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+
+        first = client.get("/api/layouts/pg/berths", params={"page_size": 5}).json()
+        assert first["total"] == 12 and first["pages"] == 3 and len(first["items"]) == 5
+        last = client.get("/api/layouts/pg/berths", params={"page_size": 5, "page": 99}).json()
+        assert last["page"] == 3 and len(last["items"]) == 2
+        plat = client.get("/api/layouts/pg/berths", params={"type": "platform"}).json()
+        assert plat["total"] == 6
+        found = client.get("/api/layouts/pg/berths", params={"q": "b07"}).json()
+        assert [b["id"] for b in found["items"]] == ["B07"]
+        assert client.get("/api/layouts/pg/berths", params={"q": "zzz"}).json()["items"] == []
+        assert client.get("/api/layouts/pg/berths", params={"type": "bogus"}).status_code == 422
+        assert client.get("/api/layouts/pg/berths", params={"page_size": 0}).status_code == 422
+        assert client.get("/api/layouts/nope/berths").status_code == 404
+
+        # LIKE wildcards are treated literally
+        assert client.get("/api/layouts/pg/signals", params={"q": "%"}).json()["total"] == 0
+        assert client.get("/api/layouts/pg/signals", params={"q": "sig_1"}).json()["total"] == 1
+        assert client.get("/api/layouts/pg/signals", params={"type": "shunt"}).json()["total"] == 1
     finally:
         Path(db_path).unlink()
 
