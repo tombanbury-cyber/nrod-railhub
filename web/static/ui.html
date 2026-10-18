@@ -193,7 +193,12 @@
                 <span class="status-indicator" id="wsStatus"></span>
                 <span id="wsStatusText">Connecting...</span>
             </div>
-            <div id="layoutInfo">Loading layout...</div>
+            <div id="layoutInfo" role="status" aria-live="polite">Loading layout...</div>
+        </div>
+
+        <div class="controls">
+            <label for="layoutSelect">Layout:</label>
+            <select id="layoutSelect" aria-label="Select layout" disabled></select>
         </div>
         
         <div class="controls">
@@ -240,42 +245,133 @@
     <script>
         const API_BASE = window.location.origin;
         const WS_URL = `ws://${window.location.hostname}:${window.location.port}/ws`;
-        const LAYOUT_ID = 'demo';
+        const DEFAULT_LAYOUT_ID = 'demo';
         const STATE_REFRESH_MS = 5000;
         
         let ws = null;
         let statePollTimer = null;
         let berths = [];
+        let layouts = [];
+        let currentLayout = null;
+        let layoutLoadToken = 0;
         let trainPositions = {};  // train_id -> berth_id
         
         // Initialize
         async function init() {
-            await loadLayout();
-            await loadBerths();
-            renderSchematic();
-            await refreshState();
+            await loadLayouts();
             startStatePolling();
             connectWebSocket();
         }
-        
-        async function loadLayout() {
+
+        function setLayoutMessage(text) {
+            document.getElementById('layoutInfo').textContent = text;
+        }
+
+        function updateQueryLayout(layoutId) {
+            const url = new URL(window.location.href);
+            url.searchParams.set('layout_id', layoutId);
+            window.history.replaceState(null, '', url.toString());
+        }
+
+        function resetLayoutView() {
+            berths = [];
+            currentLayout = null;
+            trainPositions = {};
+            document.getElementById('eventLog').textContent = '';
+            renderSchematic();
+        }
+
+        async function loadLayouts() {
+            const select = document.getElementById('layoutSelect');
+            select.textContent = '';
             try {
-                const response = await fetch(`${API_BASE}/layout/${LAYOUT_ID}`);
+                const response = await fetch(`${API_BASE}/api/layouts`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                layouts = Array.isArray(data) ? data : [];
+            } catch (error) {
+                console.error('Failed to load layouts:', error);
+                layouts = [];
+                resetLayoutView();
+                setLayoutMessage('Error loading layouts');
+                return;
+            }
+
+            if (layouts.length === 0) {
+                select.disabled = true;
+                resetLayoutView();
+                setLayoutMessage('No layouts available. Create one in /admin.');
+                return;
+            }
+
+            layouts.forEach(layout => {
+                const option = document.createElement('option');
+                option.value = layout.id;
+                option.textContent = layout.name ? `${layout.name} (${layout.id})` : layout.id;
+                select.appendChild(option);
+            });
+            select.disabled = false;
+            select.addEventListener('change', () => selectLayout(select.value));
+
+            const requested = new URLSearchParams(window.location.search).get('layout_id');
+            if (requested && !layouts.some(l => l.id === requested)) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = `Unknown layout: ${requested}`;
+                select.insertBefore(option, select.firstChild);
+                select.value = '';
+                resetLayoutView();
+                setLayoutMessage(`Unknown layout "${requested}". Choose a layout from the list.`);
+                return;
+            }
+            const initial = requested
+                || (layouts.some(l => l.id === DEFAULT_LAYOUT_ID) ? DEFAULT_LAYOUT_ID : layouts[0].id);
+            select.value = initial;
+            await selectLayout(initial);
+        }
+
+        async function selectLayout(layoutId) {
+            const select = document.getElementById('layoutSelect');
+            const unknown = select.querySelector('option[value=""]');
+            if (unknown && layoutId) unknown.remove();
+            if (!layoutId) return;
+            const token = ++layoutLoadToken;
+            resetLayoutView();
+            setLayoutMessage('Loading layout...');
+            updateQueryLayout(layoutId);
+            const ok = await loadLayout(layoutId, token);
+            if (!ok || token !== layoutLoadToken) return;
+            await loadBerths(layoutId, token);
+            if (token !== layoutLoadToken) return;
+            renderSchematic();
+            await refreshState();
+        }
+
+        async function loadLayout(layoutId, token) {
+            try {
+                const response = await fetch(`${API_BASE}/layout/${encodeURIComponent(layoutId)}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const layout = await response.json();
-                document.getElementById('layoutInfo').textContent = `Layout: ${layout.name}`;
+                if (token !== layoutLoadToken) return false;
+                currentLayout = layout;
+                setLayoutMessage(`Layout: ${layout.name}`);
+                return true;
             } catch (error) {
                 console.error('Failed to load layout:', error);
-                document.getElementById('layoutInfo').textContent = 'Error loading layout';
+                if (token === layoutLoadToken) setLayoutMessage('Error loading layout');
+                return false;
             }
         }
         
-        async function loadBerths() {
+        async function loadBerths(layoutId, token) {
             try {
-                const response = await fetch(`${API_BASE}/berths/${LAYOUT_ID}`);
-                berths = await response.json();
-                console.log('Loaded berths:', berths);
+                const response = await fetch(`${API_BASE}/berths/${encodeURIComponent(layoutId)}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                if (token === layoutLoadToken) berths = Array.isArray(data) ? data : [];
             } catch (error) {
                 console.error('Failed to load berths:', error);
+                if (token === layoutLoadToken) berths = [];
             }
         }
         
@@ -290,7 +386,7 @@
             title.setAttribute('fill', '#4CAF50');
             title.setAttribute('font-size', '18');
             title.setAttribute('font-weight', 'bold');
-            title.textContent = 'Demo Platform';
+            title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
             svg.appendChild(title);
             
             // Render berths
@@ -396,7 +492,7 @@
             const layoutInfo = document.getElementById('layoutInfo');
             const source = snapshot.source || 'unknown';
             const trainCount = trains.length;
-            layoutInfo.textContent = `Layout: Demo Station • Source: ${source} • Trains: ${trainCount}`;
+            layoutInfo.textContent = `Layout: ${currentLayout ? currentLayout.name : 'none'} • Source: ${source} • Trains: ${trainCount}`;
         }
 
         function renderEventItem(event) {
@@ -412,6 +508,8 @@
         }
 
         async function refreshState() {
+            if (!currentLayout) return;
+            const token = layoutLoadToken;
             try {
                 const params = new URLSearchParams(window.location.search);
                 const url = new URL(`${API_BASE}/state`);
@@ -425,6 +523,7 @@
                     throw new Error(`HTTP ${response.status}`);
                 }
                 const snapshot = await response.json();
+                if (token !== layoutLoadToken) return;
                 renderSnapshot(snapshot);
             } catch (error) {
                 console.error('Failed to refresh state:', error);

@@ -885,3 +885,18 @@ def test_admin_crud_endpoints_require_existing_layouts(monkeypatch):
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_schematic_ui_has_layout_selector():
+    """The static schematic UI exposes a layout selector driven by ?layout_id=."""
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    response = client.get("/static/ui.html")
+    assert response.status_code == 200
+    page = response.text
+    assert 'id="layoutSelect"' in page
+    assert "/api/layouts" in page
+    assert "layout_id" in page
+    assert "const LAYOUT_ID = 'demo'" not in page
+    assert "Demo Station" not in page

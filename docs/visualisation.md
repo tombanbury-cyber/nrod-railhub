@@ -212,6 +212,24 @@ Open your browser to:
 http://127.0.0.1:8000/static/ui.html
 ```
 
+#### Selecting a layout
+
+The schematic page has a **Layout** drop-down, populated from `GET /api/layouts`.
+Choose a layout there, or pass its ID in the `layout_id` query parameter:
+
+```
+http://127.0.0.1:8000/static/ui.html?layout_id=demo&area=EK&hc=2C90
+```
+
+- If `layout_id` is missing, the `demo` layout is used when it exists, otherwise
+  the first available layout.
+- An unknown `layout_id` shows a clear message and an empty schematic until a
+  layout is chosen; an empty layout list shows "No layouts available".
+- Changing the drop-down updates `layout_id` in the URL (other parameters such
+  as `area` and `hc` are preserved), clears old occupancy and train markers,
+  then loads the layout, its berths and the current state.
+- `area` and `hc` continue to filter `/state` as before.
+
 ## API Endpoints
 
 ### REST Endpoints
