@@ -949,3 +949,19 @@ def test_schematic_ui_has_layout_selector():
     assert "layout_id" in page
     assert "const LAYOUT_ID = 'demo'" not in page
     assert "Demo Station" not in page
+
+
+def test_canvas_uis_support_pan_and_zoom():
+    """Both the static schematic and the admin layout editor expose pan/zoom controls."""
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    page = client.get("/static/ui.html").text
+    assert "setupPanZoom" in page
+    for control in ("zoomIn", "zoomOut", "zoomFit", "zoomReset"):
+        assert f'id="{control}"' in page
+
+    admin = client.get("/admin/new-layout").text
+    assert "setupPanZoom" in admin
+    for control in ("canvas-zoom-in", "canvas-zoom-out", "canvas-zoom-fit", "canvas-zoom-reset"):
+        assert f'id="{control}"' in admin
