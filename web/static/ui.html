@@ -377,8 +377,7 @@
             title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
             svg.appendChild(title);
 
-			console.log(berths);
-
+			//console.log(berths);
 			
             // Render berths
             berths.forEach(berth => {
@@ -434,7 +433,20 @@
         }
         
         function updateBerthOccupancy(berthId, occupied, trainId = null) {
-            const group = document.getElementById(`berth-${berthId}`);
+		
+			//console.log('updateBerthOccupancy', berthId, occupied, trainId);
+			//console.log('currentLayout', currentLayout);
+			
+			clearSchematicState();
+			
+			const berthElemID = `berth-${currentLayout.id}:${berthId}`;
+			
+			console.log(berthElemID, occupied, trainId);
+			
+            const group = document.getElementById(berthElemID);
+			
+			//console.log('group', group);
+			
             if (!group) return;
             
             const rect = group.querySelector('rect');
@@ -466,7 +478,7 @@
             const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
             trains.forEach(train => {
                 const berthId = train.current_berth || train.to_berth || train.from_berth;
-				console.log(train.current_berth, train.to_berth, train.from_berth);
+				//console.log(train.current_berth, train.to_berth, train.from_berth);
                 const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
                 if (berthId && trainId) {
                     updateBerthOccupancy(berthId, true, trainId);
