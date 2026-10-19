@@ -474,6 +474,9 @@ def test_admin_layout_pages(monkeypatch):
         assert "pointerdown" in edit.text
         assert "beforeunload" in edit.text
         assert "ArrowRight" in edit.text
+        assert 'if (focusedIndex !== null)' in edit.text
+        assert "canvasSaving = true" in edit.text
+        assert "Discard unsaved canvas edits before changing elements in the table?" in edit.text
 
         assert client.get("/admin/layouts/missing").status_code == 404
         assert client.get("/api/layouts/missing").status_code == 404

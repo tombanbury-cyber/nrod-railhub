@@ -606,6 +606,7 @@ const editorSvg = document.getElementById("layout-canvas-svg");
 const editorItems = [];
 let selectedElement = null;
 let dragOffset = null;
+let canvasSaving = false;
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 700;
 
@@ -652,6 +653,8 @@ function clampElementPosition(item, x, y) {
 }
 
 function renderCanvas() {
+  const focusedIndex = document.activeElement?.classList?.contains("layout-element")
+    ? document.activeElement.dataset.editorIndex : null;
   editorSvg.querySelectorAll(".layout-element").forEach((node) => node.remove());
   editorItems.forEach((item) => {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -700,7 +703,7 @@ function renderCanvas() {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         selectEditorElement(item);
-      } else if (selectedElement === item && event.key.startsWith("Arrow")) {
+      } else if (!canvasSaving && selectedElement === item && event.key.startsWith("Arrow")) {
         event.preventDefault();
         const step = event.shiftKey ? 10 : 1;
         clampElementPosition(
@@ -714,7 +717,7 @@ function renderCanvas() {
       }
     });
     group.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
+      if (canvasSaving || event.button !== 0) return;
       selectEditorElement(item);
       dragOffset = { item, point: editorPoint(event) };
       dragOffset.x = dragOffset.point.x - Number(item.x);
@@ -738,6 +741,9 @@ function renderCanvas() {
     group.addEventListener("pointercancel", () => { dragOffset = null; });
     editorSvg.appendChild(group);
   });
+  if (focusedIndex !== null) {
+    editorSvg.querySelector(`[data-editor-index="${focusedIndex}"]`)?.focus();
+  }
 }
 
 function addInspectorField(form, name, value, type = "text", options = null) {
@@ -760,6 +766,7 @@ function addInspectorField(form, name, value, type = "text", options = null) {
   input.name = name;
   input.value = value ?? "";
   input.required = name === "id" || name === "name";
+  input.disabled = canvasSaving;
   if (type === "number") {
     const maxX = CANVAS_WIDTH - (selectedElement.kind === "berth" ? Number(selectedElement.width) : 12);
     const maxY = CANVAS_HEIGHT - (selectedElement.kind === "berth" ? Number(selectedElement.height) : 30);
@@ -795,8 +802,10 @@ function renderInspector() {
   const save = document.createElement("button");
   save.type = "submit";
   save.textContent = item._isNew ? "Add element" : "Apply properties";
+  save.disabled = canvasSaving;
   form.appendChild(save);
   form.addEventListener("input", () => {
+    if (canvasSaving) return;
     const data = new FormData(form);
     for (const [name, value] of data.entries()) {
       item[name] = ["x", "y", "width", "height"].includes(name) ? Number(value) : value;
@@ -811,6 +820,7 @@ function renderInspector() {
   });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (canvasSaving) return;
     clampElementPosition(item, Number(item.x), Number(item.y));
     renderCanvas();
     saveCanvas();
@@ -829,15 +839,23 @@ function selectEditorElement(item) {
 }
 
 function beginAddingElement(kind) {
-  if (!layoutId) return;
+  if (!layoutId || canvasSaving) return;
   const item = {
     kind, id: "", layout_id: layoutId, name: "",
     x: 60, y: 60, width: 60, height: 30,
     berth_type: "normal", signal_type: "auto", _isNew: true,
   };
   editorItems.push(item);
+  renderCanvas();
   selectEditorElement(item);
   document.getElementById("element-id").focus();
+}
+
+async function prepareTableChange() {
+  if (canvasSaving) return false;
+  if (!editorHasChanges()) return true;
+  if (!confirm("Discard unsaved canvas edits before changing elements in the table?")) return false;
+  return await loadEditor();
 }
 
 async function loadEditorItems(kind) {
@@ -867,41 +885,57 @@ async function loadEditor() {
     renderCanvas();
     renderInspector();
     updateEditorStatus("Loaded layout elements.");
+    return true;
   } catch (error) {
     updateEditorStatus(`Failed to load canvas elements: ${error.message}`, true);
+    return false;
   }
 }
 
 async function saveCanvas() {
-  if (!editorHasChanges()) return true;
+  if (canvasSaving || !editorHasChanges()) return !canvasSaving;
+  canvasSaving = true;
   document.getElementById("save-canvas").disabled = true;
-  const failures = [];
-  const changedKinds = new Set();
-  for (const item of editorItems.filter(editorItemIsDirty)) {
-    const originalId = item._originalId || item.id;
-    try {
-      await submitJson(
-        item._isNew ? TABLES[item.kind].api : `${TABLES[item.kind].api}/${encodeURIComponent(originalId)}`,
-        item._isNew ? "POST" : "PUT",
-        editorPayload(item),
-      );
-      item._originalId = item.id;
-      item._isNew = false;
-      item._savedPayload = editorPayload(item);
-      changedKinds.add(item.kind);
-    } catch (error) {
-      failures.push(`${item.kind} ${item.id || "(new)"}: ${error.message}`);
+  document.getElementById("add-berth").disabled = true;
+  document.getElementById("add-signal").disabled = true;
+  document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
+    .forEach((control) => { control.disabled = true; });
+  try {
+    const failures = [];
+    const changedKinds = new Set();
+    for (const item of editorItems.filter(editorItemIsDirty)) {
+      const originalId = item._originalId || item.id;
+      const payload = editorPayload(item);
+      try {
+        await submitJson(
+          item._isNew ? TABLES[item.kind].api : `${TABLES[item.kind].api}/${encodeURIComponent(originalId)}`,
+          item._isNew ? "POST" : "PUT",
+          payload,
+        );
+        item._originalId = payload.id;
+        item._isNew = false;
+        item._savedPayload = payload;
+        changedKinds.add(item.kind);
+      } catch (error) {
+        failures.push(`${item.kind} ${item.id || "(new)"}: ${error.message}`);
+      }
     }
+    renderCanvas();
+    for (const kind of changedKinds) await loadTable(kind);
+    renderInspector();
+    if (failures.length) {
+      updateEditorStatus(`Some changes were not saved: ${failures.join("; ")}`, true);
+      return false;
+    }
+    updateEditorStatus("Canvas changes saved.");
+    return true;
+  } finally {
+    canvasSaving = false;
+    document.getElementById("add-berth").disabled = isNew;
+    document.getElementById("add-signal").disabled = isNew;
+    document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
+      .forEach((control) => { control.disabled = false; });
   }
-  renderCanvas();
-  renderInspector();
-  for (const kind of changedKinds) await loadTable(kind);
-  if (failures.length) {
-    updateEditorStatus(`Some changes were not saved: ${failures.join("; ")}`, true);
-    return false;
-  }
-  updateEditorStatus("Canvas changes saved.");
-  return true;
 }
 
 window.addEventListener("beforeunload", (event) => {
@@ -984,6 +1018,7 @@ function collect(kind, container) {
 async function reloadAfter(kind, action, okMessage) {
   const cfg = TABLES[kind];
   try {
+    if (!(await prepareTableChange())) return;
     await action();
     setStatus(cfg.status, okMessage);
     await loadTable(kind);
@@ -1010,6 +1045,7 @@ async function saveAllEditedBerths() {
   const rows = Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
     .filter((row) => rowIsDirty("berth", row));
   if (!rows.length) return;
+  if (!(await prepareTableChange())) return;
 
   button.disabled = true;
   let saved = 0;
