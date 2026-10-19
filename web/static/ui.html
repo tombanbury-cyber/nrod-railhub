@@ -419,50 +419,65 @@
             
             // Berth label
             const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			text.setAttribute('class', 'berth-label');
             text.setAttribute('x', berth.x + berth.width / 2);
-            text.setAttribute('y', berth.y + berth.height / 2 + 5);
+            text.setAttribute('y', berth.y + berth.height / 2 - 2);
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('fill', 'white');
-            text.setAttribute('font-size', '14');
-            text.setAttribute('font-weight', 'bold');
+            text.setAttribute('font-size', '11');
+            text.setAttribute('font-weight', 'normal');
             text.textContent = berth.name;
+			
+            // Headcode
+            const headcode = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			headcode.setAttribute('class', 'headcode');
+            headcode.setAttribute('x', berth.x + berth.width / 2);
+            headcode.setAttribute('y', berth.y + berth.height / 2 + 10);
+            headcode.setAttribute('text-anchor', 'middle');
+            headcode.setAttribute('fill', 'grey');
+            headcode.setAttribute('font-size', '13');
+            headcode.setAttribute('font-weight', 'bold');
+            headcode.textContent = '';			
             
             group.appendChild(rect);
             group.appendChild(text);
+            group.appendChild(headcode);
             svg.appendChild(group);
         }
         
         function updateBerthOccupancy(berthId, occupied, trainId = null) {
-		
-			//console.log('updateBerthOccupancy', berthId, occupied, trainId);
-			//console.log('currentLayout', currentLayout);
-			
-			clearSchematicState();
 			
 			const berthElemID = `berth-${currentLayout.id}:${berthId}`;
-			
-			console.log(berthElemID, occupied, trainId);
-			
             const group = document.getElementById(berthElemID);
 			
-			//console.log('group', group);
-			
             if (!group) return;
+			
+			//console.log(berthElemID, occupied, trainId, group);
             
             const rect = group.querySelector('rect');
+			const headcodeElem = group.querySelector('.headcode');
             
             if (occupied) {
+			
+				group.classList.add('occupied');
+			
                 rect.setAttribute('fill', '#FFC107');
                 rect.setAttribute('stroke', '#F57C00');
-                
+				
                 // Add or update train marker
                 if (trainId) {
                     trainPositions[trainId] = berthId;
                     updateTrainMarker(trainId, berthId);
+					headcodeElem.textContent = trainId.split(':')[1];
                 }
             } else {
+			
+				group.classList.remove('occupied');
+			
                 rect.setAttribute('fill', '#4CAF50');
                 rect.setAttribute('stroke', '#2E7D32');
+				
+				headcodeElem.textContent = '';
                 
                 // Remove train marker if present
                 if (trainId && trainPositions[trainId] === berthId) {
@@ -621,6 +636,8 @@
             if (message.type === 'event') {
                 const event = message.data;
                 logEvent(event);
+				
+				//console.log('event', event);
                 
                 if (event.event_type === 'berth_enter') {
                     updateBerthOccupancy(event.object_id, true, event.train_id);
