@@ -202,19 +202,6 @@
             <select id="layoutSelect" aria-label="Select layout" disabled></select>
         </div>
         
-        <div class="controls">
-            <h2>Manual Test Controls</h2>
-            <div class="button-group">
-                <button onclick="sendTestEvent('berth_enter', 'BRTH_1')">Enter BRTH_1</button>
-                <button onclick="sendTestEvent('berth_exit', 'BRTH_1')">Exit BRTH_1</button>
-                <button onclick="sendTestEvent('berth_enter', 'BRTH_2')">Enter BRTH_2</button>
-                <button onclick="sendTestEvent('berth_exit', 'BRTH_2')">Exit BRTH_2</button>
-                <button onclick="sendTestEvent('berth_enter', 'BRTH_3')">Enter BRTH_3</button>
-                <button onclick="runSequence()">Run Full Sequence</button>
-                <button onclick="clearOccupancy()">Clear All</button>
-            </div>
-        </div>
-        
         <div class="schematic-container">
             <svg id="schematic" width="100%" height="100%"></svg>
         </div>
@@ -650,59 +637,6 @@
             // Keep only last 20 events
             while (log.children.length > 20) {
                 log.removeChild(log.lastChild);
-            }
-        }
-        
-        async function sendTestEvent(eventType, berthId) {
-            const event = {
-                ts: new Date().toISOString(),
-                source: 'manual',
-                train_id: 'T1',
-                event_type: eventType,
-                object_id: berthId,
-                payload: {}
-            };
-            
-            try {
-                const response = await fetch(`${API_BASE}/event`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(event)
-                });
-                
-                if (!response.ok) {
-                    console.error('Failed to send event:', await response.text());
-                }
-            } catch (error) {
-                console.error('Error sending event:', error);
-            }
-        }
-        
-        async function runSequence() {
-            const sequence = [
-                { type: 'berth_enter', berth: 'BRTH_1', delay: 0 },
-                { type: 'berth_exit', berth: 'BRTH_1', delay: 2000 },
-                { type: 'berth_enter', berth: 'BRTH_2', delay: 100 },
-                { type: 'berth_exit', berth: 'BRTH_2', delay: 2000 },
-                { type: 'berth_enter', berth: 'BRTH_3', delay: 100 },
-                { type: 'berth_exit', berth: 'BRTH_3', delay: 2000 },
-                { type: 'berth_enter', berth: 'BRTH_4', delay: 100 },
-                { type: 'berth_exit', berth: 'BRTH_4', delay: 2000 },
-                { type: 'berth_enter', berth: 'BRTH_5', delay: 100 }
-            ];
-            
-            for (const step of sequence) {
-                await new Promise(resolve => setTimeout(resolve, step.delay));
-                await sendTestEvent(step.type, step.berth);
-            }
-        }
-        
-        async function clearOccupancy() {
-            for (const berth of berths) {
-                await sendTestEvent('berth_exit', berth.id);
-                await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
         
