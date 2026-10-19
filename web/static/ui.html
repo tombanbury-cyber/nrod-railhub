@@ -390,10 +390,17 @@
             berths.forEach(berth => {
                 const group = document.getElementById(`berth-${berth.id}`);
                 if (!group) return;
+				
                 const rect = group.querySelector('rect');
                 if (!rect) return;
                 rect.setAttribute('fill', '#4CAF50');
                 rect.setAttribute('stroke', '#2E7D32');
+				group.classList.remove('occupied');
+				
+				const headcodeElem = group.querySelector('.headcode');
+				if (!headcodeElem) return;
+				headcodeElem.textContent = '';
+				
             });
             document.querySelectorAll('[id^="train-"]').forEach(marker => marker.remove());
         }
@@ -470,7 +477,10 @@
                     updateTrainMarker(trainId, berthId);
 					headcodeElem.textContent = trainId.split(':')[1];
                 }
+				
             } else {
+			
+				//console.log(berthElemID, occupied, trainId, group);
 			
 				group.classList.remove('occupied');
 			
@@ -491,16 +501,27 @@
         }
 
         function renderSnapshot(snapshot) {
-            clearSchematicState();
+					
+			clearSchematicState();
 
             const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
+			
             trains.forEach(train => {
-                const berthId = train.current_berth || train.to_berth || train.from_berth;
-				//console.log(train.current_berth, train.to_berth, train.from_berth);
+                //const berthId = train.current_berth || train.to_berth || train.from_berth;
+                const berthId = train.current_berth || train.to_berth;
+				
+				//console.log('renderSnapshot', train.current_berth, train.to_berth, train.from_berth);
+				
+				//console.log(train.marker_id, train.train_id, train.td_area, train.headcode);
+				
                 const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
+				
+				//console.log('trainId', trainId);
+				
                 if (berthId && trainId) {
                     updateBerthOccupancy(berthId, true, trainId);
                 }
+				
             });
 
             if (Array.isArray(snapshot.events)) {
@@ -611,6 +632,7 @@
             ws.onmessage = (event) => {
                 // Handle text responses (like "pong")
                 if (typeof event.data === 'string' && event.data === 'pong') {
+					//console.log('string or pong');
                     return;
                 }
                 
@@ -643,9 +665,6 @@
             if (message.type === 'event') {
                 const event = message.data;
                 logEvent(event);
-				
-				//console.log('event', event);
-                
                 if (event.event_type === 'berth_enter') {
                     updateBerthOccupancy(event.object_id, true, event.train_id);
                 } else if (event.event_type === 'berth_exit') {
