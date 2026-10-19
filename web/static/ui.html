@@ -101,7 +101,26 @@
 			height: 400px;
         }
         
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+
+        .zoom-controls button {
+            min-width: 44px;
+            min-height: 36px;
+            background-color: #333;
+            color: #eee;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
         #schematic {
+            touch-action: none;
             border: 1px solid #444;
             background-color: #1a1a1a;
         }
@@ -202,6 +221,14 @@
             <select id="layoutSelect" aria-label="Select layout" disabled></select>
         </div>
         
+        <div class="zoom-controls" role="group" aria-label="Schematic zoom">
+            <button type="button" id="zoomOut" aria-label="Zoom out">&minus;</button>
+            <span id="zoomLevel" aria-live="polite">100%</span>
+            <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
+            <button type="button" id="zoomFit">Fit all</button>
+            <button type="button" id="zoomReset">Reset view</button>
+            <span style="font-size:12px;color:#aaa">Scroll to pan &middot; Ctrl/&#8984; + scroll or pinch to zoom &middot; drag to pan</span>
+        </div>
         <div class="schematic-container">
             <svg id="schematic" width="100%" height="100%"></svg>
         </div>
@@ -332,6 +359,7 @@
             await loadBerths(layoutId, token);
             if (token !== layoutLoadToken) return;
             renderSchematic();
+            resetSchematicView();
             await refreshState();
         }
 
@@ -363,6 +391,162 @@
             }
         }
         
+function setupPanZoom(svg, options) {
+  const MIN_SCALE = 0.1;
+  const MAX_SCALE = 8;
+  const pointers = new Map();
+  let view = null;
+  let panning = null;
+  let pinch = null;
+  function base() { return options.getBase(); }
+  function clampView() {
+    const b = options.getBounds();
+    const margin = 0.2;
+    view.x = Math.max(b.x - view.w * (1 - margin), Math.min(b.x + b.w - view.w * margin, view.x));
+    view.y = Math.max(b.y - view.h * (1 - margin), Math.min(b.y + b.h - view.h * margin, view.y));
+  }
+  function apply() {
+    clampView();
+    svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
+    if (options.onChange) options.onChange(base().w / view.w);
+  }
+  function reset() {
+    const b = base();
+    view = { x: 0, y: 0, w: b.w, h: b.h };
+    apply();
+  }
+  function fit() {
+    const b = base();
+    const c = options.getBounds();
+    const pad = 20;
+    const scale = Math.min(b.w / (c.w + 2 * pad), b.h / (c.h + 2 * pad), MAX_SCALE);
+    view = { w: b.w / scale, h: b.h / scale, x: 0, y: 0 };
+    view.x = c.x - pad - (view.w - c.w - 2 * pad) / 2;
+    view.y = c.y - pad - (view.h - c.h - 2 * pad) / 2;
+    apply();
+  }
+  function zoomAt(factor, cx, cy) {
+    if (!view) reset();
+    const b = base();
+    const current = b.w / view.w;
+    const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, current * factor));
+    const ratio = current / next;
+    const nw = b.w / next;
+    const nh = b.h / next;
+    view = { x: cx - (cx - view.x) * ratio, y: cy - (cy - view.y) * ratio, w: nw, h: nh };
+    apply();
+  }
+  function toWorld(clientX, clientY) {
+    const p = svg.createSVGPoint();
+    p.x = clientX;
+    p.y = clientY;
+    return p.matrixTransform(svg.getScreenCTM().inverse());
+  }
+  function zoomBy(factor) {
+    if (!view) reset();
+    zoomAt(factor, view.x + view.w / 2, view.y + view.h / 2);
+  }
+  function worldPerPixel() {
+    const ctm = svg.getScreenCTM();
+    return ctm && ctm.a ? 1 / ctm.a : 1;
+  }
+  svg.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    if (!view) reset();
+    if (event.ctrlKey || event.metaKey) {
+      const p = toWorld(event.clientX, event.clientY);
+      zoomAt(Math.exp(-event.deltaY * 0.01), p.x, p.y);
+    } else {
+      const k = worldPerPixel();
+      const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
+      const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
+      view.x += dx * k;
+      view.y += dy * k;
+      apply();
+    }
+  }, { passive: false });
+  svg.addEventListener("pointerdown", (event) => {
+    if (!options.isBackground(event.target)) return;
+    if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
+    if (!view) reset();
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 1) {
+      panning = { id: event.pointerId, x: event.clientX, y: event.clientY, vx: view.x, vy: view.y, moved: false };
+    } else if (pointers.size === 2) {
+      panning = null;
+      const [a, b] = [...pointers.values()];
+      pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+    }
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinch && pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const p = toWorld((a.x + b.x) / 2, (a.y + b.y) / 2);
+      zoomAt(dist / pinch.dist, p.x, p.y);
+      pinch.dist = dist;
+    } else if (panning && panning.id === event.pointerId) {
+      const dx = event.clientX - panning.x;
+      const dy = event.clientY - panning.y;
+      if (!panning.moved && Math.hypot(dx, dy) < 3) return;
+      if (!panning.moved) {
+        panning.moved = true;
+        try { svg.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+      }
+      const k = worldPerPixel();
+      view.x = panning.vx - dx * k;
+      view.y = panning.vy - dy * k;
+      apply();
+    }
+  });
+  function end(event) {
+    pointers.delete(event.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (panning && panning.id === event.pointerId) panning = null;
+  }
+  svg.addEventListener("pointerup", end);
+  svg.addEventListener("pointercancel", end);
+  return { zoomBy, fit, reset };
+}
+
+        function schematicBase() {
+            const svg = document.getElementById('schematic');
+            return { w: svg.clientWidth || 800, h: svg.clientHeight || 360 };
+        }
+
+        function schematicBounds() {
+            if (!berths.length) return { x: 0, y: 0, w: schematicBase().w, h: schematicBase().h };
+            const xs = berths.flatMap(b => [Number(b.x), Number(b.x) + Number(b.width)]);
+            const ys = berths.flatMap(b => [Number(b.y), Number(b.y) + Number(b.height)]);
+            const x = Math.min(0, ...xs), y = Math.min(0, ...ys);
+            return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+        }
+
+        const schematicView = setupPanZoom(document.getElementById('schematic'), {
+            getBase: schematicBase,
+            getBounds: schematicBounds,
+            isBackground: () => true,
+            onChange: (scale) => {
+                document.getElementById('zoomLevel').textContent = `${Math.round(scale * 100)}%`;
+            },
+        });
+        document.getElementById('zoomIn').addEventListener('click', () => schematicView.zoomBy(1.25));
+        document.getElementById('zoomOut').addEventListener('click', () => schematicView.zoomBy(0.8));
+        document.getElementById('zoomFit').addEventListener('click', () => schematicView.fit());
+        document.getElementById('zoomReset').addEventListener('click', () => schematicView.reset());
+
+        function resetSchematicView() {
+            const base = schematicBase();
+            const b = schematicBounds();
+            if (b.x + b.w > base.w || b.y + b.h > base.h) {
+                schematicView.fit();
+            } else {
+                schematicView.reset();
+            }
+        }
+
         function renderSchematic() {
             const svg = document.getElementById('schematic');
             svg.innerHTML = '';
