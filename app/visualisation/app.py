@@ -671,6 +671,50 @@ async function reloadAfter(kind, action, okMessage) {
   }
 }
 
+function rowIsDirty(kind, row) {
+  return JSON.stringify(collect(kind, row)) !== row.dataset.savedValues;
+}
+
+function updateSaveAllBerthsButton() {
+  const button = document.getElementById("save-all-berths");
+  if (!button) return;
+  button.disabled = !Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
+    .some((row) => rowIsDirty("berth", row));
+}
+
+async function saveAllEditedBerths() {
+  const button = document.getElementById("save-all-berths");
+  const rows = Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
+    .filter((row) => rowIsDirty("berth", row));
+  if (!rows.length) return;
+
+  button.disabled = true;
+  let saved = 0;
+  const failures = [];
+  for (const row of rows) {
+    const oldId = row.dataset.originalId;
+    const payload = collect("berth", row);
+    try {
+      await submitJson(`/api/berths/${encodeURIComponent(oldId)}`, "PUT", payload);
+      row.dataset.originalId = payload.id;
+      row.dataset.savedValues = JSON.stringify(payload);
+      saved += 1;
+    } catch (error) {
+      failures.push(`${oldId}: ${error.message}`);
+    }
+  }
+
+  if (failures.length) {
+    setStatus("berth-status", `Saved ${saved}; failed: ${failures.join("; ")}`, true);
+    updateSaveAllBerthsButton();
+  } else {
+    setStatus("berth-status", `Saved ${saved} edited berth(s).`);
+    await loadTable("berth");
+  }
+}
+
+
+
 function renderRow(kind, item) {
   const cfg = TABLES[kind];
   const tr = el("tr");
@@ -678,6 +722,9 @@ function renderRow(kind, item) {
   cfg.fields.forEach(([name, type]) => {
     tr.appendChild(el("td", {}, [fieldInput(name, type, item[name], `${kind} ${item.id} ${name}`)]));
   });
+  tr.dataset.savedValues = JSON.stringify(collect(kind, tr));
+  tr.addEventListener("input", updateSaveAllBerthsButton);
+  tr.addEventListener("change", updateSaveAllBerthsButton);
   const save = el("button", { type: "button", text: "Save" });
   save.addEventListener("click", () => reloadAfter(kind,
     () => submitJson(`${cfg.api}/${encodeURIComponent(item.id)}`, "PUT", collect(kind, tr)), `Saved ${kind} ${item.id}.`));
@@ -711,6 +758,7 @@ async function loadTable(kind) {
       tbody.appendChild(messageRow(cfg.fields.length + 1, q || type ? `No ${kind}s match the filters.` : `No ${kind}s in this layout yet.`));
     }
     data.items.forEach((item) => tbody.appendChild(renderRow(kind, item)));
+    if (kind === "berth") updateSaveAllBerthsButton();
     document.getElementById(`${kind}-page-info`).textContent =
       `Page ${data.page} of ${data.pages} · ${data.total} ${kind}(s)`;
     document.getElementById(`${kind}-prev`).disabled = data.page <= 1;
@@ -753,6 +801,7 @@ if (!isNew) {
   loadLayout();
   document.getElementById("delete-layout").addEventListener("click", deleteLayout);
   setupTable("berth");
+  document.getElementById("save-all-berths").addEventListener("click", saveAllEditedBerths);
   setupTable("signal");
   document.getElementById("open-import").addEventListener("click", () => openImportDialog(layoutId));
   document.addEventListener("berths-imported", () => loadTable("berth"));
@@ -765,7 +814,9 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     is_new = layout_id is None
     esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
 
-    def table_section(kind: str, title: str, headers: list[str], types: list[str]) -> str:
+    def table_section(
+        kind: str, title: str, headers: list[str], types: list[str], extra_toolbar: str = ""
+    ) -> str:
         head = "".join(f"<th scope='col'>{esc(h)}</th>" for h in headers + ["Actions"])
         type_opts = "".join(f"<option value='{t}'>{t}</option>" for t in types)
         return f"""
@@ -778,11 +829,12 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
         <button type="submit">Create {kind}</button>
       </form>
     </details>
-    <div class="toolbar">
-      <label>Search <input id="{kind}-q" type="search" placeholder="ID or name" /></label>
-      <label>Type <select id="{kind}-type"><option value="">All types</option>{type_opts}</select></label>
-      <label>Per page <select id="{kind}-page-size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></label>
-    </div>
+     <div class="toolbar">
+       <label>Search <input id="{kind}-q" type="search" placeholder="ID or name" /></label>
+       <label>Type <select id="{kind}-type"><option value="">All types</option>{type_opts}</select></label>
+       <label>Per page <select id="{kind}-page-size"><option>10</option><option selected>25</option><option>50</option><option>100</option><option>200</option></select></label>
+       {extra_toolbar}
+     </div>
     <div id="{kind}-status" class="status-message" role="status" aria-live="polite"></div>
     <div class="table-wrap"><table>
       <caption class="sr-only">{title}</caption>
@@ -799,13 +851,15 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     related = ""
     actions = ""
     if not is_new:
-        related = table_section(
-            "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"], ["normal", "platform", "siding"]
-        ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"])
-        actions = (
+         related = table_section(
+            "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"],
+            ["normal", "platform", "siding"],
+            '<button type="button" id="save-all-berths" disabled>Save edited berths</button>',
+         ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Width", "Height", "Type"], ["auto", "controlled", "shunt"])
+         actions = (
             '<button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>'
             '<button type="button" class="danger" id="delete-layout">Delete layout</button>'
-        )
+         )
     mode = "new" if is_new else "edit"
     lid_attr = "" if is_new else f' data-layout-id="{esc(layout_id)}"'
     title = "Create layout" if is_new else f"Edit layout {esc(layout_id)}"
