@@ -376,7 +376,10 @@
             title.setAttribute('font-weight', 'bold');
             title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
             svg.appendChild(title);
-            
+
+			console.log(berths);
+
+			
             // Render berths
             berths.forEach(berth => {
                 renderBerth(berth);
