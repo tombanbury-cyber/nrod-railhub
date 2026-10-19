@@ -463,6 +463,7 @@
             const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
             trains.forEach(train => {
                 const berthId = train.current_berth || train.to_berth || train.from_berth;
+				console.log(train.current_berth, train.to_berth, train.from_berth);
                 const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
                 if (berthId && trainId) {
                     updateBerthOccupancy(berthId, true, trainId);
