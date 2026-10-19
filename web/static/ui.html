@@ -563,7 +563,7 @@
             
 			const berth = berths.find(b => b.id === currentLayout.id+':'+berthId);
 			
-			console.log(trainId, berthId, berth, berths);
+			//console.log(trainId, berthId, berth, berths);
 			
             if (!berth) return;
             
@@ -577,7 +577,7 @@
             marker.id = `train-${trainId}`;
             marker.setAttribute('cx', berth.x + 2);
             marker.setAttribute('cy', berth.y - 2);
-            marker.setAttribute('r', '6');
+            marker.setAttribute('r', '4');
             marker.setAttribute('fill', '#FF5722');
             marker.setAttribute('stroke', '#D32F2F');
             marker.setAttribute('stroke-width', '1');
