@@ -833,6 +833,7 @@ function renderCanvas() {
     group.setAttribute("transform", `translate(${item.x} ${item.y})`);
     group.setAttribute("tabindex", "0");
     group.setAttribute("role", "button");
+    group.setAttribute("fill", "black");
     group.setAttribute("aria-pressed", String(selectedElement === item));
     group.setAttribute("aria-label", `${item.kind}: ${item.name || item.id || "new element"}, x ${item.x}, y ${item.y}`);
     if (item.kind === "berth") {
@@ -846,6 +847,8 @@ function renderCanvas() {
       label.setAttribute("x", Number(item.width) / 2);
       label.setAttribute("y", Number(item.height) / 2 + 4);
       label.setAttribute("text-anchor", "middle");
+      group.setAttribute("fill", "grey");
+      label.setAttribute("fill", "black");
       label.textContent = item.name || item.id || "New berth";
       group.appendChild(label);
     } else {
@@ -863,6 +866,7 @@ function renderCanvas() {
       circle.setAttribute("r", "8");
       group.appendChild(circle);
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("fill", "white");
       label.setAttribute("x", "12");
       label.setAttribute("y", "12");
       label.textContent = item.name || item.id || "New signal";
