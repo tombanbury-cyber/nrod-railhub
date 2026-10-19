@@ -263,6 +263,19 @@ _ADMIN_CSS = """
     .status-message{margin-top:10px;font-size:14px;color:var(--accent)}
     .status-message.error{color:var(--danger)}
     .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+    .layout-canvas{overflow:auto;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+    .layout-canvas svg{display:block;width:100%;min-width:720px;height:auto;touch-action:none}
+    .layout-canvas .berth-shape{fill:#dbeafe;stroke:#1d4ed8;stroke-width:2}
+    .layout-canvas .platform-shape{fill:#dcfce7;stroke:#15803d;stroke-width:2}
+    .layout-canvas .siding-shape{fill:#fef3c7;stroke:#b45309;stroke-width:2}
+    .layout-canvas .signal-shape{fill:#fee2e2;stroke:#b91c1c;stroke-width:3}
+    .layout-canvas .signal-stem{stroke:#991b1b;stroke-width:3}
+    .layout-canvas .layout-element{cursor:grab}
+    .layout-canvas .layout-element:active{cursor:grabbing}
+    .layout-canvas .layout-element.selected rect,.layout-canvas .layout-element.selected circle{stroke:#f59e0b;stroke-width:4}
+    .layout-canvas .layout-element:focus{outline:none}
+    .layout-canvas .layout-element:focus rect,.layout-canvas .layout-element:focus circle{stroke:#7c3aed;stroke-width:4}
+    .editor-inspector{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
     dialog{max-width:min(960px,95vw);width:100%;border:1px solid var(--line);border-radius:12px;padding:16px}
     dialog::backdrop{background:rgba(0,0,0,.4)}
     @media (max-width:600px){main{padding:12px}}
@@ -589,6 +602,347 @@ const TABLES = {
   },
 };
 const tableState = { berth: { page: 1 }, signal: { page: 1 } };
+const editorSvg = document.getElementById("layout-canvas-svg");
+const editorItems = [];
+let selectedElement = null;
+let dragOffset = null;
+let canvasSaving = false;
+const CANVAS_WIDTH = 1200;
+const CANVAS_HEIGHT = 700;
+
+function editorPayload(item) {
+  const payload = {
+    id: item.id, layout_id: layoutId, name: item.name, x: item.x, y: item.y,
+  };
+  if (item.kind === "berth") {
+    Object.assign(payload, {
+      width: item.width, height: item.height, berth_type: item.berth_type,
+    });
+  } else {
+    payload.signal_type = item.signal_type;
+  }
+  return payload;
+}
+
+function editorItemIsDirty(item) {
+  return item._isNew || JSON.stringify(editorPayload(item)) !== JSON.stringify(item._savedPayload);
+}
+
+function editorHasChanges() {
+  return editorItems.some(editorItemIsDirty);
+}
+
+function updateEditorStatus(message, isError) {
+  const dirty = editorHasChanges();
+  setStatus("canvas-status", message || (dirty ? "Unsaved element changes." : "All element changes saved."), isError);
+  document.getElementById("save-canvas").disabled = !dirty;
+}
+
+function editorPoint(event) {
+  const point = editorSvg.createSVGPoint();
+  point.x = event.clientX;
+  point.y = event.clientY;
+  return point.matrixTransform(editorSvg.getScreenCTM().inverse());
+}
+
+function clampElementPosition(item, x, y) {
+  const width = item.kind === "berth" ? Number(item.width) : 12;
+  const height = item.kind === "berth" ? Number(item.height) : 30;
+  item.x = Math.round(Math.max(0, Math.min(CANVAS_WIDTH - width, x)));
+  item.y = Math.round(Math.max(0, Math.min(CANVAS_HEIGHT - height, y)));
+}
+
+function renderCanvas() {
+  const focusedIndex = document.activeElement?.classList?.contains("layout-element")
+    ? document.activeElement.dataset.editorIndex : null;
+  editorSvg.querySelectorAll(".layout-element").forEach((node) => node.remove());
+  editorItems.forEach((item) => {
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    group.setAttribute("class", `layout-element${selectedElement === item ? " selected" : ""}`);
+    group.dataset.editorIndex = String(editorItems.indexOf(item));
+    group.setAttribute("transform", `translate(${item.x} ${item.y})`);
+    group.setAttribute("tabindex", "0");
+    group.setAttribute("role", "button");
+    group.setAttribute("aria-pressed", String(selectedElement === item));
+    group.setAttribute("aria-label", `${item.kind}: ${item.name || item.id || "new element"}, x ${item.x}, y ${item.y}`);
+    if (item.kind === "berth") {
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("class", `${item.berth_type}-shape`);
+      rect.setAttribute("width", item.width);
+      rect.setAttribute("height", item.height);
+      rect.setAttribute("rx", "5");
+      group.appendChild(rect);
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", Number(item.width) / 2);
+      label.setAttribute("y", Number(item.height) / 2 + 4);
+      label.setAttribute("text-anchor", "middle");
+      label.textContent = item.name || item.id || "New berth";
+      group.appendChild(label);
+    } else {
+      const stem = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      stem.setAttribute("class", "signal-stem");
+      stem.setAttribute("x1", "0");
+      stem.setAttribute("y1", "8");
+      stem.setAttribute("x2", "0");
+      stem.setAttribute("y2", "30");
+      group.appendChild(stem);
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      circle.setAttribute("class", "signal-shape");
+      circle.setAttribute("cx", "0");
+      circle.setAttribute("cy", "8");
+      circle.setAttribute("r", "8");
+      group.appendChild(circle);
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", "12");
+      label.setAttribute("y", "12");
+      label.textContent = item.name || item.id || "New signal";
+      group.appendChild(label);
+    }
+    group.addEventListener("click", () => selectEditorElement(item));
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectEditorElement(item);
+      } else if (!canvasSaving && selectedElement === item && event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 10 : 1;
+        clampElementPosition(
+          item,
+          Number(item.x) + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0),
+          Number(item.y) + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0),
+        );
+        renderCanvas();
+        renderInspector();
+        updateEditorStatus();
+      }
+    });
+    group.addEventListener("pointerdown", (event) => {
+      if (canvasSaving || event.button !== 0) return;
+      selectEditorElement(item);
+      dragOffset = { item, point: editorPoint(event) };
+      dragOffset.x = dragOffset.point.x - Number(item.x);
+      dragOffset.y = dragOffset.point.y - Number(item.y);
+      group.setPointerCapture(event.pointerId);
+    });
+    group.addEventListener("pointermove", (event) => {
+      if (!dragOffset || dragOffset.item !== item || !group.hasPointerCapture(event.pointerId)) return;
+      const point = editorPoint(event);
+      clampElementPosition(item, point.x - dragOffset.x, point.y - dragOffset.y);
+      group.setAttribute("transform", `translate(${item.x} ${item.y})`);
+      const xInput = document.getElementById("element-x");
+      const yInput = document.getElementById("element-y");
+      if (selectedElement === item && xInput && yInput) {
+        xInput.value = item.x;
+        yInput.value = item.y;
+      }
+      updateEditorStatus();
+    });
+    group.addEventListener("pointerup", () => { dragOffset = null; });
+    group.addEventListener("pointercancel", () => { dragOffset = null; });
+    editorSvg.appendChild(group);
+  });
+  if (focusedIndex !== null) {
+    editorSvg.querySelector(`[data-editor-index="${focusedIndex}"]`)?.focus();
+  }
+}
+
+function addInspectorField(form, name, value, type = "text", options = null) {
+  const label = document.createElement("label");
+  label.textContent = name.replace("_", " ");
+  let input;
+  if (options) {
+    input = document.createElement("select");
+    options.forEach((option) => {
+      const choice = document.createElement("option");
+      choice.value = option;
+      choice.textContent = option;
+      input.appendChild(choice);
+    });
+  } else {
+    input = document.createElement("input");
+    input.type = type;
+  }
+  input.id = `element-${name}`;
+  input.name = name;
+  input.value = value ?? "";
+  input.required = name === "id" || name === "name";
+  input.disabled = canvasSaving;
+  if (type === "number") {
+    const maxX = CANVAS_WIDTH - (selectedElement.kind === "berth" ? Number(selectedElement.width) : 12);
+    const maxY = CANVAS_HEIGHT - (selectedElement.kind === "berth" ? Number(selectedElement.height) : 30);
+    input.min = "0";
+    input.max = String(name === "x" ? maxX : name === "y" ? maxY : name === "width" ? CANVAS_WIDTH : CANVAS_HEIGHT);
+    input.step = "1";
+  }
+  label.appendChild(input);
+  form.appendChild(label);
+}
+
+function renderInspector() {
+  const inspector = document.getElementById("element-inspector");
+  inspector.replaceChildren();
+  if (!selectedElement) {
+    inspector.textContent = "Select an element on the canvas or add a berth or signal.";
+    return;
+  }
+  const item = selectedElement;
+  const form = document.createElement("form");
+  form.className = "editor-inspector";
+  addInspectorField(form, "id", item.id);
+  addInspectorField(form, "name", item.name);
+  addInspectorField(form, "x", item.x, "number");
+  addInspectorField(form, "y", item.y, "number");
+  if (item.kind === "berth") {
+    addInspectorField(form, "width", item.width, "number");
+    addInspectorField(form, "height", item.height, "number");
+    addInspectorField(form, "berth_type", item.berth_type, "text", ["normal", "platform", "siding"]);
+  } else {
+    addInspectorField(form, "signal_type", item.signal_type, "text", ["auto", "controlled", "shunt"]);
+  }
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = item._isNew ? "Add element" : "Apply properties";
+  save.disabled = canvasSaving;
+  form.appendChild(save);
+  form.addEventListener("input", () => {
+    if (canvasSaving) return;
+    const data = new FormData(form);
+    for (const [name, value] of data.entries()) {
+      item[name] = ["x", "y", "width", "height"].includes(name) ? Number(value) : value;
+    }
+    if (["x", "y", "width", "height"].some((name) => data.has(name))) {
+      clampElementPosition(item, Number(item.x), Number(item.y));
+      document.getElementById("element-x").value = item.x;
+      document.getElementById("element-y").value = item.y;
+    }
+    renderCanvas();
+    updateEditorStatus();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (canvasSaving) return;
+    clampElementPosition(item, Number(item.x), Number(item.y));
+    renderCanvas();
+    saveCanvas();
+  });
+  inspector.appendChild(form);
+}
+
+function selectEditorElement(item) {
+  selectedElement = item;
+  editorSvg.querySelectorAll(".layout-element").forEach((group) => {
+    const selected = Number(group.dataset.editorIndex) === editorItems.indexOf(item);
+    group.classList.toggle("selected", selected);
+    group.setAttribute("aria-pressed", String(selected));
+  });
+  renderInspector();
+}
+
+function beginAddingElement(kind) {
+  if (!layoutId || canvasSaving) return;
+  const item = {
+    kind, id: "", layout_id: layoutId, name: "",
+    x: 60, y: 60, width: 60, height: 30,
+    berth_type: "normal", signal_type: "auto", _isNew: true,
+  };
+  editorItems.push(item);
+  renderCanvas();
+  selectEditorElement(item);
+  document.getElementById("element-id").focus();
+}
+
+async function prepareTableChange() {
+  if (canvasSaving) return false;
+  if (!editorHasChanges()) return true;
+  if (!confirm("Discard unsaved canvas edits before changing elements in the table?")) return false;
+  return await loadEditor();
+}
+
+async function loadEditorItems(kind) {
+  const items = [];
+  let page = 1;
+  let pages = 1;
+  do {
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/${kind}s?page=${page}&page_size=200`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    items.push(...data.items.map((row) => {
+      const item = { ...row, kind, _originalId: row.id, _isNew: false };
+      item._savedPayload = editorPayload(item);
+      return item;
+    }));
+    pages = data.pages;
+    page += 1;
+  } while (page <= pages);
+  return items;
+}
+
+async function loadEditor() {
+  try {
+    editorItems.splice(0, editorItems.length,
+      ...(await loadEditorItems("berth")), ...(await loadEditorItems("signal")));
+    selectedElement = null;
+    renderCanvas();
+    renderInspector();
+    updateEditorStatus("Loaded layout elements.");
+    return true;
+  } catch (error) {
+    updateEditorStatus(`Failed to load canvas elements: ${error.message}`, true);
+    return false;
+  }
+}
+
+async function saveCanvas() {
+  if (canvasSaving || !editorHasChanges()) return !canvasSaving;
+  canvasSaving = true;
+  document.getElementById("save-canvas").disabled = true;
+  document.getElementById("add-berth").disabled = true;
+  document.getElementById("add-signal").disabled = true;
+  document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
+    .forEach((control) => { control.disabled = true; });
+  try {
+    const failures = [];
+    const changedKinds = new Set();
+    for (const item of editorItems.filter(editorItemIsDirty)) {
+      const originalId = item._originalId || item.id;
+      const payload = editorPayload(item);
+      try {
+        await submitJson(
+          item._isNew ? TABLES[item.kind].api : `${TABLES[item.kind].api}/${encodeURIComponent(originalId)}`,
+          item._isNew ? "POST" : "PUT",
+          payload,
+        );
+        item._originalId = payload.id;
+        item._isNew = false;
+        item._savedPayload = payload;
+        changedKinds.add(item.kind);
+      } catch (error) {
+        failures.push(`${item.kind} ${item.id || "(new)"}: ${error.message}`);
+      }
+    }
+    renderCanvas();
+    for (const kind of changedKinds) await loadTable(kind);
+    renderInspector();
+    if (failures.length) {
+      updateEditorStatus(`Some changes were not saved: ${failures.join("; ")}`, true);
+      return false;
+    }
+    updateEditorStatus("Canvas changes saved.");
+    return true;
+  } finally {
+    canvasSaving = false;
+    document.getElementById("add-berth").disabled = isNew;
+    document.getElementById("add-signal").disabled = isNew;
+    document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
+      .forEach((control) => { control.disabled = false; });
+  }
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!editorHasChanges()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 function readLayoutForm() {
   const raw = document.getElementById("layout-data").value.trim() || "{}";
@@ -605,6 +959,7 @@ function readLayoutForm() {
 async function saveLayout(event) {
   event.preventDefault();
   try {
+    if (!isNew && !(await saveCanvas())) return;
     const payload = readLayoutForm();
     if (isNew) await submitJson("/api/layouts", "POST", payload);
     else await submitJson(`/api/layouts/${encodeURIComponent(layoutId)}`, "PUT", payload);
@@ -663,9 +1018,12 @@ function collect(kind, container) {
 async function reloadAfter(kind, action, okMessage) {
   const cfg = TABLES[kind];
   try {
+    if (!(await prepareTableChange())) return;
     await action();
     setStatus(cfg.status, okMessage);
     await loadTable(kind);
+    if (editorHasChanges()) updateEditorStatus("Table changes saved; canvas edits are still unsaved.", true);
+    else await loadEditor();
   } catch (error) {
     setStatus(cfg.status, `Failed: ${error.message}`, true);
   }
@@ -687,6 +1045,7 @@ async function saveAllEditedBerths() {
   const rows = Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
     .filter((row) => rowIsDirty("berth", row));
   if (!rows.length) return;
+  if (!(await prepareTableChange())) return;
 
   button.disabled = true;
   let saved = 0;
@@ -710,6 +1069,8 @@ async function saveAllEditedBerths() {
   } else {
     setStatus("berth-status", `Saved ${saved} edited berth(s).`);
     await loadTable("berth");
+    if (editorHasChanges()) updateEditorStatus("Table changes saved; canvas edits are still unsaved.", true);
+    else await loadEditor();
   }
 }
 
@@ -797,8 +1158,17 @@ function setupTable(kind) {
 }
 
 document.getElementById("layout-form").addEventListener("submit", saveLayout);
+document.getElementById("add-berth").addEventListener("click", () => beginAddingElement("berth"));
+document.getElementById("add-signal").addEventListener("click", () => beginAddingElement("signal"));
+document.getElementById("save-canvas").addEventListener("click", saveCanvas);
+if (isNew) {
+  document.getElementById("add-berth").disabled = true;
+  document.getElementById("add-signal").disabled = true;
+  updateEditorStatus("Save the layout first to add and arrange elements.");
+}
 if (!isNew) {
   loadLayout();
+  loadEditor();
   document.getElementById("delete-layout").addEventListener("click", deleteLayout);
   setupTable("berth");
   document.getElementById("save-all-berths").addEventListener("click", saveAllEditedBerths);
@@ -855,7 +1225,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
             "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"],
             ["normal", "platform", "siding"],
             '<button type="button" id="save-all-berths" disabled>Save edited berths</button>',
-         ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Width", "Height", "Type"], ["auto", "controlled", "shunt"])
+         ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"])
          actions = (
             '<button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>'
             '<button type="button" class="danger" id="delete-layout">Delete layout</button>'
@@ -864,6 +1234,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     lid_attr = "" if is_new else f' data-layout-id="{esc(layout_id)}"'
     title = "Create layout" if is_new else f"Edit layout {esc(layout_id)}"
     dialog = "" if is_new else _ADMIN_IMPORT_DIALOG
+    editor = " disabled" if is_new else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -891,6 +1262,26 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       </div>
       <div id="layout-status" class="status-message" role="alert"></div>
     </form>
+  </section>
+  <section aria-labelledby="canvas-heading">
+    <h2 id="canvas-heading">Visual layout editor</h2>
+    <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Positions are bounded to the 1200 × 700 canvas.</p>
+    <div class="toolbar" aria-label="Canvas controls">
+      <button type="button" id="add-berth"{editor}>Add berth</button>
+      <button type="button" id="add-signal"{editor}>Add signal</button>
+      <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
+      <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal</span>
+    </div>
+    <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
+    <div class="layout-canvas">
+      <svg id="layout-canvas-svg" viewBox="0 0 1200 700" role="group" aria-label="Interactive layout canvas">
+        <defs><pattern id="canvas-grid" width="20" height="20" patternUnits="userSpaceOnUse">
+          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e5e7eb" stroke-width="1" />
+        </pattern></defs>
+        <rect width="1200" height="700" fill="url(#canvas-grid)" />
+      </svg>
+    </div>
+    <div id="element-inspector" aria-label="Selected element properties">Select an element on the canvas or add a berth or signal.</div>
   </section>
   {related}
 </main>

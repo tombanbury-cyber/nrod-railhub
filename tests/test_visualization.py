@@ -456,6 +456,10 @@ def test_admin_layout_pages(monkeypatch):
         assert new_page.status_code == 200
         assert "Layout settings" in new_page.text
         assert 'id="berth-rows"' not in new_page.text
+        assert "Visual layout editor" in new_page.text
+        assert 'id="layout-canvas-svg"' in new_page.text
+        assert 'id="add-berth" disabled' in new_page.text
+        assert "Save the layout first to add and arrange elements." in new_page.text
 
         layouts = client.get("/api/layouts").json()
         layout_id = layouts[0]["id"]
@@ -465,10 +469,55 @@ def test_admin_layout_pages(monkeypatch):
         assert 'id="berth-rows"' in edit.text
         assert 'id="signal-rows"' in edit.text
         assert "Import berths from headcode chain" in edit.text
+        assert 'aria-label="Interactive layout canvas"' in edit.text
+        assert 'id="add-signal"' in edit.text
+        assert "pointerdown" in edit.text
+        assert "beforeunload" in edit.text
+        assert "ArrowRight" in edit.text
+        assert 'if (focusedIndex !== null)' in edit.text
+        assert "canvasSaving = true" in edit.text
+        assert "Discard unsaved canvas edits before changing elements in the table?" in edit.text
 
         assert client.get("/admin/layouts/missing").status_code == 404
         assert client.get("/api/layouts/missing").status_code == 404
         assert client.get(f"/api/layouts/{layout_id}").json()["id"] == layout_id
+    finally:
+        Path(db_path).unlink()
+
+
+def test_layout_editor_element_positions_persist_and_reload(monkeypatch):
+    """Canvas positions saved through the element APIs are returned on reload."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        assert client.post(
+            "/api/layouts",
+            json={"id": "canvas", "name": "Canvas", "description": None, "data": {}},
+        ).status_code == 200
+
+        berth = {
+            "id": "canvas:B1", "layout_id": "canvas", "name": "B1",
+            "x": 80, "y": 120, "width": 60, "height": 30, "berth_type": "platform",
+        }
+        signal = {
+            "id": "canvas:S1", "layout_id": "canvas", "name": "S1",
+            "x": 180, "y": 160, "signal_type": "controlled",
+        }
+        assert client.post("/api/berths", json=berth).status_code == 200
+        assert client.post("/api/signals", json=signal).status_code == 200
+
+        berth.update(x=240, y=300)
+        signal.update(x=360, y=400)
+        assert client.put("/api/berths/canvas:B1", json=berth).status_code == 200
+        assert client.put("/api/signals/canvas:S1", json=signal).status_code == 200
+
+        reloaded_berth = client.get("/api/layouts/canvas/berths").json()["items"][0]
+        reloaded_signal = client.get("/api/layouts/canvas/signals").json()["items"][0]
+        assert (reloaded_berth["x"], reloaded_berth["y"]) == (240, 300)
+        assert (reloaded_signal["x"], reloaded_signal["y"]) == (360, 400)
     finally:
         Path(db_path).unlink()
 
