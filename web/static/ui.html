@@ -485,6 +485,9 @@
                     delete trainPositions[trainId];
                 }
             }
+			
+			//console.log( trainPositions );
+			
         }
 
         function renderSnapshot(snapshot) {
@@ -557,7 +560,11 @@
         }
         
         function updateTrainMarker(trainId, berthId) {
-            const berth = berths.find(b => b.id === berthId);
+            
+			const berth = berths.find(b => b.id === currentLayout.id+':'+berthId);
+			
+			console.log(trainId, berthId, berth, berths);
+			
             if (!berth) return;
             
             const svg = document.getElementById('schematic');
@@ -568,13 +575,13 @@
             // Create new marker
             const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             marker.id = `train-${trainId}`;
-            marker.setAttribute('cx', berth.x + berth.width / 2);
-            marker.setAttribute('cy', berth.y - 15);
-            marker.setAttribute('r', '8');
+            marker.setAttribute('cx', berth.x + 2);
+            marker.setAttribute('cy', berth.y - 2);
+            marker.setAttribute('r', '6');
             marker.setAttribute('fill', '#FF5722');
             marker.setAttribute('stroke', '#D32F2F');
-            marker.setAttribute('stroke-width', '2');
-            marker.style.filter = 'drop-shadow(0 0 5px #FF5722)';
+            marker.setAttribute('stroke-width', '1');
+            marker.style.filter = 'drop-shadow(0 0 2px #FF5722)';
             
             svg.appendChild(marker);
         }
