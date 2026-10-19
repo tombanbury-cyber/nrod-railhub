@@ -287,6 +287,22 @@ its settings/metadata and its paged, searchable Berths and Signals tables
 viewer, selective import) is a modal dialog on both pages.
 `GET /api/layouts` and `GET /api/layouts/{layout_id}` return layout JSON.
 
+#### Visual layout editor
+
+Create and save a layout first; the editor opens on the new layout's edit page.
+On that page, **Add berth** or **Add signal** creates a draft on the canvas.
+Select an element to edit its ID, name, coordinates, and type (plus berth size),
+then choose **Add element** or **Apply properties**. Drag elements to reposition
+them, or focus one and use the arrow keys (Shift + arrow moves 10 units). Berths
+use distinct colors for normal, platform, and siding types; signals are shown
+separately. Coordinates are constrained to the 1200 × 700 canvas.
+
+**Save canvas changes** persists all drafts and edits through the berth/signal
+APIs. Positions are stored as the existing `x`/`y` values and are restored when
+the layout is reopened. Unsaved changes trigger a browser leave-page warning;
+API failures are shown above the canvas and leave unsaved edits in place. The
+existing tables remain available for searching, bulk berth edits, and deletion.
+
 #### `POST /api/layouts`
 Create a layout. `PUT /api/layouts/{layout_id}` updates it, and
 `DELETE /api/layouts/{layout_id}` removes the layout plus its berths/signals.
