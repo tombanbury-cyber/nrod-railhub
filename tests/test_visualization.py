@@ -472,6 +472,10 @@ def test_admin_layout_pages(monkeypatch):
         assert 'aria-label="Interactive layout canvas"' in edit.text
         assert 'id="add-signal"' in edit.text
         assert "pointerdown" in edit.text
+        assert 'id="snap-to-grid"' in edit.text
+        assert 'id="snap-grid-size"' in edit.text
+        assert '<option value="20" selected>20</option>' in edit.text
+        assert "snapValue(x, grid)" in edit.text
         assert "beforeunload" in edit.text
         assert "ArrowRight" in edit.text
         assert 'if (focusedIndex !== null)' in edit.text

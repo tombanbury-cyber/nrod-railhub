@@ -265,6 +265,7 @@ _ADMIN_CSS = """
     .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
     .layout-canvas{overflow:auto;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
     .layout-canvas svg{display:block;width:100%;min-width:720px;height:auto;touch-action:none}
+    .snap-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls button{min-width:44px;min-height:36px}
     .layout-canvas .berth-shape{fill:#dbeafe;stroke:#1d4ed8;stroke-width:2}
@@ -798,7 +799,22 @@ function editorPoint(event) {
   return point.matrixTransform(editorSvg.getScreenCTM().inverse());
 }
 
+function snapGridSize() {
+  const toggle = document.getElementById("snap-to-grid");
+  const select = document.getElementById("snap-grid-size");
+  if (!toggle || !select || !toggle.checked) return 0;
+  const size = Number(select.value);
+  return size > 0 ? size : 0;
+}
+
+function snapValue(value, size) {
+  return size > 0 ? Math.round(value / size) * size : value;
+}
+
 function clampElementPosition(item, x, y) {
+  const grid = snapGridSize();
+  x = snapValue(x, grid);
+  y = snapValue(y, grid);
   const width = item.kind === "berth" ? Number(item.width) : 12;
   const height = item.kind === "berth" ? Number(item.height) : 30;
   item.x = Math.round(Math.max(0, Math.min(CANVAS_WIDTH - width, x)));
@@ -859,7 +875,8 @@ function renderCanvas() {
         selectEditorElement(item);
       } else if (!canvasSaving && selectedElement === item && event.key.startsWith("Arrow")) {
         event.preventDefault();
-        const step = event.shiftKey ? 10 : 1;
+        const grid = snapGridSize();
+        const step = Math.max(event.shiftKey ? 10 : 1, grid);
         clampElementPosition(
           item,
           Number(item.x) + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0),
@@ -1420,11 +1437,22 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
   </section>
   <section aria-labelledby="canvas-heading">
     <h2 id="canvas-heading">Visual layout editor</h2>
-    <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). The canvas grows to include imported berths: scroll to pan, Ctrl/⌘ + scroll or pinch to zoom, drag the background to pan, or use the zoom buttons.</p>
+    <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Enable "Snap to grid" to align dragged and keyboard-moved elements to the selected grid size (arrow keys then move by one grid step). The canvas grows to include imported berths: scroll to pan, Ctrl/⌘ + scroll or pinch to zoom, drag the background to pan, or use the zoom buttons.</p>
     <div class="toolbar" aria-label="Canvas controls">
       <button type="button" id="add-berth"{editor}>Add berth</button>
       <button type="button" id="add-signal"{editor}>Add signal</button>
       <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
+      <span class="snap-controls" role="group" aria-label="Snap to grid">
+        <label><input type="checkbox" id="snap-to-grid"> Snap to grid</label>
+        <label for="snap-grid-size">Grid size</label>
+        <select id="snap-grid-size" aria-label="Grid size">
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+      </span>
       <span class="zoom-controls" role="group" aria-label="Canvas zoom">
         <button type="button" class="secondary" id="canvas-zoom-out" aria-label="Zoom out">−</button>
         <span id="canvas-zoom-level" aria-live="polite">100%</span>
