@@ -436,6 +436,17 @@ def test_admin_page_lists_layouts(monkeypatch):
         assert "<dialog" in page
         assert "Search headcodes" in page
         assert "Import selected berths" in page
+        assert '<link rel="stylesheet" href="/static/admin.css" />' in page
+        assert '<script defer src="/static/admin-common.js"></script>' in page
+        assert '<script defer src="/static/admin-list.js"></script>' in page
+        assert "<style>" not in page
+        assert "function deleteLayout" not in page
+        assert "function openImportDialog" not in page
+        list_js = client.get("/static/admin-list.js")
+        assert list_js.status_code == 200
+        assert "deleteLayout" in list_js.text
+        assert "function openImportDialog" in client.get("/static/admin-common.js").text
+        assert ":root{--fg" in client.get("/static/admin.css").text
         # Editors moved off the landing page
         assert "Berth editor" not in page
         assert "Signal editor" not in page
@@ -459,7 +470,7 @@ def test_admin_layout_pages(monkeypatch):
         assert "Visual layout editor" in new_page.text
         assert 'id="layout-canvas-svg"' in new_page.text
         assert 'id="add-berth" disabled' in new_page.text
-        assert "Save the layout first to add and arrange elements." in new_page.text
+        assert "Save the layout first to add and arrange elements." in client.get("/static/admin-layout.js").text
 
         layouts = client.get("/api/layouts").json()
         layout_id = layouts[0]["id"]
@@ -471,16 +482,22 @@ def test_admin_layout_pages(monkeypatch):
         assert "Import berths from headcode chain" in edit.text
         assert 'aria-label="Interactive layout canvas"' in edit.text
         assert 'id="add-signal"' in edit.text
-        assert "pointerdown" in edit.text
         assert 'id="snap-to-grid"' in edit.text
         assert 'id="snap-grid-size"' in edit.text
         assert '<option value="20" selected>20</option>' in edit.text
-        assert "snapValue(x, grid)" in edit.text
-        assert "beforeunload" in edit.text
-        assert "ArrowRight" in edit.text
-        assert 'if (focusedIndex !== null)' in edit.text
-        assert "canvasSaving = true" in edit.text
-        assert "Discard unsaved canvas edits before changing elements in the table?" in edit.text
+        assert '<script defer src="/static/admin-common.js"></script>' in edit.text
+        assert '<script defer src="/static/admin-layout.js"></script>' in edit.text
+        assert '<link rel="stylesheet" href="/static/admin.css" />' in edit.text
+        assert "<style>" not in edit.text
+        assert "function snapValue" not in edit.text
+        layout_js = client.get("/static/admin-layout.js").text
+        assert "pointerdown" in layout_js
+        assert "snapValue(x, grid)" in layout_js
+        assert "beforeunload" in layout_js
+        assert "ArrowRight" in layout_js
+        assert "if (focusedIndex !== null)" in layout_js
+        assert "canvasSaving = true" in layout_js
+        assert "Discard unsaved canvas edits before changing elements in the table?" in layout_js
 
         assert client.get("/admin/layouts/missing").status_code == 404
         assert client.get("/api/layouts/missing").status_code == 404
@@ -966,6 +983,6 @@ def test_canvas_uis_support_pan_and_zoom():
         assert f'id="{control}"' in page
 
     admin = client.get("/admin/new-layout").text
-    assert "setupPanZoom" in admin
+    assert "setupPanZoom" in client.get("/static/admin-layout.js").text
     for control in ("canvas-zoom-in", "canvas-zoom-out", "canvas-zoom-fit", "canvas-zoom-reset"):
         assert f'id="{control}"' in admin
