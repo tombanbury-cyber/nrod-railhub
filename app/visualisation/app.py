@@ -263,7 +263,6 @@ _ADMIN_CSS = """
     .status-message{margin-top:10px;font-size:14px;color:var(--accent)}
     .status-message.error{color:var(--danger)}
     .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-    .layout-canvas{
     .layout-canvas {
         max-height: 60vh;
         overflow:auto;
@@ -271,7 +270,7 @@ _ADMIN_CSS = """
         border-radius:8px;
         background:#fff;
     }
-    .layout-canvas svg{
+    .layout-canvas svg {
         display:block;
         width:100%;
         min-width:720px;
