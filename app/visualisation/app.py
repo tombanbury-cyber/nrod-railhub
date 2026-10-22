@@ -263,8 +263,22 @@ _ADMIN_CSS = """
     .status-message{margin-top:10px;font-size:14px;color:var(--accent)}
     .status-message.error{color:var(--danger)}
     .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-    .layout-canvas{overflow:auto;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
-    .layout-canvas svg{display:block;width:100%;min-width:720px;height:auto;touch-action:none}
+    .layout-canvas{
+    .layout-canvas {
+        max-height: 60vh;
+        overflow:auto;
+        border:1px solid #cbd5e1;
+        border-radius:8px;
+        background:#fff;
+    }
+    .layout-canvas svg{
+        display:block;
+        width:100%;
+        min-width:720px;
+        height:auto;
+        touch-action:none;
+        
+    }
     .snap-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls button{min-width:44px;min-height:36px}
