@@ -100,6 +100,50 @@ class SignalPayload(BaseModel):
     signal_type: Literal["auto", "controlled", "shunt"] = "auto"
 
 
+LAYOUT_OBJECT_VARIANTS: dict[str, tuple[str, ...]] = {
+    "level_crossing": ("automatic", "barrier", "user_worked"),
+    "bridge": ("road_over", "road_under", "footbridge"),
+    "label": ("station", "line", "note"),
+    "platform": ("side", "island", "bay"),
+}
+
+LAYOUT_OBJECT_DDL = """
+CREATE TABLE IF NOT EXISTS layout_object (
+    id TEXT PRIMARY KEY,
+    layout_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    width INTEGER DEFAULT 60,
+    height INTEGER DEFAULT 30,
+    variant TEXT,
+    berth_id TEXT,
+    rotation INTEGER DEFAULT 0,
+    FOREIGN KEY (layout_id) REFERENCES layout(id)
+)
+"""
+
+
+class LayoutObjectPayload(BaseModel):
+    """Model for level crossing, bridge, label and platform CRUD operations.
+
+    ``rotation`` (0/45/90 degrees) applies to level crossings; ``berth_id`` is an optional
+    berth reference used by platforms.
+    """
+    id: constr(strip_whitespace=True, min_length=1)
+    layout_id: constr(strip_whitespace=True, min_length=1)
+    object_type: Literal["level_crossing", "bridge", "label", "platform"]
+    name: constr(strip_whitespace=True, min_length=1, max_length=200)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(default=60, gt=0)
+    height: int = Field(default=30, gt=0)
+    variant: Optional[str] = None
+    berth_id: Optional[str] = None
+    rotation: Literal[0, 45, 90] = 0
+
+
 class BerthImportPayload(BaseModel):
     """Model for importing selected berth chain items into a layout."""
     layout_id: constr(strip_whitespace=True, min_length=1)
@@ -189,6 +233,35 @@ def _require_visualisation_schema(conn: Any) -> None:
     missing = [name for name in ("layout", "berth", "signal") if not _table_exists(conn, name)]
     if missing:
         raise HTTPException(status_code=503, detail=f"missing visualisation tables: {', '.join(missing)}")
+    if not _table_exists(conn, "layout_object"):
+        conn.execute(LAYOUT_OBJECT_DDL)
+        conn.commit()
+
+
+def _object_values(payload: LayoutObjectPayload) -> tuple[str, Optional[str], int]:
+    """Return (variant, berth_id, rotation) normalised for the payload's object type."""
+    variant = _resolved_object_variant(payload)
+    berth_id = (payload.berth_id or "").strip() or None
+    if payload.object_type != "platform":
+        berth_id = None
+    rotation = payload.rotation if payload.object_type == "level_crossing" else 0
+    return variant, berth_id, rotation
+
+
+def _object_response(payload: LayoutObjectPayload, variant: str, berth_id: Optional[str], rotation: int) -> dict:
+    return {**_model_dump(payload), "variant": variant, "berth_id": berth_id, "rotation": rotation}
+
+
+def _resolved_object_variant(payload: LayoutObjectPayload) -> str:
+    """Return the payload's variant, defaulting per type and rejecting unknown values."""
+    allowed = LAYOUT_OBJECT_VARIANTS[payload.object_type]
+    variant = (payload.variant or "").strip() or allowed[0]
+    if variant not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid variant for {payload.object_type}; expected one of: {', '.join(allowed)}",
+        )
+    return variant
 
 def _json_or_empty(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -327,6 +400,31 @@ def _render_admin_page(layout_rows: list[Any], counts: Optional[dict[str, dict[s
 """
 
 
+_ADD_CONTROLS = (
+    ("berth", "Berth", ("normal", "platform", "siding")),
+    ("signal", "Signal", ("auto", "controlled", "shunt")),
+    ("level_crossing", "Level crossing", LAYOUT_OBJECT_VARIANTS["level_crossing"]),
+    ("bridge", "Bridge", LAYOUT_OBJECT_VARIANTS["bridge"]),
+    ("label", "Label", LAYOUT_OBJECT_VARIANTS["label"]),
+    ("platform", "Platform", LAYOUT_OBJECT_VARIANTS["platform"]),
+)
+
+
+def _render_add_control(key: str, label: str, variants: tuple[str, ...], disabled_attr: str) -> str:
+    """Render one accessible "Add" control: a type dropdown plus an add button."""
+    esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
+    options = "".join(
+        '<option value="{}">{}</option>'.format(esc(v), esc(v.replace("_", " "))) for v in variants
+    )
+    return (
+        '<span class="add-control" role="group" aria-label="Add {lc}">'
+        '<label for="add-{key}-type">{label} type</label>'
+        '<select id="add-{key}-type"{dis}>{options}</select>'
+        '<button type="button" id="add-{key}"{dis}>Add {lc}</button>'
+        "</span>"
+    ).format(lc=esc(label.lower()), key=key, label=esc(label), dis=disabled_attr, options=options)
+
+
 def _render_layout_page(layout_id: Optional[str]) -> str:
     """Render the layout create/edit page. ``layout_id`` is None when creating."""
     is_new = layout_id is None
@@ -383,6 +481,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     title = "Create layout" if is_new else f"Edit layout {esc(layout_id)}"
     dialog = "" if is_new else _ADMIN_IMPORT_DIALOG
     editor = " disabled" if is_new else ""
+    add_controls = "".join(_render_add_control(key, label, variants, editor) for key, label, variants in _ADD_CONTROLS)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -415,8 +514,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     <h2 id="canvas-heading">Visual layout editor</h2>
     <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Enable "Snap to grid" to align dragged and keyboard-moved elements to the selected grid size (arrow keys then move by one grid step). The canvas grows to include imported berths: scroll to pan, Ctrl/⌘ + scroll or pinch to zoom, drag the background to pan, or use the zoom buttons.</p>
     <div class="toolbar" aria-label="Canvas controls">
-      <button type="button" id="add-berth"{editor}>Add berth</button>
-      <button type="button" id="add-signal"{editor}>Add signal</button>
+      {add_controls}
       <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
       <span class="snap-controls" role="group" aria-label="Snap to grid">
         <label><input type="checkbox" id="snap-to-grid"> Snap to grid</label>
@@ -436,7 +534,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
         <button type="button" class="secondary" id="canvas-zoom-fit">Fit all</button>
         <button type="button" class="secondary" id="canvas-zoom-reset">Reset view</button>
       </span>
-      <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal</span>
+      <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed)</span>
     </div>
     <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
     <div class="layout-canvas">
@@ -447,7 +545,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
         <rect id="canvas-grid-bg" width="1200" height="700" fill="url(#canvas-grid)" />
       </svg>
     </div>
-    <div id="element-inspector" aria-label="Selected element properties">Select an element on the canvas or add a berth or signal.</div>
+    <div id="element-inspector" aria-label="Selected element properties">Select an element on the canvas or add a berth, signal, level crossing, bridge, label or platform.</div>
   </section>
   {related}
 </main>
@@ -861,6 +959,20 @@ async def create_layout(payload: LayoutPayload):
         return {"status": "created", "rowid": rowid, "layout": _model_dump(payload)}
 
 
+@app.get("/api/layouts/{layout_id}/objects")
+async def list_layout_objects(
+    layout_id: str,
+    q: Optional[str] = None,
+    type: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+):
+    """List a layout's level crossings, bridges and labels with search, type filter and paging."""
+    return _paged_children(
+        "layout_object", "object_type", tuple(LAYOUT_OBJECT_VARIANTS), layout_id, q, type, page, page_size
+    )
+
+
 @app.put("/api/layouts/{layout_id}")
 async def update_layout(layout_id: str, payload: LayoutPayload):
     """Update a layout row and keep child berth/signal rows in sync when renaming."""
@@ -874,6 +986,7 @@ async def update_layout(layout_id: str, payload: LayoutPayload):
                 if payload.id != layout_id:
                     conn.execute("UPDATE berth SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
                     conn.execute("UPDATE signal SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
+                    conn.execute("UPDATE layout_object SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
                 conn.execute(
                     """
                     UPDATE layout
@@ -898,6 +1011,7 @@ async def delete_layout(layout_id: str):
                 raise HTTPException(status_code=404, detail="Layout not found")
             conn.execute("DELETE FROM berth WHERE layout_id = ?", (layout_id,))
             conn.execute("DELETE FROM signal WHERE layout_id = ?", (layout_id,))
+            conn.execute("DELETE FROM layout_object WHERE layout_id = ?", (layout_id,))
             conn.execute("DELETE FROM layout WHERE id = ?", (layout_id,))
         return {"status": "deleted", "id": layout_id}
 
@@ -1130,6 +1244,92 @@ async def delete_signal(signal_id: str):
                 raise HTTPException(status_code=404, detail="Signal not found")
             conn.execute("DELETE FROM signal WHERE id = ?", (signal_id,))
         return {"status": "deleted", "id": signal_id}
+
+
+@app.post("/api/layout-objects")
+async def create_layout_object(payload: LayoutObjectPayload):
+    """Create a level crossing, bridge or label row."""
+    variant, berth_id, rotation = _object_values(payload)
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                _require_layout_exists(conn, payload.layout_id)
+                conn.execute(
+                    """
+                    INSERT INTO layout_object
+                        (id, layout_id, object_type, name, x, y, width, height, variant, berth_id, rotation)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.object_type,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.width,
+                        payload.height,
+                        variant,
+                        berth_id,
+                        rotation,
+                    ),
+                )
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "id": payload.id, "object": _object_response(payload, variant, berth_id, rotation)}
+
+
+@app.put("/api/layout-objects/{object_id}")
+async def update_layout_object(object_id: str, payload: LayoutObjectPayload):
+    """Update a level crossing, bridge or label row."""
+    variant, berth_id, rotation = _object_values(payload)
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                existing = conn.execute("SELECT id FROM layout_object WHERE id = ?", (object_id,)).fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Layout object not found")
+                _require_layout_exists(conn, payload.layout_id)
+                conn.execute(
+                    """
+                    UPDATE layout_object
+                    SET id = ?, layout_id = ?, object_type = ?, name = ?, x = ?, y = ?,
+                        width = ?, height = ?, variant = ?, berth_id = ?, rotation = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload.id,
+                        payload.layout_id,
+                        payload.object_type,
+                        payload.name,
+                        payload.x,
+                        payload.y,
+                        payload.width,
+                        payload.height,
+                        variant,
+                        berth_id,
+                        rotation,
+                        object_id,
+                    ),
+                )
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "object": _object_response(payload, variant, berth_id, rotation)}
+
+
+@app.delete("/api/layout-objects/{object_id}")
+async def delete_layout_object(object_id: str):
+    """Delete a level crossing, bridge or label row."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            existing = conn.execute("SELECT id FROM layout_object WHERE id = ?", (object_id,)).fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Layout object not found")
+            conn.execute("DELETE FROM layout_object WHERE id = ?", (object_id,))
+        return {"status": "deleted", "id": object_id}
 
 
 WRITE_TOKEN_ENV_VAR = "NROD_RAILHUB_VIS_TOKEN"

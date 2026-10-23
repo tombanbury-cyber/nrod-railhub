@@ -470,6 +470,8 @@ def test_admin_layout_pages(monkeypatch):
         assert "Visual layout editor" in new_page.text
         assert 'id="layout-canvas-svg"' in new_page.text
         assert 'id="add-berth" disabled' in new_page.text
+        assert 'id="add-bridge" disabled' in new_page.text
+        assert '<select id="add-label-type" disabled>' in new_page.text
         assert "Save the layout first to add and arrange elements." in client.get("/static/admin-layout.js").text
 
         layouts = client.get("/api/layouts").json()
@@ -482,6 +484,12 @@ def test_admin_layout_pages(monkeypatch):
         assert "Import berths from headcode chain" in edit.text
         assert 'aria-label="Interactive layout canvas"' in edit.text
         assert 'id="add-signal"' in edit.text
+        for key in ("berth", "signal", "level_crossing", "bridge", "label", "platform"):
+            assert f'id="add-{key}"' in edit.text
+            assert f'<select id="add-{key}-type">' in edit.text
+        assert 'aria-label="Add level crossing"' in edit.text
+        assert '<option value="road_under">road under</option>' in edit.text
+        assert '<option value="station">station</option>' in edit.text
         assert 'id="snap-to-grid"' in edit.text
         assert 'id="snap-grid-size"' in edit.text
         assert '<option value="20" selected>20</option>' in edit.text
@@ -986,3 +994,121 @@ def test_canvas_uis_support_pan_and_zoom():
     assert "setupPanZoom" in client.get("/static/admin-layout.js").text
     for control in ("canvas-zoom-in", "canvas-zoom-out", "canvas-zoom-fit", "canvas-zoom-reset"):
         assert f'id="{control}"' in admin
+
+
+def test_layout_objects_crud_persist_and_validate(monkeypatch):
+    """Level crossings, bridges and labels persist through the layout object API."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        assert client.post(
+            "/api/layouts", json={"id": "objs", "name": "Objs", "description": None, "data": {}}
+        ).status_code == 200
+
+        crossing = {"id": "objs:LC1", "layout_id": "objs", "object_type": "level_crossing",
+                    "name": "LC <b>1</b>", "x": 10, "y": 20, "height": 80, "rotation": 45,
+                    "variant": "barrier"}
+        bridge = {"id": "objs:BR1", "layout_id": "objs", "object_type": "bridge",
+                  "name": "High St", "x": 100, "y": 200, "width": 90, "height": 24, "variant": "footbridge"}
+        label = {"id": "objs:LB1", "layout_id": "objs", "object_type": "label",
+                 "name": "Central", "x": 5, "y": 5, "variant": "station"}
+        platform = {"id": "objs:P1", "layout_id": "objs", "object_type": "platform",
+                    "name": "Platform 1", "x": 20, "y": 400, "width": 150, "height": 24, "variant": "island"}
+        for payload in (crossing, bridge, label, platform):
+            assert client.post("/api/layout-objects", json=payload).status_code == 200
+        assert client.post("/api/layout-objects", json=crossing).status_code == 409
+
+        items = client.get("/api/layouts/objs/objects").json()["items"]
+        assert {i["object_type"] for i in items} == {"level_crossing", "bridge", "label", "platform"}
+        stored = {i["id"]: i for i in items}
+        assert (stored["objs:LC1"]["rotation"], stored["objs:LC1"]["height"]) == (45, 80)
+        assert stored["objs:P1"]["berth_id"] is None  # a platform needs no berth
+        assert stored["objs:BR1"]["rotation"] == 0 and stored["objs:BR1"]["berth_id"] is None
+        assert stored["objs:LC1"]["name"] == "LC <b>1</b>"
+        assert stored["objs:BR1"]["width"] == 90
+        only_labels = client.get("/api/layouts/objs/objects?type=label").json()
+        assert [i["id"] for i in only_labels["items"]] == ["objs:LB1"]
+        assert client.get("/api/layouts/objs/objects?type=bogus").status_code == 422
+
+        bridge.update(x=300, y=310, variant="road_over")
+        assert client.put("/api/layout-objects/objs:BR1", json=bridge).status_code == 200
+        moved = client.get("/api/layouts/objs/objects?type=bridge").json()["items"][0]
+        assert (moved["x"], moved["y"], moved["variant"]) == (300, 310, "road_over")
+
+        platform.update(berth_id=" BRTH_1 ")
+        assert client.put("/api/layout-objects/objs:none", json=platform).status_code == 404
+        assert client.put("/api/layout-objects/objs:P1", json=platform).status_code == 200
+        linked = client.get("/api/layouts/objs/objects?type=platform").json()["items"][0]
+        assert linked["berth_id"] == "BRTH_1"
+        # Rotation only applies to level crossings; berth links only to platforms.
+        assert client.post(
+            "/api/layout-objects", json={**bridge, "id": "objs:BR2", "rotation": 90, "berth_id": "X"}
+        ).status_code == 200
+        br2 = [i for i in client.get("/api/layouts/objs/objects?type=bridge").json()["items"] if i["id"] == "objs:BR2"][0]
+        assert (br2["rotation"], br2["berth_id"]) == (0, None)
+        assert client.delete("/api/layout-objects/objs:BR2").status_code == 200
+        assert client.post("/api/layout-objects", json={**crossing, "id": "objs:LC2", "rotation": 30}).status_code == 422
+
+        # Default variant is applied; berths/signals are unaffected.
+        no_variant = {k: v for k, v in label.items() if k != "variant"} | {"id": "objs:LB2"}
+        assert client.post("/api/layout-objects", json=no_variant).status_code == 200
+        assert client.get("/api/layouts/objs/berths").json()["total"] == 0
+
+        assert client.put("/api/layout-objects/missing", json=label).status_code == 404
+        assert client.delete("/api/layout-objects/objs:LB2").status_code == 200
+        assert client.delete("/api/layout-objects/objs:LB2").status_code == 404
+
+        bad_variant = {**label, "id": "objs:X", "variant": "road_over"}
+        assert client.post("/api/layout-objects", json=bad_variant).status_code == 422
+        assert client.post("/api/layout-objects", json={**label, "id": "objs:Y", "object_type": "tree"}).status_code == 422
+        assert client.post("/api/layout-objects", json={**label, "id": "objs:Z", "name": "  "}).status_code == 422
+        assert client.post("/api/layout-objects", json={**label, "id": "objs:Z", "x": -1}).status_code == 422
+        assert client.post(
+            "/api/layout-objects", json={**label, "id": "objs:Z", "layout_id": "nope"}
+        ).status_code == 404
+
+        # Renaming a layout carries objects along; deleting removes them.
+        renamed = {"id": "objs2", "name": "Objs", "description": None, "data": {}}
+        assert client.put("/api/layouts/objs", json=renamed).status_code == 200
+        assert client.get("/api/layouts/objs2/objects").json()["total"] == 4
+        assert client.delete("/api/layouts/objs2").status_code == 200
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM layout_object").fetchone()[0] == 0
+    finally:
+        Path(db_path).unlink()
+
+
+def test_layout_objects_table_created_for_existing_databases(monkeypatch):
+    """Databases created before layout_object existed get the table on demand."""
+    db_path = _create_visualisation_db()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DROP TABLE layout_object")
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        layout_id = client.get("/api/layouts").json()[0]["id"]
+        assert client.get(f"/api/layouts/{layout_id}/objects").json()["total"] == 0
+        payload = {"id": "late", "layout_id": layout_id, "object_type": "bridge", "name": "B", "x": 1, "y": 1}
+        assert client.post("/api/layout-objects", json=payload).status_code == 200
+    finally:
+        Path(db_path).unlink()
+
+
+def test_layout_editor_js_supports_new_object_kinds(monkeypatch):
+    """Static editor assets handle new object kinds with safe text rendering."""
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    js = client.get("/static/admin-layout.js").text
+    for token in ("level_crossing", "bridge", "label", "/api/layout-objects", "renderLevelCrossing",
+                  "renderBridge", "renderLabel", "renderPlatform", "crossingGeometry", "rotation", "setAddControlsDisabled", "pointerdown"):
+        assert token in js
+    assert "innerHTML" not in js
+    css = client.get("/static/admin.css").text
+    assert ".bridge-shape" in css and ".label-station" in css
+    assert ".crossing-line" in css and ".platform-object-shape" in css

@@ -50,6 +50,27 @@
     .layout-canvas .siding-shape{fill:#fef3c7;stroke:#b45309;stroke-width:2}
     .layout-canvas .signal-shape{fill:#fee2e2;stroke:#b91c1c;stroke-width:3}
     .layout-canvas .signal-stem{stroke:#991b1b;stroke-width:3}
+    .layout-canvas .crossing-hit{stroke:transparent;stroke-width:14}
+    .layout-canvas .crossing-line{stroke:#dc2626;stroke-width:5;stroke-linecap:round}
+    .layout-canvas .crossing-barrier{stroke-width:8}
+    .layout-canvas .crossing-user_worked{stroke-dasharray:6 4}
+    .layout-canvas .layout-element.selected .crossing-line{stroke:#f59e0b}
+    .layout-canvas .layout-element:focus .crossing-line{stroke:#7c3aed}
+    .layout-canvas .platform-object-shape{fill:#dcfce7;stroke:#15803d;stroke-width:2}
+    .layout-canvas .platform-island{fill:#bbf7d0}
+    .layout-canvas .platform-bay{stroke-dasharray:6 3}
+    .layout-canvas .bridge-shape{fill:#e7e5e4;stroke:#78350f;stroke-width:2}
+    .layout-canvas .bridge-road_under{fill:#d6d3d1}
+    .layout-canvas .bridge-footbridge{fill:#fef3c7}
+    .layout-canvas .bridge-end{stroke:#78350f;stroke-width:5;pointer-events:none}
+    .layout-canvas .label-shape{fill:#fff;stroke:#9ca3af;stroke-width:1}
+    .layout-canvas .label-station{fill:#eff6ff;stroke:#1e40af}
+    .layout-canvas .label-note{fill:#fef08a;stroke:#ca8a04;stroke-dasharray:4 2}
+    .layout-canvas .label-text{pointer-events:none;font-size:13px}
+    .layout-canvas .label-text-station{font-weight:700;font-size:15px}
+    .layout-canvas .label-text-line{font-style:italic}
+    .layout-canvas .label-text-note{font-size:12px}
+    .add-control{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
     .layout-canvas .layout-element{cursor:grab}
     .layout-canvas .layout-element:active{cursor:grabbing}
     .layout-canvas .layout-element.selected rect,.layout-canvas .layout-element.selected circle{stroke:#f59e0b;stroke-width:4}
