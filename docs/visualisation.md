@@ -536,6 +536,23 @@ Defines signal positions on layouts.
 | y | INTEGER | Y coordinate in pixels |
 | signal_type | TEXT | Type: auto, controlled, shunt |
 
+### `layout_object` table
+Defines level crossings, bridges, labels and platforms on layouts (created automatically by the admin API if missing).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | TEXT PRIMARY KEY | Unique object identifier |
+| layout_id | TEXT | Foreign key to layout |
+| object_type | TEXT | `level_crossing`, `bridge`, `label` or `platform` |
+| name | TEXT NOT NULL | Display text |
+| x, y | INTEGER | Position in pixels |
+| width, height | INTEGER | Size (editable for bridges and platforms; `height` is the line length of a level crossing) |
+| variant | TEXT | level_crossing: automatic, barrier, user_worked; bridge: road_over, road_under, footbridge; label: station, line, note; platform: side, island, bay |
+| berth_id | TEXT | Optional berth reference (platforms only; a platform does not need a berth) |
+| rotation | INTEGER | Level crossing orientation: 0 (vertical), 45 or 90 (horizontal) degrees |
+
+API: `GET /api/layouts/{id}/objects`, `POST /api/layout-objects`, `PUT`/`DELETE /api/layout-objects/{id}`.
+
 ### `train` table
 Stores train information.
 

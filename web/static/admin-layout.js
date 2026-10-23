@@ -12,6 +12,16 @@ const TABLES = {
     fields: [["id","text"],["name","text"],["x","number"],["y","number"],["signal_type",["auto","controlled","shunt"]]],
   },
 };
+const OBJECT_API = "/api/layout-objects";
+const OBJECT_KINDS = {
+  level_crossing: { title: "Level crossing", variants: ["automatic", "barrier", "user_worked"], width: 40, height: 40 },
+  bridge: { title: "Bridge", variants: ["road_over", "road_under", "footbridge"], width: 80, height: 24 },
+  label: { title: "Label", variants: ["station", "line", "note"], width: 60, height: 20 },
+  platform: { title: "Platform", variants: ["side", "island", "bay"], width: 120, height: 24 },
+};
+const ADD_KINDS = ["berth", "signal", "level_crossing", "bridge", "label", "platform"];
+const CROSSING_ROTATIONS = [0, 45, 90];
+const CROSSING_PAD = 4;
 const tableState = { berth: { page: 1 }, signal: { page: 1 } };
 const editorSvg = document.getElementById("layout-canvas-svg");
 const editorItems = [];
@@ -143,12 +153,46 @@ function setupPanZoom(svg, options) {
   return { zoomBy, fit, reset };
 }
 
+function itemSize(item) {
+  if (item.kind === "berth" || item.kind === "bridge" || item.kind === "platform") {
+    return { width: Number(item.width), height: Number(item.height) };
+  }
+  if (item.kind === "level_crossing") return crossingGeometry(item);
+  if (item.kind === "label") return { width: labelWidth(item), height: 20 };
+  return { width: 12, height: 30 };
+}
+
+function crossingGeometry(item) {
+  const length = Math.max(1, Number(item.height) || 1);
+  const rotation = Number(item.rotation) || 0;
+  if (rotation === 90) {
+    return { width: length, height: CROSSING_PAD * 2, x1: 0, y1: CROSSING_PAD, x2: length, y2: CROSSING_PAD };
+  }
+  if (rotation === 45) {
+    const d = Math.round(length * Math.SQRT1_2);
+    return { width: d, height: d, x1: 0, y1: 0, x2: d, y2: d };
+  }
+  return { width: CROSSING_PAD * 2, height: length, x1: CROSSING_PAD, y1: 0, x2: CROSSING_PAD, y2: length };
+}
+
+function labelWidth(item) {
+  return Math.max(30, String(item.name || item.id || "New label").length * 8 + 16);
+}
+
+function elementApi(item) {
+  return item.kind in OBJECT_KINDS ? OBJECT_API : TABLES[item.kind].api;
+}
+
+function setAddControlsDisabled(disabled) {
+  document.querySelectorAll(".add-control button, .add-control select")
+    .forEach((control) => { control.disabled = disabled; });
+}
+
 function updateCanvasExtent() {
   CANVAS_WIDTH = BASE_CANVAS_WIDTH;
   CANVAS_HEIGHT = BASE_CANVAS_HEIGHT;
   editorItems.forEach((item) => {
-    const width = item.kind === "berth" ? Number(item.width) : 12;
-    const height = item.kind === "berth" ? Number(item.height) : 30;
+    const { width, height } = itemSize(item);
     CANVAS_WIDTH = Math.max(CANVAS_WIDTH, Number(item.x) + width + CANVAS_PADDING);
     CANVAS_HEIGHT = Math.max(CANVAS_HEIGHT, Number(item.y) + height + CANVAS_PADDING);
   });
@@ -179,6 +223,12 @@ function editorPayload(item) {
   if (item.kind === "berth") {
     Object.assign(payload, {
       width: item.width, height: item.height, berth_type: item.berth_type,
+    });
+  } else if (item.kind in OBJECT_KINDS) {
+    Object.assign(payload, {
+      object_type: item.kind, width: item.width, height: item.height, variant: item.variant,
+      berth_id: item.kind === "platform" ? (item.berth_id || null) : null,
+      rotation: item.kind === "level_crossing" ? Number(item.rotation) || 0 : 0,
     });
   } else {
     payload.signal_type = item.signal_type;
@@ -223,10 +273,50 @@ function clampElementPosition(item, x, y) {
   const grid = snapGridSize();
   x = snapValue(x, grid);
   y = snapValue(y, grid);
-  const width = item.kind === "berth" ? Number(item.width) : 12;
-  const height = item.kind === "berth" ? Number(item.height) : 30;
+  const { width, height } = itemSize(item);
   item.x = Math.round(Math.max(0, Math.min(CANVAS_WIDTH - width, x)));
   item.y = Math.round(Math.max(0, Math.min(CANVAS_HEIGHT - height, y)));
+}
+
+function svgNode(name, attrs, text) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderLevelCrossing(group, item) {
+  const g = crossingGeometry(item);
+  const coords = { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 };
+  group.appendChild(svgNode("line", { class: "crossing-hit", ...coords }));
+  group.appendChild(svgNode("line", { class: `crossing-line crossing-${item.variant}`, ...coords }));
+  group.appendChild(svgNode("text", { x: g.x2 + 8, y: Math.max(g.y1, g.y2) - 2, fill: "black" },
+    item.name || item.id || "New level crossing"));
+}
+
+function renderPlatform(group, item) {
+  const width = Number(item.width);
+  const height = Number(item.height);
+  group.appendChild(svgNode("rect", { class: `platform-object-shape platform-${item.variant}`, width, height, rx: 2 }));
+  group.appendChild(svgNode("text", { x: width / 2, y: height / 2 + 4, "text-anchor": "middle", fill: "black" },
+    item.name || item.id || "New platform"));
+}
+
+function renderBridge(group, item) {
+  const width = Number(item.width);
+  const height = Number(item.height);
+  group.appendChild(svgNode("rect", { class: `bridge-shape bridge-${item.variant}`, width, height, rx: 3 }));
+  group.appendChild(svgNode("line", { class: "bridge-end", x1: 0, y1: 0, x2: 0, y2: height }));
+  group.appendChild(svgNode("line", { class: "bridge-end", x1: width, y1: 0, x2: width, y2: height }));
+  group.appendChild(svgNode("text", { x: width / 2, y: height / 2 + 4, "text-anchor": "middle", fill: "black" },
+    item.name || item.id || "New bridge"));
+}
+
+function renderLabel(group, item) {
+  group.appendChild(svgNode("rect", { class: `label-shape label-${item.variant}`, width: labelWidth(item), height: 20, rx: 3 }));
+  group.appendChild(svgNode("text", {
+    class: `label-text label-text-${item.variant}`, x: 8, y: 14, fill: "black",
+  }, item.name || item.id || "New label"));
 }
 
 function renderCanvas() {
@@ -259,6 +349,14 @@ function renderCanvas() {
       label.setAttribute("fill", "black");
       label.textContent = item.name || item.id || "New berth";
       group.appendChild(label);
+    } else if (item.kind === "level_crossing") {
+      renderLevelCrossing(group, item);
+    } else if (item.kind === "platform") {
+      renderPlatform(group, item);
+    } else if (item.kind === "bridge") {
+      renderBridge(group, item);
+    } else if (item.kind === "label") {
+      renderLabel(group, item);
     } else {
       const stem = document.createElementNS("http://www.w3.org/2000/svg", "line");
       stem.setAttribute("class", "signal-stem");
@@ -351,8 +449,9 @@ function addInspectorField(form, name, value, type = "text", options = null) {
   input.required = name === "id" || name === "name";
   input.disabled = canvasSaving;
   if (type === "number") {
-    const maxX = CANVAS_WIDTH - (selectedElement.kind === "berth" ? Number(selectedElement.width) : 12);
-    const maxY = CANVAS_HEIGHT - (selectedElement.kind === "berth" ? Number(selectedElement.height) : 30);
+    const size = itemSize(selectedElement);
+    const maxX = CANVAS_WIDTH - size.width;
+    const maxY = CANVAS_HEIGHT - size.height;
     input.min = "0";
     input.max = String(name === "x" ? maxX : name === "y" ? maxY : name === "width" ? CANVAS_WIDTH : CANVAS_HEIGHT);
     input.step = "1";
@@ -379,6 +478,17 @@ function renderInspector() {
     addInspectorField(form, "width", item.width, "number");
     addInspectorField(form, "height", item.height, "number");
     addInspectorField(form, "berth_type", item.berth_type, "text", ["normal", "platform", "siding"]);
+  } else if (item.kind in OBJECT_KINDS) {
+    if (item.kind === "bridge" || item.kind === "platform") {
+      addInspectorField(form, "width", item.width, "number");
+      addInspectorField(form, "height", item.height, "number");
+    }
+    if (item.kind === "level_crossing") {
+      addInspectorField(form, "height", item.height, "number");
+      addInspectorField(form, "rotation", Number(item.rotation) || 0, "text", CROSSING_ROTATIONS.map(String));
+    }
+    addInspectorField(form, "variant", item.variant, "text", OBJECT_KINDS[item.kind].variants);
+    if (item.kind === "platform") addInspectorField(form, "berth_id", item.berth_id || "");
   } else {
     addInspectorField(form, "signal_type", item.signal_type, "text", ["auto", "controlled", "shunt"]);
   }
@@ -387,13 +497,23 @@ function renderInspector() {
   save.textContent = item._isNew ? "Add element" : "Apply properties";
   save.disabled = canvasSaving;
   form.appendChild(save);
+  if (item.kind in OBJECT_KINDS) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger";
+    remove.id = "element-delete";
+    remove.textContent = "Delete element";
+    remove.disabled = canvasSaving;
+    remove.addEventListener("click", () => deleteEditorElement(item));
+    form.appendChild(remove);
+  }
   form.addEventListener("input", () => {
     if (canvasSaving) return;
     const data = new FormData(form);
     for (const [name, value] of data.entries()) {
-      item[name] = ["x", "y", "width", "height"].includes(name) ? Number(value) : value;
+      item[name] = ["x", "y", "width", "height", "rotation"].includes(name) ? Number(value) : value;
     }
-    if (["x", "y", "width", "height"].some((name) => data.has(name))) {
+    if (["x", "y", "width", "height", "rotation"].some((name) => data.has(name))) {
       clampElementPosition(item, Number(item.x), Number(item.y));
       document.getElementById("element-x").value = item.x;
       document.getElementById("element-y").value = item.y;
@@ -421,12 +541,36 @@ function selectEditorElement(item) {
   renderInspector();
 }
 
+async function deleteEditorElement(item) {
+  if (canvasSaving) return;
+  if (!confirm(`Delete ${item.kind.replace("_", " ")} ${item.name || item.id || "(new)"}?`)) return;
+  try {
+    if (!item._isNew) {
+      await submitJson(`${OBJECT_API}/${encodeURIComponent(item._originalId || item.id)}`, "DELETE");
+    }
+    editorItems.splice(editorItems.indexOf(item), 1);
+    selectedElement = null;
+    renderCanvas();
+    renderInspector();
+    updateEditorStatus("Element deleted.");
+  } catch (error) {
+    updateEditorStatus(`Failed to delete element: ${error.message}`, true);
+  }
+}
+
 function beginAddingElement(kind) {
   if (!layoutId || canvasSaving) return;
+  const typeSelect = document.getElementById(`add-${kind}-type`);
+  const chosen = typeSelect ? typeSelect.value : "";
+  const defaults = OBJECT_KINDS[kind] || { width: 60, height: 30 };
   const item = {
     kind, id: "", layout_id: layoutId, name: "",
-    x: 60, y: 60, width: 60, height: 30,
-    berth_type: "normal", signal_type: "auto", _isNew: true,
+    x: 60, y: 60, width: defaults.width, height: defaults.height,
+    berth_type: kind === "berth" && chosen ? chosen : "normal",
+    signal_type: kind === "signal" && chosen ? chosen : "auto",
+    variant: kind in OBJECT_KINDS ? (chosen || OBJECT_KINDS[kind].variants[0]) : undefined,
+    berth_id: null, rotation: 0,
+    _isNew: true,
   };
   editorItems.push(item);
   renderCanvas();
@@ -460,10 +604,30 @@ async function loadEditorItems(kind) {
   return items;
 }
 
+async function loadEditorObjects() {
+  const items = [];
+  let page = 1;
+  let pages = 1;
+  do {
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/objects?page=${page}&page_size=200`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    items.push(...data.items.filter((row) => row.object_type in OBJECT_KINDS).map((row) => {
+      const item = { ...row, kind: row.object_type, _originalId: row.id, _isNew: false };
+      item._savedPayload = editorPayload(item);
+      return item;
+    }));
+    pages = data.pages;
+    page += 1;
+  } while (page <= pages);
+  return items;
+}
+
 async function loadEditor() {
   try {
     editorItems.splice(0, editorItems.length,
-      ...(await loadEditorItems("berth")), ...(await loadEditorItems("signal")));
+      ...(await loadEditorItems("berth")), ...(await loadEditorItems("signal")),
+      ...(await loadEditorObjects()));
     selectedElement = null;
     renderCanvas();
     if (CANVAS_WIDTH > BASE_CANVAS_WIDTH || CANVAS_HEIGHT > BASE_CANVAS_HEIGHT) canvasView.fit();
@@ -480,8 +644,7 @@ async function saveCanvas() {
   if (canvasSaving || !editorHasChanges()) return !canvasSaving;
   canvasSaving = true;
   document.getElementById("save-canvas").disabled = true;
-  document.getElementById("add-berth").disabled = true;
-  document.getElementById("add-signal").disabled = true;
+  setAddControlsDisabled(true);
   document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
     .forEach((control) => { control.disabled = true; });
   try {
@@ -492,7 +655,7 @@ async function saveCanvas() {
       const payload = editorPayload(item);
       try {
         await submitJson(
-          item._isNew ? TABLES[item.kind].api : `${TABLES[item.kind].api}/${encodeURIComponent(originalId)}`,
+          item._isNew ? elementApi(item) : `${elementApi(item)}/${encodeURIComponent(originalId)}`,
           item._isNew ? "POST" : "PUT",
           payload,
         );
@@ -505,7 +668,7 @@ async function saveCanvas() {
       }
     }
     renderCanvas();
-    for (const kind of changedKinds) await loadTable(kind);
+    for (const kind of changedKinds) if (TABLES[kind]) await loadTable(kind);
     renderInspector();
     if (failures.length) {
       updateEditorStatus(`Some changes were not saved: ${failures.join("; ")}`, true);
@@ -515,8 +678,7 @@ async function saveCanvas() {
     return true;
   } finally {
     canvasSaving = false;
-    document.getElementById("add-berth").disabled = isNew;
-    document.getElementById("add-signal").disabled = isNew;
+    setAddControlsDisabled(isNew);
     document.querySelectorAll("#element-inspector input, #element-inspector select, #element-inspector button")
       .forEach((control) => { control.disabled = false; });
   }
@@ -742,12 +904,12 @@ function setupTable(kind) {
 }
 
 document.getElementById("layout-form").addEventListener("submit", saveLayout);
-document.getElementById("add-berth").addEventListener("click", () => beginAddingElement("berth"));
-document.getElementById("add-signal").addEventListener("click", () => beginAddingElement("signal"));
+ADD_KINDS.forEach((kind) => {
+  document.getElementById(`add-${kind}`).addEventListener("click", () => beginAddingElement(kind));
+});
 document.getElementById("save-canvas").addEventListener("click", saveCanvas);
 if (isNew) {
-  document.getElementById("add-berth").disabled = true;
-  document.getElementById("add-signal").disabled = true;
+  setAddControlsDisabled(true);
   updateEditorStatus("Save the layout first to add and arrange elements.");
 }
 if (!isNew) {

@@ -36,6 +36,22 @@ CREATE TABLE IF NOT EXISTS signal (
     FOREIGN KEY (layout_id) REFERENCES layout(id)
 );
 
+-- Layout object table: level crossings, bridges, labels and platforms placed on a layout
+CREATE TABLE IF NOT EXISTS layout_object (
+    id TEXT PRIMARY KEY,
+    layout_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,  -- level_crossing, bridge, label, platform
+    name TEXT NOT NULL,
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    width INTEGER DEFAULT 60,
+    height INTEGER DEFAULT 30,
+    variant TEXT,  -- level_crossing: automatic/barrier/user_worked; bridge: road_over/road_under/footbridge; label: station/line/note; platform: side/island/bay
+    berth_id TEXT,  -- optional berth reference (platforms only)
+    rotation INTEGER DEFAULT 0,  -- level crossings: 0, 45 or 90 degrees
+    FOREIGN KEY (layout_id) REFERENCES layout(id)
+);
+
 -- Train table: stores train information
 CREATE TABLE IF NOT EXISTS train (
     id TEXT PRIMARY KEY,
