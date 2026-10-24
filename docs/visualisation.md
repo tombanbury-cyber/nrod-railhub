@@ -547,8 +547,8 @@ Defines level crossings, bridges, labels and platforms on layouts (created autom
 | name | TEXT NOT NULL | Display text |
 | x, y | INTEGER | Position in pixels |
 | width, height | INTEGER | Size (editable for bridges and platforms; `height` is the line length of a level crossing) |
-| variant | TEXT | level_crossing: automatic, barrier, user_worked; bridge: road_over, road_under, footbridge; label: station, line, note; platform: side, island, bay |
-| berth_id | TEXT | Optional berth reference (platforms only; a platform does not need a berth) |
+| variant | TEXT | level_crossing: automatic, barrier, user_worked, foot-crossing; bridge: road_over, road_under, footbridge; label: station, line, note, text (text only, no fill or border); platform: side, island, bay |
+| berth_id | TEXT | Optional berth reference (level crossings, platforms and labels; ignored for bridges). `GET /objects/{layout_id}` reports `occupied`/`headcode` for linked objects from the current TD state |
 | rotation | INTEGER | Level crossing orientation: 0 (vertical), 45 or 90 (horizontal) degrees |
 
 API: `GET /api/layouts/{id}/objects`, `POST /api/layout-objects`, `PUT`/`DELETE /api/layout-objects/{id}`.

@@ -101,11 +101,13 @@ class SignalPayload(BaseModel):
 
 
 LAYOUT_OBJECT_VARIANTS: dict[str, tuple[str, ...]] = {
-    "level_crossing": ("automatic", "barrier", "user_worked"),
+    "level_crossing": ("automatic", "barrier", "user_worked", "foot-crossing"),
     "bridge": ("road_over", "road_under", "footbridge"),
-    "label": ("station", "line", "note"),
+    "label": ("station", "line", "note", "text"),
     "platform": ("side", "island", "bay"),
 }
+
+BERTH_LINKED_OBJECT_TYPES = ("level_crossing", "platform", "label")
 
 LAYOUT_OBJECT_DDL = """
 CREATE TABLE IF NOT EXISTS layout_object (
@@ -129,7 +131,7 @@ class LayoutObjectPayload(BaseModel):
     """Model for level crossing, bridge, label and platform CRUD operations.
 
     ``rotation`` (0/45/90 degrees) applies to level crossings; ``berth_id`` is an optional
-    berth reference used by platforms.
+    berth reference used by level crossings, platforms and labels (bridges ignore it).
     """
     id: constr(strip_whitespace=True, min_length=1)
     layout_id: constr(strip_whitespace=True, min_length=1)
@@ -242,7 +244,7 @@ def _object_values(payload: LayoutObjectPayload) -> tuple[str, Optional[str], in
     """Return (variant, berth_id, rotation) normalised for the payload's object type."""
     variant = _resolved_object_variant(payload)
     berth_id = (payload.berth_id or "").strip() or None
-    if payload.object_type != "platform":
+    if payload.object_type not in BERTH_LINKED_OBJECT_TYPES:
         berth_id = None
     rotation = payload.rotation if payload.object_type == "level_crossing" else 0
     return variant, berth_id, rotation
@@ -425,19 +427,41 @@ def _render_add_control(key: str, label: str, variants: tuple[str, ...], disable
     ).format(lc=esc(label.lower()), key=key, label=esc(label), dis=disabled_attr, options=options)
 
 
+_OBJECT_HEADERS = ["ID", "Name", "X", "Y", "Width", "Height", "Variant"]
+_BULK_OBJECT_SECTIONS = (
+    ("level_crossing", "Level crossings", _OBJECT_HEADERS + ["Berth", "Rotation"]),
+    ("platform", "Platforms", _OBJECT_HEADERS + ["Berth"]),
+    ("bridge", "Bridges", _OBJECT_HEADERS),
+    ("label", "Labels", _OBJECT_HEADERS + ["Berth"]),
+)
+
+
 def _render_layout_page(layout_id: Optional[str]) -> str:
     """Render the layout create/edit page. ``layout_id`` is None when creating."""
     is_new = layout_id is None
     esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
 
     def table_section(
-        kind: str, title: str, headers: list[str], types: list[str], extra_toolbar: str = ""
+        kind: str, title: str, headers: list[str], types: list[str], extra_toolbar: str = "",
+        collapsible: bool = False,
     ) -> str:
         head = "".join(f"<th scope='col'>{esc(h)}</th>" for h in headers + ["Actions"])
         type_opts = "".join(f"<option value='{t}'>{t}</option>" for t in types)
+        type_filter = (
+            f'<label>Type <select id="{kind}-type"><option value="">All types</option>{type_opts}</select></label>'
+            if types else f'<select id="{kind}-type" hidden></select>'
+        )
+        if collapsible:
+            # Bulk-edit sections are collapsed by default (no ``open`` attribute).
+            open_wrap, close_wrap = (
+                f'<details class="bulk-section" id="{kind}-bulk"><summary><h2 id="{kind}-heading">{title}</h2></summary>',
+                "</details>",
+            )
+        else:
+            open_wrap, close_wrap = f'<h2 id="{kind}-heading">{title}</h2>', ""
         return f"""
   <section aria-labelledby="{kind}-heading">
-    <h2 id="{kind}-heading">{title}</h2>
+    {open_wrap}
     <details>
       <summary>Add {kind}</summary>
       <form id="{kind}-create" class="toolbar">
@@ -447,7 +471,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     </details>
      <div class="toolbar">
        <label>Search <input id="{kind}-q" type="search" placeholder="ID or name" /></label>
-       <label>Type <select id="{kind}-type"><option value="">All types</option>{type_opts}</select></label>
+       {type_filter}
        <label>Per page <select id="{kind}-page-size"><option>10</option><option selected>25</option><option>50</option><option>100</option><option>200</option></select></label>
        {extra_toolbar}
      </div>
@@ -462,6 +486,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       <span id="{kind}-page-info" aria-live="polite"></span>
       <button type="button" class="secondary" id="{kind}-next">Next</button>
     </div>
+    {close_wrap}
   </section>"""
 
     related = ""
@@ -471,7 +496,17 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
             "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"],
             ["normal", "platform", "siding"],
             '<button type="button" id="save-all-berths" disabled>Save edited berths</button>',
-         ) + table_section("signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"])
+         ) + table_section(
+            "signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"],
+            '<button type="button" id="save-all-signals" disabled>Save edited signals</button>',
+         ) + "".join(
+            table_section(
+                kind, title, headers, [],
+                f'<button type="button" id="save-all-{kind}s" disabled>Save edited {title.lower()}</button>',
+                collapsible=True,
+            )
+            for kind, title, headers in _BULK_OBJECT_SECTIONS
+         )
          actions = (
             '<button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>'
             '<button type="button" class="danger" id="delete-layout">Delete layout</button>'
@@ -534,7 +569,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
         <button type="button" class="secondary" id="canvas-zoom-fit">Fit all</button>
         <button type="button" class="secondary" id="canvas-zoom-reset">Reset view</button>
       </span>
-      <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed)</span>
+      <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed), text (plain)</span>
     </div>
     <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
     <div class="layout-canvas">
@@ -1516,6 +1551,47 @@ async def get_berths(layout_id: str):
             }
             for row in rows
         ]
+
+
+def _object_berth_matches(object_berth: str, layout_id: str, train_berth: str) -> bool:
+    """True when a layout object's berth reference names the given TD berth."""
+    return object_berth in (train_berth, f"{layout_id}:{train_berth}")
+
+
+@app.get("/objects/{layout_id}")
+async def get_layout_objects_state(
+    layout_id: str, td_area: str | None = None, headcode: str | None = None
+):
+    """All crossings, bridges, labels and platforms of a layout with berth-driven state.
+
+    Objects linked to a berth report ``occupied`` (a train is currently in that berth) and the
+    occupying ``headcode``; objects without a berth always report ``occupied: false``.
+    """
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+        rows = conn.execute(
+            "SELECT * FROM layout_object WHERE layout_id = ? ORDER BY name", (layout_id,)
+        ).fetchall()
+        try:
+            trains = _fetch_td_snapshot(conn, td_area=td_area, headcode=headcode)["trains"]
+        except DB_ERRORS as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+    items = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        item["rotation"] = item.get("rotation") or 0
+        occupant = None
+        if item.get("berth_id"):
+            for train in trains:
+                berth = train.get("current_berth")
+                if berth and _object_berth_matches(item["berth_id"], layout_id, berth):
+                    occupant = train
+                    break
+        item["occupied"] = occupant is not None
+        item["headcode"] = occupant.get("headcode") if occupant else None
+        items.append(item)
+    return items
 
 
 @app.get("/signals/{layout_id}")

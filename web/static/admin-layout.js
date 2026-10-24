@@ -12,17 +12,31 @@ const TABLES = {
     fields: [["id","text"],["name","text"],["x","number"],["y","number"],["signal_type",["auto","controlled","shunt"]]],
   },
 };
+const BERTH_LINKED_KINDS = ["level_crossing", "platform", "label"];
 const OBJECT_API = "/api/layout-objects";
 const OBJECT_KINDS = {
-  level_crossing: { title: "Level crossing", variants: ["automatic", "barrier", "user_worked"], width: 40, height: 40 },
+  level_crossing: { title: "Level crossing", variants: ["automatic", "barrier", "user_worked", "foot-crossing"], width: 40, height: 40 },
   bridge: { title: "Bridge", variants: ["road_over", "road_under", "footbridge"], width: 80, height: 24 },
-  label: { title: "Label", variants: ["station", "line", "note"], width: 60, height: 20 },
+  label: { title: "Label", variants: ["station", "line", "note", "text"], width: 60, height: 20 },
   platform: { title: "Platform", variants: ["side", "island", "bay"], width: 120, height: 24 },
 };
 const ADD_KINDS = ["berth", "signal", "level_crossing", "bridge", "label", "platform"];
 const CROSSING_ROTATIONS = [0, 45, 90];
 const CROSSING_PAD = 4;
-const tableState = { berth: { page: 1 }, signal: { page: 1 } };
+const OBJECT_TABLE_FIELDS = [["id","text"],["name","text"],["x","number"],["y","number"],["width","number"],["height","number"]];
+function objectTable(kind, extraFields) {
+  return {
+    api: OBJECT_API, status: `${kind}-status`, body: `${kind}-rows`, objectType: kind,
+    fields: [...OBJECT_TABLE_FIELDS, ["variant", OBJECT_KINDS[kind].variants], ...extraFields],
+  };
+}
+Object.assign(TABLES, {
+  level_crossing: objectTable("level_crossing", [["berth_id","text"],["rotation",["0","45","90"]]]),
+  platform: objectTable("platform", [["berth_id","text"]]),
+  bridge: objectTable("bridge", []),
+  label: objectTable("label", [["berth_id","text"]]),
+});
+const tableState = Object.fromEntries(Object.keys(TABLES).map((kind) => [kind, { page: 1 }]));
 const editorSvg = document.getElementById("layout-canvas-svg");
 const editorItems = [];
 let selectedElement = null;
@@ -227,7 +241,7 @@ function editorPayload(item) {
   } else if (item.kind in OBJECT_KINDS) {
     Object.assign(payload, {
       object_type: item.kind, width: item.width, height: item.height, variant: item.variant,
-      berth_id: item.kind === "platform" ? (item.berth_id || null) : null,
+      berth_id: BERTH_LINKED_KINDS.includes(item.kind) ? (item.berth_id || null) : null,
       rotation: item.kind === "level_crossing" ? Number(item.rotation) || 0 : 0,
     });
   } else {
@@ -313,7 +327,9 @@ function renderBridge(group, item) {
 }
 
 function renderLabel(group, item) {
-  group.appendChild(svgNode("rect", { class: `label-shape label-${item.variant}`, width: labelWidth(item), height: 20, rx: 3 }));
+  if (item.variant !== "text") {
+    group.appendChild(svgNode("rect", { class: `label-shape label-${item.variant}`, width: labelWidth(item), height: 20, rx: 3 }));
+  }
   group.appendChild(svgNode("text", {
     class: `label-text label-text-${item.variant}`, x: 8, y: 14, fill: "black",
   }, item.name || item.id || "New label"));
@@ -488,7 +504,7 @@ function renderInspector() {
       addInspectorField(form, "rotation", Number(item.rotation) || 0, "text", CROSSING_ROTATIONS.map(String));
     }
     addInspectorField(form, "variant", item.variant, "text", OBJECT_KINDS[item.kind].variants);
-    if (item.kind === "platform") addInspectorField(form, "berth_id", item.berth_id || "");
+    if (BERTH_LINKED_KINDS.includes(item.kind)) addInspectorField(form, "berth_id", item.berth_id || "");
   } else {
     addInspectorField(form, "signal_type", item.signal_type, "text", ["auto", "controlled", "shunt"]);
   }
@@ -753,10 +769,15 @@ function fieldInput(name, kind, value, label) {
 }
 
 function collect(kind, container) {
+  const cfg = TABLES[kind];
   const payload = { layout_id: layoutId };
-  TABLES[kind].fields.forEach(([name, type]) => {
+  if (cfg.objectType) payload.object_type = cfg.objectType;
+  cfg.fields.forEach(([name, type]) => {
     const input = container.querySelector(`[name="${name}"]`);
-    payload[name] = type === "number" ? Number(input.value) : input.value.trim();
+    const value = input.value.trim();
+    if (type === "number" || name === "rotation") payload[name] = Number(value);
+    else if (name === "berth_id") payload[name] = value || null;
+    else payload[name] = value;
   });
   return payload;
 }
@@ -779,17 +800,18 @@ function rowIsDirty(kind, row) {
   return JSON.stringify(collect(kind, row)) !== row.dataset.savedValues;
 }
 
-function updateSaveAllBerthsButton() {
-  const button = document.getElementById("save-all-berths");
+function updateSaveAllButton(kind) {
+  const button = document.getElementById(`save-all-${kind}s`);
   if (!button) return;
-  button.disabled = !Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
-    .some((row) => rowIsDirty("berth", row));
+  button.disabled = !Array.from(document.querySelectorAll(`#${TABLES[kind].body} tr[data-original-id]`))
+    .some((row) => rowIsDirty(kind, row));
 }
 
-async function saveAllEditedBerths() {
-  const button = document.getElementById("save-all-berths");
-  const rows = Array.from(document.querySelectorAll("#berth-rows tr[data-original-id]"))
-    .filter((row) => rowIsDirty("berth", row));
+async function saveAllEdited(kind) {
+  const cfg = TABLES[kind];
+  const button = document.getElementById(`save-all-${kind}s`);
+  const rows = Array.from(document.querySelectorAll(`#${cfg.body} tr[data-original-id]`))
+    .filter((row) => rowIsDirty(kind, row));
   if (!rows.length) return;
   if (!(await prepareTableChange())) return;
 
@@ -798,9 +820,9 @@ async function saveAllEditedBerths() {
   const failures = [];
   for (const row of rows) {
     const oldId = row.dataset.originalId;
-    const payload = collect("berth", row);
+    const payload = collect(kind, row);
     try {
-      await submitJson(`/api/berths/${encodeURIComponent(oldId)}`, "PUT", payload);
+      await submitJson(`${cfg.api}/${encodeURIComponent(oldId)}`, "PUT", payload);
       row.dataset.originalId = payload.id;
       row.dataset.savedValues = JSON.stringify(payload);
       saved += 1;
@@ -810,17 +832,15 @@ async function saveAllEditedBerths() {
   }
 
   if (failures.length) {
-    setStatus("berth-status", `Saved ${saved}; failed: ${failures.join("; ")}`, true);
-    updateSaveAllBerthsButton();
+    setStatus(cfg.status, `Saved ${saved}; failed: ${failures.join("; ")}`, true);
+    updateSaveAllButton(kind);
   } else {
-    setStatus("berth-status", `Saved ${saved} edited berth(s).`);
-    await loadTable("berth");
+    setStatus(cfg.status, `Saved ${saved} edited ${kind.replace("_", " ")}(s).`);
+    await loadTable(kind);
     if (editorHasChanges()) updateEditorStatus("Table changes saved; canvas edits are still unsaved.", true);
     else await loadEditor();
   }
 }
-
-
 
 function renderRow(kind, item) {
   const cfg = TABLES[kind];
@@ -830,8 +850,8 @@ function renderRow(kind, item) {
     tr.appendChild(el("td", {}, [fieldInput(name, type, item[name], `${kind} ${item.id} ${name}`)]));
   });
   tr.dataset.savedValues = JSON.stringify(collect(kind, tr));
-  tr.addEventListener("input", updateSaveAllBerthsButton);
-  tr.addEventListener("change", updateSaveAllBerthsButton);
+  tr.addEventListener("input", () => updateSaveAllButton(kind));
+  tr.addEventListener("change", () => updateSaveAllButton(kind));
   const save = el("button", { type: "button", text: "Save" });
   save.addEventListener("click", () => reloadAfter(kind,
     () => submitJson(`${cfg.api}/${encodeURIComponent(item.id)}`, "PUT", collect(kind, tr)), `Saved ${kind} ${item.id}.`));
@@ -848,24 +868,25 @@ async function loadTable(kind) {
   const cfg = TABLES[kind];
   const tbody = document.getElementById(cfg.body);
   const q = document.getElementById(`${kind}-q`).value.trim();
-  const type = document.getElementById(`${kind}-type`).value;
+  const type = cfg.objectType || document.getElementById(`${kind}-type`).value;
   const size = document.getElementById(`${kind}-page-size`).value;
+  const filterType = cfg.objectType ? "" : type;
   const params = new URLSearchParams({ page: tableState[kind].page, page_size: size });
   if (q) params.set("q", q);
   if (type) params.set("type", type);
   tbody.setAttribute("aria-busy", "true");
   tbody.replaceChildren(messageRow(cfg.fields.length + 1, "Loading…"));
   try {
-    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/${kind}s?${params}`);
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/${cfg.objectType ? "object" : kind}s?${params}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     tableState[kind].page = data.page;
     tbody.replaceChildren();
     if (!data.items.length) {
-      tbody.appendChild(messageRow(cfg.fields.length + 1, q || type ? `No ${kind}s match the filters.` : `No ${kind}s in this layout yet.`));
+      tbody.appendChild(messageRow(cfg.fields.length + 1, q || filterType ? `No ${kind}s match the filters.` : `No ${kind}s in this layout yet.`));
     }
     data.items.forEach((item) => tbody.appendChild(renderRow(kind, item)));
-    if (kind === "berth") updateSaveAllBerthsButton();
+    updateSaveAllButton(kind);
     document.getElementById(`${kind}-page-info`).textContent =
       `Page ${data.page} of ${data.pages} · ${data.total} ${kind}(s)`;
     document.getElementById(`${kind}-prev`).disabled = data.page <= 1;
@@ -916,9 +937,10 @@ if (!isNew) {
   loadLayout();
   loadEditor();
   document.getElementById("delete-layout").addEventListener("click", deleteLayout);
-  setupTable("berth");
-  document.getElementById("save-all-berths").addEventListener("click", saveAllEditedBerths);
-  setupTable("signal");
+  Object.keys(TABLES).forEach((kind) => {
+    setupTable(kind);
+    document.getElementById(`save-all-${kind}s`).addEventListener("click", () => saveAllEdited(kind));
+  });
   document.getElementById("open-import").addEventListener("click", () => openImportDialog(layoutId));
   document.addEventListener("berths-imported", () => loadTable("berth"));
 }
