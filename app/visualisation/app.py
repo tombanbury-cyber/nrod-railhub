@@ -88,6 +88,7 @@ class BerthPayload(BaseModel):
     width: int = Field(default=60, gt=0)
     height: int = Field(default=30, gt=0)
     berth_type: Literal["normal", "platform", "siding"] = "normal"
+    z_index: Optional[int] = Field(default=None, ge=-1_000_000, le=1_000_000)
 
 
 class SignalPayload(BaseModel):
@@ -98,6 +99,8 @@ class SignalPayload(BaseModel):
     x: int = Field(ge=0)
     y: int = Field(ge=0)
     signal_type: Literal["auto", "controlled", "shunt"] = "auto"
+    rotation: Optional[Literal[0, 45, 90, 135, 180, 225, 270, 315]] = None
+    z_index: Optional[int] = Field(default=None, ge=-1_000_000, le=1_000_000)
 
 
 LAYOUT_OBJECT_VARIANTS: dict[str, tuple[str, ...]] = {
@@ -122,16 +125,27 @@ CREATE TABLE IF NOT EXISTS layout_object (
     variant TEXT,
     berth_id TEXT,
     rotation INTEGER DEFAULT 0,
+    z_index INTEGER DEFAULT 0,
     FOREIGN KEY (layout_id) REFERENCES layout(id)
 )
 """
+
+# Columns added after the original schema; existing databases are upgraded on demand.
+LAYOUT_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("berth", "z_index", "INTEGER DEFAULT 0"),
+    ("signal", "z_index", "INTEGER DEFAULT 0"),
+    ("signal", "rotation", "INTEGER DEFAULT 0"),
+    ("layout_object", "z_index", "INTEGER DEFAULT 0"),
+    ("layout_object", "rotation", "INTEGER DEFAULT 0"),
+)
 
 
 class LayoutObjectPayload(BaseModel):
     """Model for level crossing, bridge, label and platform CRUD operations.
 
-    ``rotation`` (0/45/90 degrees) applies to level crossings; ``berth_id`` is an optional
-    berth reference used by level crossings, platforms and labels (bridges ignore it).
+    ``rotation`` (0/45/90 degrees) applies to level crossings and bridges; ``berth_id`` is an
+    optional berth reference used by level crossings, platforms and labels (bridges ignore it).
+    ``z_index`` orders overlapping items (higher draws on top); omitted keeps the stored value.
     """
     id: constr(strip_whitespace=True, min_length=1)
     layout_id: constr(strip_whitespace=True, min_length=1)
@@ -144,6 +158,7 @@ class LayoutObjectPayload(BaseModel):
     variant: Optional[str] = None
     berth_id: Optional[str] = None
     rotation: Literal[0, 45, 90] = 0
+    z_index: Optional[int] = Field(default=None, ge=-1_000_000, le=1_000_000)
 
 
 class BerthImportPayload(BaseModel):
@@ -238,6 +253,18 @@ def _require_visualisation_schema(conn: Any) -> None:
     if not _table_exists(conn, "layout_object"):
         conn.execute(LAYOUT_OBJECT_DDL)
         conn.commit()
+    for table, column, ddl in LAYOUT_COLUMN_MIGRATIONS:
+        if column not in conn.table_columns(table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            conn.commit()
+
+
+def _stored_int(row: Any, key: str) -> int:
+    """Return an integer column from a row, treating a missing column or NULL as 0."""
+    try:
+        return int(row[key] or 0)
+    except (KeyError, IndexError):
+        return 0
 
 
 def _object_values(payload: LayoutObjectPayload) -> tuple[str, Optional[str], int]:
@@ -246,12 +273,16 @@ def _object_values(payload: LayoutObjectPayload) -> tuple[str, Optional[str], in
     berth_id = (payload.berth_id or "").strip() or None
     if payload.object_type not in BERTH_LINKED_OBJECT_TYPES:
         berth_id = None
-    rotation = payload.rotation if payload.object_type == "level_crossing" else 0
+    rotation = payload.rotation if payload.object_type in ("level_crossing", "bridge") else 0
     return variant, berth_id, rotation
 
 
-def _object_response(payload: LayoutObjectPayload, variant: str, berth_id: Optional[str], rotation: int) -> dict:
-    return {**_model_dump(payload), "variant": variant, "berth_id": berth_id, "rotation": rotation}
+def _object_response(
+    payload: LayoutObjectPayload, variant: str, berth_id: Optional[str], rotation: int, z_index: int = 0
+) -> dict:
+    return {
+        **_model_dump(payload), "variant": variant, "berth_id": berth_id, "rotation": rotation, "z_index": z_index,
+    }
 
 
 def _resolved_object_variant(payload: LayoutObjectPayload) -> str:
@@ -431,7 +462,7 @@ _OBJECT_HEADERS = ["ID", "Name", "X", "Y", "Width", "Height", "Variant"]
 _BULK_OBJECT_SECTIONS = (
     ("level_crossing", "Level crossings", _OBJECT_HEADERS + ["Berth", "Rotation"]),
     ("platform", "Platforms", _OBJECT_HEADERS + ["Berth"]),
-    ("bridge", "Bridges", _OBJECT_HEADERS),
+    ("bridge", "Bridges", _OBJECT_HEADERS + ["Rotation"]),
     ("label", "Labels", _OBJECT_HEADERS + ["Berth"]),
 )
 
@@ -547,7 +578,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
   </section>
   <section aria-labelledby="canvas-heading">
     <h2 id="canvas-heading">Visual layout editor</h2>
-    <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Enable "Snap to grid" to align dragged and keyboard-moved elements to the selected grid size (arrow keys then move by one grid step). The canvas grows to include imported berths: scroll to pan, Ctrl/⌘ + scroll or pinch to zoom, drag the background to pan, or use the zoom buttons.</p>
+    <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Enable "Snap to grid" to align dragged and keyboard-moved elements to the selected grid size (arrow keys then move by one grid step). The canvas grows to include imported berths: scroll the mouse wheel over the canvas or pinch to zoom, Shift + scroll or drag the background to pan, or use the zoom buttons.</p>
     <div class="toolbar" aria-label="Canvas controls">
       {add_controls}
       <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
@@ -1061,8 +1092,8 @@ async def create_berth(payload: BerthPayload):
                 _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
-                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type, z_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload.id,
@@ -1073,11 +1104,15 @@ async def create_berth(payload: BerthPayload):
                         payload.width,
                         payload.height,
                         payload.berth_type,
+                        payload.z_index or 0,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "created", "id": payload.id, "berth": _model_dump(payload)}
+        return {
+            "status": "created", "id": payload.id,
+            "berth": {**_model_dump(payload), "z_index": payload.z_index or 0},
+        }
 
 
 @app.post("/api/berths/import-chain")
@@ -1169,14 +1204,16 @@ async def update_berth(berth_id: str, payload: BerthPayload):
         _require_visualisation_schema(conn)
         try:
             with conn:
-                existing = conn.execute("SELECT id FROM berth WHERE id = ?", (berth_id,)).fetchone()
+                existing = conn.execute("SELECT * FROM berth WHERE id = ?", (berth_id,)).fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Berth not found")
+                z_index = payload.z_index if payload.z_index is not None else _stored_int(existing, "z_index")
                 _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     UPDATE berth
-                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, width = ?, height = ?, berth_type = ?
+                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, width = ?, height = ?, berth_type = ?,
+                        z_index = ?
                     WHERE id = ?
                     """,
                     (
@@ -1188,12 +1225,13 @@ async def update_berth(berth_id: str, payload: BerthPayload):
                         payload.width,
                         payload.height,
                         payload.berth_type,
+                        z_index,
                         berth_id,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "updated", "id": payload.id, "berth": _model_dump(payload)}
+        return {"status": "updated", "id": payload.id, "berth": {**_model_dump(payload), "z_index": z_index}}
 
 
 @app.delete("/api/berths/{berth_id}")
@@ -1219,8 +1257,8 @@ async def create_signal(payload: SignalPayload):
                 _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
-                    INSERT INTO signal (id, layout_id, name, x, y, signal_type)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO signal (id, layout_id, name, x, y, signal_type, rotation, z_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload.id,
@@ -1229,11 +1267,16 @@ async def create_signal(payload: SignalPayload):
                         payload.x,
                         payload.y,
                         payload.signal_type,
+                        payload.rotation or 0,
+                        payload.z_index or 0,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "created", "id": payload.id, "signal": _model_dump(payload)}
+        return {
+            "status": "created", "id": payload.id,
+            "signal": {**_model_dump(payload), "rotation": payload.rotation or 0, "z_index": payload.z_index or 0},
+        }
 
 
 @app.put("/api/signals/{signal_id}")
@@ -1243,14 +1286,16 @@ async def update_signal(signal_id: str, payload: SignalPayload):
         _require_visualisation_schema(conn)
         try:
             with conn:
-                existing = conn.execute("SELECT id FROM signal WHERE id = ?", (signal_id,)).fetchone()
+                existing = conn.execute("SELECT * FROM signal WHERE id = ?", (signal_id,)).fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Signal not found")
+                rotation = payload.rotation if payload.rotation is not None else _stored_int(existing, "rotation")
+                z_index = payload.z_index if payload.z_index is not None else _stored_int(existing, "z_index")
                 _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     UPDATE signal
-                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, signal_type = ?
+                    SET id = ?, layout_id = ?, name = ?, x = ?, y = ?, signal_type = ?, rotation = ?, z_index = ?
                     WHERE id = ?
                     """,
                     (
@@ -1260,12 +1305,17 @@ async def update_signal(signal_id: str, payload: SignalPayload):
                         payload.x,
                         payload.y,
                         payload.signal_type,
+                        rotation,
+                        z_index,
                         signal_id,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "updated", "id": payload.id, "signal": _model_dump(payload)}
+        return {
+            "status": "updated", "id": payload.id,
+            "signal": {**_model_dump(payload), "rotation": rotation, "z_index": z_index},
+        }
 
 
 @app.delete("/api/signals/{signal_id}")
@@ -1293,8 +1343,8 @@ async def create_layout_object(payload: LayoutObjectPayload):
                 conn.execute(
                     """
                     INSERT INTO layout_object
-                        (id, layout_id, object_type, name, x, y, width, height, variant, berth_id, rotation)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, layout_id, object_type, name, x, y, width, height, variant, berth_id, rotation, z_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload.id,
@@ -1308,11 +1358,15 @@ async def create_layout_object(payload: LayoutObjectPayload):
                         variant,
                         berth_id,
                         rotation,
+                        payload.z_index or 0,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "created", "id": payload.id, "object": _object_response(payload, variant, berth_id, rotation)}
+        return {
+            "status": "created", "id": payload.id,
+            "object": _object_response(payload, variant, berth_id, rotation, payload.z_index or 0),
+        }
 
 
 @app.put("/api/layout-objects/{object_id}")
@@ -1323,15 +1377,16 @@ async def update_layout_object(object_id: str, payload: LayoutObjectPayload):
         _require_visualisation_schema(conn)
         try:
             with conn:
-                existing = conn.execute("SELECT id FROM layout_object WHERE id = ?", (object_id,)).fetchone()
+                existing = conn.execute("SELECT * FROM layout_object WHERE id = ?", (object_id,)).fetchone()
                 if not existing:
                     raise HTTPException(status_code=404, detail="Layout object not found")
+                z_index = payload.z_index if payload.z_index is not None else _stored_int(existing, "z_index")
                 _require_layout_exists(conn, payload.layout_id)
                 conn.execute(
                     """
                     UPDATE layout_object
                     SET id = ?, layout_id = ?, object_type = ?, name = ?, x = ?, y = ?,
-                        width = ?, height = ?, variant = ?, berth_id = ?, rotation = ?
+                        width = ?, height = ?, variant = ?, berth_id = ?, rotation = ?, z_index = ?
                     WHERE id = ?
                     """,
                     (
@@ -1346,12 +1401,16 @@ async def update_layout_object(object_id: str, payload: LayoutObjectPayload):
                         variant,
                         berth_id,
                         rotation,
+                        z_index,
                         object_id,
                     ),
                 )
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "updated", "id": payload.id, "object": _object_response(payload, variant, berth_id, rotation)}
+        return {
+            "status": "updated", "id": payload.id,
+            "object": _object_response(payload, variant, berth_id, rotation, z_index),
+        }
 
 
 @app.delete("/api/layout-objects/{object_id}")
@@ -1547,7 +1606,8 @@ async def get_berths(layout_id: str):
                 "y": row["y"],
                 "width": row["width"],
                 "height": row["height"],
-                "berth_type": row["berth_type"]
+                "berth_type": row["berth_type"],
+                "z_index": _stored_int(row, "z_index"),
             }
             for row in rows
         ]
@@ -1581,6 +1641,7 @@ async def get_layout_objects_state(
     for row in rows:
         item = {key: row[key] for key in row.keys()}
         item["rotation"] = item.get("rotation") or 0
+        item["z_index"] = item.get("z_index") or 0
         occupant = None
         if item.get("berth_id"):
             for train in trains:
@@ -1610,7 +1671,9 @@ async def get_signals(layout_id: str):
                 "name": row["name"],
                 "x": row["x"],
                 "y": row["y"],
-                "signal_type": row["signal_type"]
+                "signal_type": row["signal_type"],
+                "rotation": _stored_int(row, "rotation"),
+                "z_index": _stored_int(row, "z_index"),
             }
             for row in rows
         ]

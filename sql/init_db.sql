@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS berth (
     width INTEGER DEFAULT 60,
     height INTEGER DEFAULT 30,
     berth_type TEXT DEFAULT 'normal',  -- normal, platform, siding
+    z_index INTEGER DEFAULT 0,  -- layering order: higher draws on top
     FOREIGN KEY (layout_id) REFERENCES layout(id)
 );
 
@@ -33,6 +34,8 @@ CREATE TABLE IF NOT EXISTS signal (
     x INTEGER NOT NULL,
     y INTEGER NOT NULL,
     signal_type TEXT DEFAULT 'auto',  -- auto, controlled, shunt
+    rotation INTEGER DEFAULT 0,  -- orientation: 0-315 degrees in 45 degree steps
+    z_index INTEGER DEFAULT 0,  -- layering order: higher draws on top
     FOREIGN KEY (layout_id) REFERENCES layout(id)
 );
 
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS layout_object (
     height INTEGER DEFAULT 30,
     variant TEXT,  -- level_crossing: automatic/barrier/user_worked; bridge: road_over/road_under/footbridge; label: station/line/note; platform: side/island/bay
     berth_id TEXT,  -- optional berth reference (platforms only)
-    rotation INTEGER DEFAULT 0,  -- level crossings: 0, 45 or 90 degrees
+    rotation INTEGER DEFAULT 0,  -- level crossings and bridges: 0, 45 or 90 degrees
+    z_index INTEGER DEFAULT 0,  -- layering order: higher draws on top
     FOREIGN KEY (layout_id) REFERENCES layout(id)
 );
 

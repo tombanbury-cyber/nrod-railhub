@@ -523,6 +523,7 @@ Defines berth positions on layouts.
 | width | INTEGER | Width in pixels |
 | height | INTEGER | Height in pixels |
 | berth_type | TEXT | Type: normal, platform, siding |
+| z_index | INTEGER | Layering order; higher values draw on top (default 0) |
 
 ### `signal` table
 Defines signal positions on layouts.
@@ -535,6 +536,8 @@ Defines signal positions on layouts.
 | x | INTEGER | X coordinate in pixels |
 | y | INTEGER | Y coordinate in pixels |
 | signal_type | TEXT | Type: auto, controlled, shunt |
+| rotation | INTEGER | Signal orientation: 0-315 degrees in 45 degree steps (default 0) |
+| z_index | INTEGER | Layering order; higher values draw on top (default 0) |
 
 ### `layout_object` table
 Defines level crossings, bridges, labels and platforms on layouts (created automatically by the admin API if missing).
@@ -549,7 +552,8 @@ Defines level crossings, bridges, labels and platforms on layouts (created autom
 | width, height | INTEGER | Size (editable for bridges and platforms; `height` is the line length of a level crossing) |
 | variant | TEXT | level_crossing: automatic, barrier, user_worked, foot-crossing; bridge: road_over, road_under, footbridge; label: station, line, note, text (text only, no fill or border); platform: side, island, bay |
 | berth_id | TEXT | Optional berth reference (level crossings, platforms and labels; ignored for bridges). `GET /objects/{layout_id}` reports `occupied`/`headcode` for linked objects from the current TD state |
-| rotation | INTEGER | Level crossing orientation: 0 (vertical), 45 or 90 (horizontal) degrees |
+| rotation | INTEGER | Level crossing / bridge orientation: 0, 45 or 90 degrees (crossings: 0 is vertical; bridges: 0 is horizontal) |
+| z_index | INTEGER | Layering order; higher values draw on top (default 0). Berths and signals have the same column |
 
 API: `GET /api/layouts/{id}/objects`, `POST /api/layout-objects`, `PUT`/`DELETE /api/layout-objects/{id}`.
 
