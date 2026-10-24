@@ -474,7 +474,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
 
     def table_section(
         kind: str, title: str, headers: list[str], types: list[str], extra_toolbar: str = "",
-        collapsible: bool = False,
+        collapsible: bool = False, panel: bool = False,
     ) -> str:
         head = "".join(f"<th scope='col'>{esc(h)}</th>" for h in headers + ["Actions"])
         type_opts = "".join(f"<option value='{t}'>{t}</option>" for t in types)
@@ -486,6 +486,11 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
             # Bulk-edit sections are collapsed by default (no ``open`` attribute).
             open_wrap, close_wrap = (
                 f'<details class="bulk-section" id="{kind}-bulk"><summary><h2 id="{kind}-heading">{title}</h2></summary>',
+                "</details>",
+            )
+        elif panel:
+            open_wrap, close_wrap = (
+                f'<details class="admin-section" id="{kind}-panel" open><summary><h2 id="{kind}-heading">{title}</h2></summary>',
                 "</details>",
             )
         else:
@@ -527,9 +532,11 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
             "berth", "Berths", ["ID", "Name", "X", "Y", "Width", "Height", "Type"],
             ["normal", "platform", "siding"],
             '<button type="button" id="save-all-berths" disabled>Save edited berths</button>',
+            panel=True,
          ) + table_section(
             "signal", "Signals", ["ID", "Name", "X", "Y", "Type"], ["auto", "controlled", "shunt"],
             '<button type="button" id="save-all-signals" disabled>Save edited signals</button>',
+            panel=True,
          ) + "".join(
             table_section(
                 kind, title, headers, [],

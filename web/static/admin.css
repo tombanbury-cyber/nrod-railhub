@@ -389,6 +389,14 @@
       display: inline
     }
 
+    .admin-section>summary {
+      cursor: pointer
+    }
+
+    .admin-section>summary h2 {
+      display: inline
+    }
+
     .add-control {
       display: inline-flex;
       align-items: center;
