@@ -344,7 +344,7 @@ function renderBerth(berth) {
     rect.setAttribute('height', berth.height);
     rect.setAttribute('fill', '#4CAF50');
     rect.setAttribute('stroke', '#2E7D32');
-    rect.setAttribute('stroke-width', '2');
+    rect.setAttribute('stroke-width', '1');
     rect.setAttribute('rx', '4');
     rect.classList.add('berth-rect');
 
@@ -486,7 +486,7 @@ function renderLayoutObject(obj) {
     const group = svgEl('g', { id: `object-${obj.id}`, class: `layout-object${occupied ? ' occupied' : ''}` });
     const w = Number(obj.width), h = Number(obj.height), x = Number(obj.x), y = Number(obj.y);
     const accent = occupied ? '#F57C00' : '#555';
-    const fill = occupied ? '#FFC107' : '#eee';
+    const fill = occupied ? '#FFC107' : '#999';
     let caption = obj.name;
     if (obj.object_type === 'level_crossing') {
         const rot = Number(obj.rotation) || 0;
@@ -498,17 +498,17 @@ function renderLayoutObject(obj) {
             'stroke-width': obj.variant === 'foot-crossing' ? 3 : 5,
             'stroke-dasharray': obj.variant === 'foot-crossing' ? '2 4' : (obj.variant === 'user_worked' ? '6 4' : ''),
         }));
-        group.appendChild(svgEl('text', { x: x + 8, y: y - 2, fill: '#ccc', 'font-size': 11 }, caption));
+        group.appendChild(svgEl('text', { x: x + 8, y: y - 2, fill: '#5f5454', 'font-size': 12 }, caption));
     } else if (obj.object_type === 'label') {
         if (obj.variant !== 'text') {
             group.appendChild(svgEl('rect', { x, y, width: Math.max(30, caption.length * 8 + 16), height: 20, rx: 3, fill, stroke: accent }));
         }
-        group.appendChild(svgEl('text', { x: x + 8, y: y + 14, fill: occupied ? '#FFC107' : '#ccc', 'font-size': 13 }, caption));
+        group.appendChild(svgEl('text', { x: x + 8, y: y + 14, fill: occupied ? '#FFC107' : '#000', 'font-size': 13 }, caption));
     } else {
         const bridgeRot = obj.object_type === 'bridge' ? Number(obj.rotation) || 0 : 0;
         if (bridgeRot === 90) group.setAttribute('transform', `translate(${x + h} ${y}) rotate(90) translate(${-x} ${-y})`);
         else if (bridgeRot === 45) group.setAttribute('transform', `translate(${x + h * Math.SQRT1_2} ${y}) rotate(45) translate(${-x} ${-y})`);
-        group.appendChild(svgEl('rect', { x, y, width: w, height: h, rx: 3, fill, stroke: accent, 'stroke-width': 2 }));
+        group.appendChild(svgEl('rect', { x, y, width: w, height: h, rx: 3, fill, stroke: accent, 'stroke-width': 1 }));
         group.appendChild(svgEl('text', { x: x + w / 2, y: y + h / 2 + 4, 'text-anchor': 'middle', fill: '#222', 'font-size': 11 }, caption));
     }
     return group;
