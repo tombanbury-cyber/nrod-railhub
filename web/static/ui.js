@@ -3,6 +3,48 @@ const WS_URL = `ws://${window.location.hostname}:${window.location.port}/ws`;
 const DEFAULT_LAYOUT_ID = 'demo';
 const STATE_REFRESH_MS = 5000;
 
+// SVG presentation constants
+const COLORS = {
+    berthFill: '#4CAF50',
+    berthStroke: '#2E7D32',
+    occupiedFill: '#FFC107',
+    occupiedStroke: '#F57C00',
+    title: '#4CAF50',
+    berthLabel: 'white',
+    headcodeLabel: 'grey',
+    crossingFree: '#dc2626',
+    crossingCaption: '#5f5454',
+    crossingTextOccupied: '#FFC107',
+    crossingTextFree: '#000',
+    accentFree: '#555',
+    fillFree: '#999',
+    blockLabel: '#222',
+    markerFill: '#FF5722',
+    markerStroke: '#D32F2F',
+};
+const STROKE = {
+    thin: '1',
+    footCrossingWidth: 3,
+    crossingWidth: 5,
+    markerWidth: '1',
+    footCrossingDash: '2 4',
+    userWorkedDash: '6 4',
+    noDash: '',
+};
+const FONT = {
+    titleSize: '18',
+    titleWeight: 'bold',
+    berthSize: '11',
+    berthWeight: 'normal',
+    headcodeSize: '13',
+    headcodeWeight: 'bold',
+    crossingCaptionSize: 12,
+    crossingTextSize: 13,
+    blockSize: 11,
+    anchorMiddle: 'middle',
+};
+const MARKER_GLOW = MARKER_GLOW;
+
 let ws = null;
 let statePollTimer = null;
 let berths = [];
@@ -295,9 +337,9 @@ function renderSchematic() {
     const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     title.setAttribute('x', '10');
     title.setAttribute('y', '30');
-    title.setAttribute('fill', '#4CAF50');
-    title.setAttribute('font-size', '18');
-    title.setAttribute('font-weight', 'bold');
+    title.setAttribute('fill', COLORS.title);
+    title.setAttribute('font-size', FONT.titleSize);
+    title.setAttribute('font-weight', FONT.titleWeight);
     title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
     svg.appendChild(title);
 
@@ -317,8 +359,8 @@ function clearSchematicState() {
 
         const rect = group.querySelector('rect');
         if (!rect) return;
-        rect.setAttribute('fill', '#4CAF50');
-        rect.setAttribute('stroke', '#2E7D32');
+        rect.setAttribute('fill', COLORS.berthFill);
+        rect.setAttribute('stroke', COLORS.berthStroke);
 group.classList.remove('occupied');
 
 const headcodeElem = group.querySelector('.headcode');
@@ -342,9 +384,9 @@ function renderBerth(berth) {
     rect.setAttribute('y', berth.y);
     rect.setAttribute('width', berth.width);
     rect.setAttribute('height', berth.height);
-    rect.setAttribute('fill', '#4CAF50');
-    rect.setAttribute('stroke', '#2E7D32');
-    rect.setAttribute('stroke-width', '1');
+    rect.setAttribute('fill', COLORS.berthFill);
+    rect.setAttribute('stroke', COLORS.berthStroke);
+    rect.setAttribute('stroke-width', STROKE.thin);
     rect.setAttribute('rx', '4');
     rect.classList.add('berth-rect');
 
@@ -353,10 +395,10 @@ function renderBerth(berth) {
 text.setAttribute('class', 'berth-label');
     text.setAttribute('x', berth.x + berth.width / 2);
     text.setAttribute('y', berth.y + berth.height / 2 - 2);
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('fill', 'white');
-    text.setAttribute('font-size', '11');
-    text.setAttribute('font-weight', 'normal');
+    text.setAttribute('text-anchor', FONT.anchorMiddle);
+    text.setAttribute('fill', COLORS.berthLabel);
+    text.setAttribute('font-size', FONT.berthSize);
+    text.setAttribute('font-weight', FONT.berthWeight);
     text.textContent = berth.name;
 
     // Headcode
@@ -364,10 +406,10 @@ text.setAttribute('class', 'berth-label');
 headcode.setAttribute('class', 'headcode');
     headcode.setAttribute('x', berth.x + berth.width / 2);
     headcode.setAttribute('y', berth.y + berth.height / 2 + 10);
-    headcode.setAttribute('text-anchor', 'middle');
-    headcode.setAttribute('fill', 'grey');
-    headcode.setAttribute('font-size', '13');
-    headcode.setAttribute('font-weight', 'bold');
+    headcode.setAttribute('text-anchor', FONT.anchorMiddle);
+    headcode.setAttribute('fill', COLORS.headcodeLabel);
+    headcode.setAttribute('font-size', FONT.headcodeSize);
+    headcode.setAttribute('font-weight', FONT.headcodeWeight);
     headcode.textContent = '';
 
     group.appendChild(rect);
@@ -392,8 +434,8 @@ const headcodeElem = group.querySelector('.headcode');
 
 group.classList.add('occupied');
 
-        rect.setAttribute('fill', '#FFC107');
-        rect.setAttribute('stroke', '#F57C00');
+        rect.setAttribute('fill', COLORS.occupiedFill);
+        rect.setAttribute('stroke', COLORS.occupiedStroke);
 
         // Add or update train marker
         if (trainId) {
@@ -408,8 +450,8 @@ headcodeElem.textContent = trainId.split(':')[1];
 
 group.classList.remove('occupied');
 
-        rect.setAttribute('fill', '#4CAF50');
-        rect.setAttribute('stroke', '#2E7D32');
+        rect.setAttribute('fill', COLORS.berthFill);
+        rect.setAttribute('stroke', COLORS.berthStroke);
 
 headcodeElem.textContent = '';
 
@@ -485,8 +527,8 @@ function renderLayoutObject(obj) {
     const occupied = Boolean(obj.occupied);
     const group = svgEl('g', { id: `object-${obj.id}`, class: `layout-object${occupied ? ' occupied' : ''}` });
     const w = Number(obj.width), h = Number(obj.height), x = Number(obj.x), y = Number(obj.y);
-    const accent = occupied ? '#F57C00' : '#555';
-    const fill = occupied ? '#FFC107' : '#999';
+    const accent = occupied ? COLORS.occupiedStroke : COLORS.accentFree;
+    const fill = occupied ? COLORS.occupiedFill : COLORS.fillFree;
     let caption = obj.name;
     if (obj.object_type === 'level_crossing') {
         const rot = Number(obj.rotation) || 0;
@@ -494,22 +536,22 @@ function renderLayoutObject(obj) {
         const d = Math.round(len * Math.SQRT1_2);
         const [x2, y2] = rot === 90 ? [x + len, y] : rot === 45 ? [x + d, y + d] : [x, y + len];
         group.appendChild(svgEl('line', {
-            x1: x, y1: y, x2, y2, stroke: occupied ? '#F57C00' : '#dc2626',
-            'stroke-width': obj.variant === 'foot-crossing' ? 3 : 5,
-            'stroke-dasharray': obj.variant === 'foot-crossing' ? '2 4' : (obj.variant === 'user_worked' ? '6 4' : ''),
+            x1: x, y1: y, x2, y2, stroke: occupied ? COLORS.occupiedStroke : COLORS.crossingFree,
+            'stroke-width': obj.variant === 'foot-crossing' ? STROKE.footCrossingWidth : STROKE.crossingWidth,
+            'stroke-dasharray': obj.variant === 'foot-crossing' ? STROKE.footCrossingDash : (obj.variant === 'user_worked' ? STROKE.userWorkedDash : STROKE.noDash),
         }));
-        group.appendChild(svgEl('text', { x: x + 8, y: y - 2, fill: '#5f5454', 'font-size': 12 }, caption));
+        group.appendChild(svgEl('text', { x: x + 8, y: y - 2, fill: COLORS.crossingCaption, 'font-size': FONT.crossingCaptionSize }, caption));
     } else if (obj.object_type === 'label') {
         if (obj.variant !== 'text') {
             group.appendChild(svgEl('rect', { x, y, width: Math.max(30, caption.length * 8 + 16), height: 20, rx: 3, fill, stroke: accent }));
         }
-        group.appendChild(svgEl('text', { x: x + 8, y: y + 14, fill: occupied ? '#FFC107' : '#000', 'font-size': 13 }, caption));
+        group.appendChild(svgEl('text', { x: x + 8, y: y + 14, fill: occupied ? COLORS.crossingTextOccupied : COLORS.crossingTextFree, 'font-size': FONT.crossingTextSize }, caption));
     } else {
         const bridgeRot = obj.object_type === 'bridge' ? Number(obj.rotation) || 0 : 0;
         if (bridgeRot === 90) group.setAttribute('transform', `translate(${x + h} ${y}) rotate(90) translate(${-x} ${-y})`);
         else if (bridgeRot === 45) group.setAttribute('transform', `translate(${x + h * Math.SQRT1_2} ${y}) rotate(45) translate(${-x} ${-y})`);
-        group.appendChild(svgEl('rect', { x, y, width: w, height: h, rx: 3, fill, stroke: accent, 'stroke-width': 1 }));
-        group.appendChild(svgEl('text', { x: x + w / 2, y: y + h / 2 + 4, 'text-anchor': 'middle', fill: '#222', 'font-size': 11 }, caption));
+        group.appendChild(svgEl('rect', { x, y, width: w, height: h, rx: 3, fill, stroke: accent, 'stroke-width': STROKE.thin }));
+        group.appendChild(svgEl('text', { x: x + w / 2, y: y + h / 2 + 4, 'text-anchor': FONT.anchorMiddle, fill: COLORS.blockLabel, 'font-size': FONT.blockSize }, caption));
     }
     return group;
 }
@@ -586,10 +628,10 @@ const berth = berths.find(b => b.id === currentLayout.id+':'+berthId);
     marker.setAttribute('cx', berth.x + 2);
     marker.setAttribute('cy', berth.y - 2);
     marker.setAttribute('r', '4');
-    marker.setAttribute('fill', '#FF5722');
-    marker.setAttribute('stroke', '#D32F2F');
-    marker.setAttribute('stroke-width', '1');
-    marker.style.filter = 'drop-shadow(0 0 2px #FF5722)';
+    marker.setAttribute('fill', COLORS.markerFill);
+    marker.setAttribute('stroke', COLORS.markerStroke);
+    marker.setAttribute('stroke-width', STROKE.markerWidth);
+    marker.style.filter = MARKER_GLOW;
 
     svg.appendChild(marker);
 }
