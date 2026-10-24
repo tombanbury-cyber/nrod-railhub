@@ -1043,12 +1043,13 @@ def test_layout_objects_crud_persist_and_validate(monkeypatch):
         assert client.put("/api/layout-objects/objs:P1", json=platform).status_code == 200
         linked = client.get("/api/layouts/objs/objects?type=platform").json()["items"][0]
         assert linked["berth_id"] == "BRTH_1"
-        # Rotation only applies to level crossings; berth links only to platforms.
+        # Rotation applies to level crossings and bridges; berth links only to platforms.
         assert client.post(
             "/api/layout-objects", json={**bridge, "id": "objs:BR2", "rotation": 90, "berth_id": "X"}
         ).status_code == 200
         br2 = [i for i in client.get("/api/layouts/objs/objects?type=bridge").json()["items"] if i["id"] == "objs:BR2"][0]
-        assert (br2["rotation"], br2["berth_id"]) == (0, None)
+        assert (br2["rotation"], br2["berth_id"]) == (90, None)
+        assert client.post("/api/layout-objects", json={**bridge, "id": "objs:BR3", "rotation": 135}).status_code == 422
         assert client.delete("/api/layout-objects/objs:BR2").status_code == 200
         assert client.post("/api/layout-objects", json={**crossing, "id": "objs:LC2", "rotation": 30}).status_code == 422
 
@@ -1228,3 +1229,68 @@ def test_layout_editor_snap_defaults_and_identity_generation():
     assert "kind, ...identity, layout_id: layoutId," in js
     for kind in ("berth", "signal", "level_crossing", "bridge", "label", "platform"):
         assert f'add-{kind}' in page
+
+
+def test_layering_and_signal_rotation_persist_with_backwards_compat(monkeypatch):
+    """z_index and signal rotation persist, default to 0, are kept when omitted, and upgrade old tables."""
+    db_path = _create_visualisation_db()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("ALTER TABLE berth DROP COLUMN z_index")
+            conn.execute("ALTER TABLE signal DROP COLUMN z_index")
+            conn.execute("ALTER TABLE signal DROP COLUMN rotation")
+            conn.execute("ALTER TABLE layout_object DROP COLUMN z_index")
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        assert client.post(
+            "/api/layouts", json={"id": "zl", "name": "Z", "description": None, "data": {}}
+        ).status_code == 200
+        base = {"layout_id": "zl", "x": 1, "y": 2}
+        berth = {**base, "id": "zl:B", "name": "B"}
+        signal = {**base, "id": "zl:S", "name": "S"}
+        bridge = {**base, "id": "zl:BR", "name": "Br", "object_type": "bridge"}
+        assert client.post("/api/berths", json=berth).status_code == 200
+        assert client.post("/api/signals", json=signal).status_code == 200
+        assert client.post("/api/layout-objects", json=bridge).status_code == 200
+        get = lambda kind: client.get(f"/api/layouts/zl/{kind}").json()["items"][0]  # noqa: E731
+        assert (get("berths")["z_index"], get("signals")["rotation"], get("objects")["z_index"]) == (0, 0, 0)
+
+        assert client.put("/api/berths/zl:B", json={**berth, "z_index": -5}).status_code == 200
+        assert client.put("/api/signals/zl:S", json={**signal, "z_index": 7, "rotation": 315}).status_code == 200
+        assert client.put("/api/layout-objects/zl:BR", json={**bridge, "z_index": 3, "rotation": 45}).status_code == 200
+        # Omitting the fields (e.g. table edits) keeps the stored layering and orientation.
+        assert client.put("/api/berths/zl:B", json=berth).status_code == 200
+        assert client.put("/api/signals/zl:S", json=signal).status_code == 200
+        assert client.put("/api/layout-objects/zl:BR", json={k: v for k, v in bridge.items()} | {"rotation": 45}).status_code == 200
+        assert get("berths")["z_index"] == -5
+        assert (get("signals")["rotation"], get("signals")["z_index"]) == (315, 7)
+        assert (get("objects")["rotation"], get("objects")["z_index"]) == (45, 3)
+        assert client.get("/berths/zl").json()[0]["z_index"] == -5
+        assert client.get("/signals/zl").json()[0]["rotation"] == 315
+        assert client.get("/objects/zl").json()[0]["z_index"] == 3
+        assert client.post("/api/signals", json={**signal, "id": "zl:S2", "rotation": 30}).status_code == 422
+    finally:
+        Path(db_path).unlink()
+
+
+def test_layout_editor_js_layering_rotation_wheel_and_label_hit_testing():
+    """Editor assets expose layering controls, rotation options, scoped wheel zoom and a label hit area."""
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    js = client.get("/static/admin-layout.js").text
+    css = client.get("/static/admin.css").text
+    for token in ("Send to back", "Bring to front", "z_index", "SIGNAL_ROTATIONS", "BRIDGE_ROTATIONS", "sortedByLayer"):
+        assert token in js
+    assert "[0, 45, 90, 135, 180, 225, 270, 315]" in js
+    # Text-only labels get an invisible rect that still receives pointer events.
+    assert 'item.variant === "text" ? "label-hit"' in js
+    assert ".label-hit{fill:transparent;stroke:none;pointer-events:all}" in css
+    # Wheel zoom is registered on the canvas svg only, and plain wheel (no ctrl needed) zooms at the pointer.
+    assert js.count('addEventListener("wheel"') == 1
+    assert 'svg.addEventListener("wheel"' in js
+    wheel = js.split('svg.addEventListener("wheel"')[1].split("}, { passive: false })")[0]
+    assert "zoomAt(" in wheel and "toWorld(event.clientX, event.clientY)" in wheel
+    assert "ctrlKey || event.metaKey) {" not in wheel

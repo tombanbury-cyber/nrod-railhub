@@ -67,6 +67,7 @@
     .layout-canvas .label-shape{fill:#fff;stroke:#9ca3af;stroke-width:1}
     .layout-canvas .label-station{fill:#eff6ff;stroke:#1e40af}
     .layout-canvas .label-note{fill:#fef08a;stroke:#ca8a04;stroke-dasharray:4 2}
+    .layout-canvas .label-hit{fill:transparent;stroke:none;pointer-events:all}
     .layout-canvas .label-text-text{font-size:13px}
     .layout-canvas .label-text{pointer-events:none;font-size:13px}
     .layout-canvas .label-text-station{font-weight:700;font-size:15px}

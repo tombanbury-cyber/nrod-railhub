@@ -22,6 +22,8 @@ const OBJECT_KINDS = {
 };
 const ADD_KINDS = ["berth", "signal", "level_crossing", "bridge", "label", "platform"];
 const CROSSING_ROTATIONS = [0, 45, 90];
+const BRIDGE_ROTATIONS = [0, 45, 90];
+const SIGNAL_ROTATIONS = [0, 45, 90, 135, 180, 225, 270, 315];
 const CROSSING_PAD = 4;
 const OBJECT_TABLE_FIELDS = [["id","text"],["name","text"],["x","number"],["y","number"],["width","number"],["height","number"]];
 function objectTable(kind, extraFields) {
@@ -33,7 +35,7 @@ function objectTable(kind, extraFields) {
 Object.assign(TABLES, {
   level_crossing: objectTable("level_crossing", [["berth_id","text"],["rotation",["0","45","90"]]]),
   platform: objectTable("platform", [["berth_id","text"]]),
-  bridge: objectTable("bridge", []),
+  bridge: objectTable("bridge", [["rotation",["0","45","90"]]]),
   label: objectTable("label", [["berth_id","text"]]),
 });
 const tableState = Object.fromEntries(Object.keys(TABLES).map((kind) => [kind, { page: 1 }]));
@@ -122,16 +124,14 @@ function setupPanZoom(svg, options) {
   svg.addEventListener("wheel", (event) => {
     event.preventDefault();
     if (!view) reset();
-    if (event.ctrlKey || event.metaKey) {
+    if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      const k = worldPerPixel();
+      const dx = event.deltaX || event.deltaY;
+      view.x += dx * k;
+      apply();
+    } else {
       const p = toWorld(event.clientX, event.clientY);
       zoomAt(Math.exp(-event.deltaY * 0.01), p.x, p.y);
-    } else {
-      const k = worldPerPixel();
-      const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
-      const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
-      view.x += dx * k;
-      view.y += dy * k;
-      apply();
     }
   }, { passive: false });
   svg.addEventListener("pointerdown", (event) => {
@@ -181,7 +181,8 @@ function setupPanZoom(svg, options) {
 }
 
 function itemSize(item) {
-  if (item.kind === "berth" || item.kind === "bridge" || item.kind === "platform") {
+  if (item.kind === "bridge") return bridgeGeometry(item);
+  if (item.kind === "berth" || item.kind === "platform") {
     return { width: Number(item.width), height: Number(item.height) };
   }
   if (item.kind === "level_crossing") return crossingGeometry(item);
@@ -200,6 +201,19 @@ function crossingGeometry(item) {
     return { width: d, height: d, x1: 0, y1: 0, x2: d, y2: d };
   }
   return { width: CROSSING_PAD * 2, height: length, x1: CROSSING_PAD, y1: 0, x2: CROSSING_PAD, y2: length };
+}
+
+function bridgeGeometry(item) {
+  const width = Number(item.width);
+  const height = Number(item.height);
+  const rotation = Number(item.rotation) || 0;
+  if (rotation === 90) return { width: height, height: width, transform: `translate(${height} 0) rotate(90)` };
+  if (rotation === 45) {
+    const s = Math.SQRT1_2;
+    const extent = Math.round((width + height) * s);
+    return { width: extent, height: extent, transform: `translate(${height * s} 0) rotate(45)` };
+  }
+  return { width, height, transform: "" };
 }
 
 function labelWidth(item) {
@@ -246,6 +260,7 @@ document.getElementById("canvas-zoom-reset").addEventListener("click", () => can
 function editorPayload(item) {
   const payload = {
     id: item.id, layout_id: layoutId, name: item.name, x: item.x, y: item.y,
+    z_index: Number(item.z_index) || 0,
   };
   if (item.kind === "berth") {
     Object.assign(payload, {
@@ -255,10 +270,11 @@ function editorPayload(item) {
     Object.assign(payload, {
       object_type: item.kind, width: item.width, height: item.height, variant: item.variant,
       berth_id: BERTH_LINKED_KINDS.includes(item.kind) ? (item.berth_id || null) : null,
-      rotation: item.kind === "level_crossing" ? Number(item.rotation) || 0 : 0,
+      rotation: item.kind === "level_crossing" || item.kind === "bridge" ? Number(item.rotation) || 0 : 0,
     });
   } else {
     payload.signal_type = item.signal_type;
+    payload.rotation = Number(item.rotation) || 0;
   }
   return payload;
 }
@@ -345,20 +361,39 @@ function renderPlatform(group, item) {
 function renderBridge(group, item) {
   const width = Number(item.width);
   const height = Number(item.height);
-  group.appendChild(svgNode("rect", { class: `bridge-shape bridge-${item.variant}`, width, height, rx: 3 }));
-  group.appendChild(svgNode("line", { class: "bridge-end", x1: 0, y1: 0, x2: 0, y2: height }));
-  group.appendChild(svgNode("line", { class: "bridge-end", x1: width, y1: 0, x2: width, y2: height }));
-  group.appendChild(svgNode("text", { x: width / 2, y: height / 2 + 4, "text-anchor": "middle", fill: "black" },
+  const inner = svgNode("g", { class: "bridge-rotation" });
+  const { transform } = bridgeGeometry(item);
+  if (transform) inner.setAttribute("transform", transform);
+  inner.appendChild(svgNode("rect", { class: `bridge-shape bridge-${item.variant}`, width, height, rx: 3 }));
+  inner.appendChild(svgNode("line", { class: "bridge-end", x1: 0, y1: 0, x2: 0, y2: height }));
+  inner.appendChild(svgNode("line", { class: "bridge-end", x1: width, y1: 0, x2: width, y2: height }));
+  inner.appendChild(svgNode("text", { x: width / 2, y: height / 2 + 4, "text-anchor": "middle", fill: "black" },
     item.name || item.id || "New bridge"));
+  group.appendChild(inner);
 }
 
 function renderLabel(group, item) {
-  if (item.variant !== "text") {
-    group.appendChild(svgNode("rect", { class: `label-shape label-${item.variant}`, width: labelWidth(item), height: 20, rx: 3 }));
-  }
+  const shapeClass = item.variant === "text" ? "label-hit" : `label-shape label-${item.variant}`;
+  group.appendChild(svgNode("rect", { class: shapeClass, width: labelWidth(item), height: 20, rx: 3 }));
   group.appendChild(svgNode("text", {
     class: `label-text label-text-${item.variant}`, x: 8, y: 14, fill: "black",
   }, item.name || item.id || "New label"));
+}
+
+function sortedByLayer(items) {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => (Number(a.item.z_index) || 0) - (Number(b.item.z_index) || 0) || a.index - b.index)
+    .map((entry) => entry.item);
+}
+
+function changeLayer(item, toFront) {
+  const others = editorItems.filter((other) => other !== item).map((other) => Number(other.z_index) || 0);
+  if (!others.length) return;
+  item.z_index = toFront ? Math.max(...others) + 1 : Math.min(...others) - 1;
+  renderCanvas();
+  renderInspector();
+  updateEditorStatus();
 }
 
 function renderCanvas() {
@@ -366,7 +401,7 @@ function renderCanvas() {
   const focusedIndex = document.activeElement?.classList?.contains("layout-element")
     ? document.activeElement.dataset.editorIndex : null;
   editorSvg.querySelectorAll(".layout-element").forEach((node) => node.remove());
-  editorItems.forEach((item) => {
+  sortedByLayer(editorItems).forEach((item) => {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.setAttribute("class", `layout-element${selectedElement === item ? " selected" : ""}`);
     group.dataset.editorIndex = String(editorItems.indexOf(item));
@@ -406,13 +441,17 @@ function renderCanvas() {
       stem.setAttribute("y1", "8");
       stem.setAttribute("x2", "0");
       stem.setAttribute("y2", "30");
-      group.appendChild(stem);
+      const signalParts = svgNode("g", { class: "signal-rotation" });
+      const signalRotation = Number(item.rotation) || 0;
+      if (signalRotation) signalParts.setAttribute("transform", `rotate(${signalRotation} 0 8)`);
+      signalParts.appendChild(stem);
+      group.appendChild(signalParts);
       const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       circle.setAttribute("class", "signal-shape");
       circle.setAttribute("cx", "0");
       circle.setAttribute("cy", "8");
       circle.setAttribute("r", "8");
-      group.appendChild(circle);
+      signalParts.appendChild(circle);
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("fill", "white");
       label.setAttribute("x", "12");
@@ -525,6 +564,9 @@ function renderInspector() {
       addInspectorField(form, "width", item.width, "number");
       addInspectorField(form, "height", item.height, "number");
     }
+    if (item.kind === "bridge") {
+      addInspectorField(form, "rotation", Number(item.rotation) || 0, "text", BRIDGE_ROTATIONS.map(String));
+    }
     if (item.kind === "level_crossing") {
       addInspectorField(form, "height", item.height, "number");
       addInspectorField(form, "rotation", Number(item.rotation) || 0, "text", CROSSING_ROTATIONS.map(String));
@@ -533,12 +575,22 @@ function renderInspector() {
     if (BERTH_LINKED_KINDS.includes(item.kind)) addInspectorField(form, "berth_id", item.berth_id || "");
   } else {
     addInspectorField(form, "signal_type", item.signal_type, "text", ["auto", "controlled", "shunt"]);
+    addInspectorField(form, "rotation", Number(item.rotation) || 0, "text", SIGNAL_ROTATIONS.map(String));
   }
   const save = document.createElement("button");
   save.type = "submit";
   save.textContent = item._isNew ? "Add element" : "Apply properties";
   save.disabled = canvasSaving;
   form.appendChild(save);
+  [["element-send-back", "Send to back", false], ["element-bring-front", "Bring to front", true]].forEach(([id, text, toFront]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = id;
+    button.textContent = text;
+    button.disabled = canvasSaving;
+    button.addEventListener("click", () => changeLayer(item, toFront));
+    form.appendChild(button);
+  });
   if (item.kind in OBJECT_KINDS) {
     const remove = document.createElement("button");
     remove.type = "button";
@@ -553,7 +605,7 @@ function renderInspector() {
     if (canvasSaving) return;
     const data = new FormData(form);
     for (const [name, value] of data.entries()) {
-      item[name] = ["x", "y", "width", "height", "rotation"].includes(name) ? Number(value) : value;
+      item[name] = ["x", "y", "width", "height", "rotation", "z_index"].includes(name) ? Number(value) : value;
     }
     if (["x", "y", "width", "height", "rotation"].some((name) => data.has(name))) {
       clampElementPosition(item, Number(item.x), Number(item.y));
@@ -612,7 +664,7 @@ function beginAddingElement(kind) {
     berth_type: kind === "berth" && chosen ? chosen : "normal",
     signal_type: kind === "signal" && chosen ? chosen : "auto",
     variant: kind in OBJECT_KINDS ? (chosen || OBJECT_KINDS[kind].variants[0]) : undefined,
-    berth_id: null, rotation: 0,
+    berth_id: null, rotation: 0, z_index: 0,
     _isNew: true,
   };
   editorItems.push(item);
