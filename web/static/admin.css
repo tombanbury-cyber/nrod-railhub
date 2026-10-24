@@ -201,7 +201,13 @@
       border: 1px solid #cbd5e1;
       border-radius: 8px;
       background: #fff;
+      max-height: 60vh;
+      overflow: auto;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #fff;
     }
+
 
     .layout-canvas svg {
       display: block;
