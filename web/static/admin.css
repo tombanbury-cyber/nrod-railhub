@@ -54,6 +54,7 @@
     .layout-canvas .crossing-line{stroke:#dc2626;stroke-width:5;stroke-linecap:round}
     .layout-canvas .crossing-barrier{stroke-width:8}
     .layout-canvas .crossing-user_worked{stroke-dasharray:6 4}
+    .layout-canvas .crossing-foot-crossing{stroke-width:3;stroke-dasharray:2 4}
     .layout-canvas .layout-element.selected .crossing-line{stroke:#f59e0b}
     .layout-canvas .layout-element:focus .crossing-line{stroke:#7c3aed}
     .layout-canvas .platform-object-shape{fill:#dcfce7;stroke:#15803d;stroke-width:2}
@@ -66,10 +67,13 @@
     .layout-canvas .label-shape{fill:#fff;stroke:#9ca3af;stroke-width:1}
     .layout-canvas .label-station{fill:#eff6ff;stroke:#1e40af}
     .layout-canvas .label-note{fill:#fef08a;stroke:#ca8a04;stroke-dasharray:4 2}
+    .layout-canvas .label-text-text{font-size:13px}
     .layout-canvas .label-text{pointer-events:none;font-size:13px}
     .layout-canvas .label-text-station{font-weight:700;font-size:15px}
     .layout-canvas .label-text-line{font-style:italic}
     .layout-canvas .label-text-note{font-size:12px}
+    .bulk-section>summary{cursor:pointer}
+    .bulk-section>summary h2{display:inline}
     .add-control{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
     .layout-canvas .layout-element{cursor:grab}
     .layout-canvas .layout-element:active{cursor:grabbing}

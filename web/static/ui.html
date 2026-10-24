@@ -734,6 +734,62 @@ function setupPanZoom(svg, options) {
             return item;
         }
 
+        function svgEl(name, attrs, text) {
+            const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+            Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, String(v)));
+            if (text !== undefined) node.textContent = text;
+            return node;
+        }
+
+        function renderLayoutObject(obj) {
+            const occupied = Boolean(obj.occupied);
+            const group = svgEl('g', { id: `object-${obj.id}`, class: `layout-object${occupied ? ' occupied' : ''}` });
+            const w = Number(obj.width), h = Number(obj.height), x = Number(obj.x), y = Number(obj.y);
+            const accent = occupied ? '#F57C00' : '#555';
+            const fill = occupied ? '#FFC107' : '#eee';
+            let caption = obj.name;
+            if (obj.object_type === 'level_crossing') {
+                const rot = Number(obj.rotation) || 0;
+                const len = Math.max(1, h);
+                const d = Math.round(len * Math.SQRT1_2);
+                const [x2, y2] = rot === 90 ? [x + len, y] : rot === 45 ? [x + d, y + d] : [x, y + len];
+                group.appendChild(svgEl('line', {
+                    x1: x, y1: y, x2, y2, stroke: occupied ? '#F57C00' : '#dc2626',
+                    'stroke-width': obj.variant === 'foot-crossing' ? 3 : 5,
+                    'stroke-dasharray': obj.variant === 'foot-crossing' ? '2 4' : (obj.variant === 'user_worked' ? '6 4' : ''),
+                }));
+                group.appendChild(svgEl('text', { x: x + 8, y: y - 2, fill: '#ccc', 'font-size': 11 }, caption));
+            } else if (obj.object_type === 'label') {
+                if (obj.variant !== 'text') {
+                    group.appendChild(svgEl('rect', { x, y, width: Math.max(30, caption.length * 8 + 16), height: 20, rx: 3, fill, stroke: accent }));
+                }
+                group.appendChild(svgEl('text', { x: x + 8, y: y + 14, fill: occupied ? '#FFC107' : '#ccc', 'font-size': 13 }, caption));
+            } else {
+                group.appendChild(svgEl('rect', { x, y, width: w, height: h, rx: 3, fill, stroke: accent, 'stroke-width': 2 }));
+                group.appendChild(svgEl('text', { x: x + w / 2, y: y + h / 2 + 4, 'text-anchor': 'middle', fill: '#222', 'font-size': 11 }, caption));
+            }
+            return group;
+        }
+
+        function renderLayoutObjects(items) {
+            const svg = document.getElementById('schematic');
+            svg.querySelectorAll('.layout-object').forEach(node => node.remove());
+            (Array.isArray(items) ? items : []).forEach(obj => svg.appendChild(renderLayoutObject(obj)));
+        }
+
+        async function refreshObjects(params, token) {
+            try {
+                const url = new URL(`${API_BASE}/objects/${encodeURIComponent(currentLayout.id)}`);
+                ['td_area', 'headcode'].forEach(k => { if (params.has(k)) url.searchParams.set(k, params.get(k)); });
+                const response = await fetch(url.toString());
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const items = await response.json();
+                if (token === layoutLoadToken) renderLayoutObjects(items);
+            } catch (error) {
+                console.error('Failed to refresh layout objects:', error);
+            }
+        }
+
         async function refreshState() {
             if (!currentLayout) return;
             const token = layoutLoadToken;
@@ -752,6 +808,9 @@ function setupPanZoom(svg, options) {
                 const snapshot = await response.json();
                 if (token !== layoutLoadToken) return;
                 renderSnapshot(snapshot);
+                await refreshObjects(new URLSearchParams({
+                    ...(area ? { td_area: area } : {}), ...(hc ? { headcode: hc } : {}),
+                }), token);
             } catch (error) {
                 console.error('Failed to refresh state:', error);
             }

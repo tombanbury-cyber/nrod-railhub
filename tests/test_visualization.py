@@ -1112,3 +1112,95 @@ def test_layout_editor_js_supports_new_object_kinds(monkeypatch):
     css = client.get("/static/admin.css").text
     assert ".bridge-shape" in css and ".label-station" in css
     assert ".crossing-line" in css and ".platform-object-shape" in css
+
+
+def test_text_label_foot_crossing_and_berth_links_persist(monkeypatch):
+    """New label/crossing variants are accepted and crossings, platforms and labels keep berth links."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        assert client.post(
+            "/api/layouts", json={"id": "lx", "name": "Lx", "description": None, "data": {}}
+        ).status_code == 200
+        base = {"layout_id": "lx", "x": 1, "y": 2}
+        payloads = [
+            {**base, "id": "lx:LB", "object_type": "label", "name": "Text", "variant": "text", "berth_id": "B1"},
+            {**base, "id": "lx:FC", "object_type": "level_crossing", "name": "Foot", "variant": "foot-crossing",
+             "berth_id": " B2 "},
+            {**base, "id": "lx:PL", "object_type": "platform", "name": "P1", "berth_id": "B3"},
+            {**base, "id": "lx:BR", "object_type": "bridge", "name": "Br", "berth_id": "B4"},
+        ]
+        for payload in payloads:
+            assert client.post("/api/layout-objects", json=payload).status_code == 200
+        stored = {i["id"]: i for i in client.get("/api/layouts/lx/objects").json()["items"]}
+        assert (stored["lx:LB"]["variant"], stored["lx:LB"]["berth_id"]) == ("text", "B1")
+        assert (stored["lx:FC"]["variant"], stored["lx:FC"]["berth_id"]) == ("foot-crossing", "B2")
+        assert stored["lx:PL"]["berth_id"] == "B3"
+        assert stored["lx:BR"]["berth_id"] is None
+        bad = {**payloads[0], "id": "lx:BAD", "variant": "bogus"}
+        assert client.post("/api/layout-objects", json=bad).status_code == 422
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
+def test_objects_state_follows_berth_movements(monkeypatch):
+    """Objects linked to a berth become occupied when a TD train is in it; others stay clear."""
+    db_path = _create_visualisation_db()
+    try:
+        import app.visualisation.app as app_module
+
+        monkeypatch.setattr(app_module, "DB_PATH", Path(db_path))
+        client = TestClient(app_module.app)
+        assert client.post(
+            "/api/layouts", json={"id": "st", "name": "St", "description": None, "data": {}}
+        ).status_code == 200
+        base = {"layout_id": "st", "x": 1, "y": 2}
+        for oid, otype, berth in (
+            ("st:A", "platform", "0152"), ("st:B", "label", "st:0152"),
+            ("st:C", "level_crossing", "9999"), ("st:D", "label", None),
+        ):
+            payload = {**base, "id": oid, "object_type": otype, "name": oid}
+            if berth:
+                payload["berth_id"] = berth
+            assert client.post("/api/layout-objects", json=payload).status_code == 200
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE td_berth_events (id INTEGER PRIMARY KEY, ts_ms INTEGER, ts_iso TEXT, td_area TEXT,
+                headcode TEXT, msg_type TEXT, from_berth TEXT, to_berth TEXT, descr TEXT);
+            INSERT INTO td_berth_events (ts_ms, ts_iso, td_area, headcode, msg_type, from_berth, to_berth)
+                VALUES (1, '2024-01-01T00:00:00', 'EK', '2C90', 'CA', '0150', '0152');
+            """
+        )
+        conn.commit()
+        conn.close()
+        state = {i["id"]: i for i in client.get("/objects/st").json()}
+        assert (state["st:A"]["occupied"], state["st:A"]["headcode"]) == (True, "2C90")
+        assert state["st:B"]["occupied"] is True
+        assert state["st:C"]["occupied"] is False
+        assert state["st:D"]["occupied"] is False and state["st:D"]["headcode"] is None
+        assert client.get("/objects/missing").status_code == 404
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
+def test_admin_bulk_sections_collapsed_and_signal_save_button():
+    """Bulk-edit sections are collapsed by default and signals get a save-edited button."""
+    import re
+
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    page = client.get("/admin/layouts/anything").text
+    if "save-all-signals" not in page:  # layout pages render without needing the layout to exist
+        page = app_module._render_layout_page("anything")
+    assert 'id="save-all-signals"' in page and 'id="save-all-berths"' in page
+    for kind in ("level_crossing", "platform", "bridge", "label"):
+        match = re.search(rf'<details class="bulk-section" id="{kind}-bulk"([^>]*)>', page)
+        assert match and "open" not in match.group(1)
+        assert f'id="save-all-{kind}s"' in page
+    js = client.get("/static/admin-layout.js").text
+    assert "foot-crossing" in js and "saveAllEdited" in js
