@@ -552,12 +552,12 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       {add_controls}
       <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
       <span class="snap-controls" role="group" aria-label="Snap to grid">
-        <label><input type="checkbox" id="snap-to-grid"> Snap to grid</label>
+        <label><input type="checkbox" id="snap-to-grid" checked> Snap to grid</label>
         <label for="snap-grid-size">Grid size</label>
         <select id="snap-grid-size" aria-label="Grid size">
-          <option value="5">5</option>
+          <option value="5" selected>5</option>
           <option value="10">10</option>
-          <option value="20" selected>20</option>
+          <option value="20">20</option>
           <option value="25">25</option>
           <option value="50">50</option>
         </select>

@@ -1204,3 +1204,27 @@ def test_admin_bulk_sections_collapsed_and_signal_save_button():
         assert f'id="save-all-{kind}s"' in page
     js = client.get("/static/admin-layout.js").text
     assert "foot-crossing" in js and "saveAllEdited" in js
+
+
+def test_layout_editor_snap_defaults_and_identity_generation():
+    """The canvas defaults to snapping at five units and new objects get usable identities."""
+    import re
+
+    import app.visualisation.app as app_module
+
+    page = app_module._render_layout_page("test-layout")
+    assert '<input type="checkbox" id="snap-to-grid" checked>' in page
+    assert re.search(r'<option value="5" selected>5</option>', page)
+    assert re.search(r'<option value="20">20</option>', page)
+
+    client = TestClient(app_module.app)
+    js = client.get("/static/admin-layout.js").text
+    assert 'window.localStorage.getItem(SNAP_STORAGE_KEY)' in js
+    assert 'window.localStorage.setItem(SNAP_STORAGE_KEY, String(snapToGridToggle.checked))' in js
+    assert "function nextElementIdentity(kind)" in js
+    assert "id = `${layoutId}_${kind}_${number}`;" in js
+    assert "while (editorItems.some((item) => item.id === id));" in js
+    assert "const identity = nextElementIdentity(kind);" in js
+    assert "kind, ...identity, layout_id: layoutId," in js
+    for kind in ("berth", "signal", "level_crossing", "bridge", "label", "platform"):
+        assert f'add-{kind}' in page

@@ -38,6 +38,19 @@ Object.assign(TABLES, {
 });
 const tableState = Object.fromEntries(Object.keys(TABLES).map((kind) => [kind, { page: 1 }]));
 const editorSvg = document.getElementById("layout-canvas-svg");
+const SNAP_STORAGE_KEY = "nrod-railhub-layout-snap-to-grid";
+const snapToGridToggle = document.getElementById("snap-to-grid");
+try {
+  const savedSnapState = window.localStorage.getItem(SNAP_STORAGE_KEY);
+  if (savedSnapState === "true" || savedSnapState === "false") {
+    snapToGridToggle.checked = savedSnapState === "true";
+  }
+} catch {}
+snapToGridToggle.addEventListener("change", () => {
+  try {
+    window.localStorage.setItem(SNAP_STORAGE_KEY, String(snapToGridToggle.checked));
+  } catch {}
+});
 const editorItems = [];
 let selectedElement = null;
 let dragOffset = null;
@@ -279,6 +292,19 @@ function snapGridSize() {
   return size > 0 ? size : 0;
 }
 
+function nextElementIdentity(kind) {
+  const titles = { berth: "Berth", signal: "Signal", ...Object.fromEntries(
+    Object.entries(OBJECT_KINDS).map(([key, value]) => [key, value.title]),
+  ) };
+  let number = 1;
+  let id;
+  do {
+    id = `${layoutId}_${kind}_${number}`;
+    number += 1;
+  } while (editorItems.some((item) => item.id === id));
+  return { id, name: `${titles[kind]} ${number - 1}` };
+}
+
 function snapValue(value, size) {
   return size > 0 ? Math.round(value / size) * size : value;
 }
@@ -480,7 +506,7 @@ function renderInspector() {
   const inspector = document.getElementById("element-inspector");
   inspector.replaceChildren();
   if (!selectedElement) {
-    inspector.textContent = "Select an element on the canvas or add a berth or signal.";
+    inspector.textContent = "Select an element on the canvas or add a berth, signal, level crossing, bridge, label or platform.";
     return;
   }
   const item = selectedElement;
@@ -579,8 +605,9 @@ function beginAddingElement(kind) {
   const typeSelect = document.getElementById(`add-${kind}-type`);
   const chosen = typeSelect ? typeSelect.value : "";
   const defaults = OBJECT_KINDS[kind] || { width: 60, height: 30 };
+  const identity = nextElementIdentity(kind);
   const item = {
-    kind, id: "", layout_id: layoutId, name: "",
+    kind, ...identity, layout_id: layoutId,
     x: 60, y: 60, width: defaults.width, height: defaults.height,
     berth_type: kind === "berth" && chosen ? chosen : "normal",
     signal_type: kind === "signal" && chosen ? chosen : "auto",
@@ -640,6 +667,7 @@ async function loadEditorObjects() {
 }
 
 async function loadEditor() {
+  setAddControlsDisabled(true);
   try {
     editorItems.splice(0, editorItems.length,
       ...(await loadEditorItems("berth")), ...(await loadEditorItems("signal")),
@@ -649,6 +677,7 @@ async function loadEditor() {
     if (CANVAS_WIDTH > BASE_CANVAS_WIDTH || CANVAS_HEIGHT > BASE_CANVAS_HEIGHT) canvasView.fit();
     renderInspector();
     updateEditorStatus("Loaded layout elements.");
+    setAddControlsDisabled(false);
     return true;
   } catch (error) {
     updateEditorStatus(`Failed to load canvas elements: ${error.message}`, true);
