@@ -45,8 +45,16 @@
     .snap-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
     .zoom-controls button{min-width:44px;min-height:36px}
-    .layout-canvas .berth-shape{fill:#dbeafe;stroke:#1d4ed8;stroke-width:2}
-    .layout-canvas .platform-shape{fill:#dcfce7;stroke:#15803d;stroke-width:2}
+    .layout-canvas .berth-shape{
+		fill:#dbeafe;
+		stroke:#666;
+		stroke-width:1;
+		}
+    .layout-canvas .platform-shape{
+		fill:#dcfce7;
+		stroke:#dcfce7;
+		stroke-width:1;
+		}
     .layout-canvas .siding-shape{fill:#fef3c7;stroke:#b45309;stroke-width:2}
     .layout-canvas .signal-shape{fill:#fee2e2;stroke:#b91c1c;stroke-width:3}
     .layout-canvas .signal-stem{stroke:#991b1b;stroke-width:3}
@@ -57,15 +65,35 @@
     .layout-canvas .crossing-foot-crossing{stroke-width:3;stroke-dasharray:2 4}
     .layout-canvas .layout-element.selected .crossing-line{stroke:#f59e0b}
     .layout-canvas .layout-element:focus .crossing-line{stroke:#7c3aed}
-    .layout-canvas .platform-object-shape{fill:#dcfce7;stroke:#15803d;stroke-width:2}
-    .layout-canvas .platform-island{fill:#bbf7d0}
-    .layout-canvas .platform-bay{stroke-dasharray:6 3}
-    .layout-canvas .bridge-shape{fill:#e7e5e4;stroke:#78350f;stroke-width:2}
+	
+    .layout-canvas .platform-object-shape{
+		fill:#dcfce7;
+		stroke:#dcfce7;
+		stroke-width:1
+	}
+	
+	
+    .layout-canvas .platform-island{
+		fill:#bbf7d0
+		}
+    .layout-canvas .platform-bay{
+		stroke-dasharray:6 3
+		}
+    .layout-canvas .bridge-shape{fill:#FFFFFF;stroke:#78350f;stroke-width:2}
+	
     .layout-canvas .bridge-road_under{fill:#d6d3d1}
+	
     .layout-canvas .bridge-footbridge{fill:#fef3c7}
+	
+	
+	
     .layout-canvas .bridge-end{stroke:#78350f;stroke-width:5;pointer-events:none}
+	
     .layout-canvas .label-shape{fill:#fff;stroke:#9ca3af;stroke-width:1}
+	
     .layout-canvas .label-station{fill:#eff6ff;stroke:#1e40af}
+	
+	
     .layout-canvas .label-note{fill:#fef08a;stroke:#ca8a04;stroke-dasharray:4 2}
     .layout-canvas .label-hit{fill:transparent;stroke:none;pointer-events:all}
     .layout-canvas .label-text-text{font-size:13px}
