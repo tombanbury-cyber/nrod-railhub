@@ -974,10 +974,11 @@ def test_schematic_ui_has_layout_selector():
     assert response.status_code == 200
     page = response.text
     assert 'id="layoutSelect"' in page
-    assert "/api/layouts" in page
-    assert "layout_id" in page
-    assert "const LAYOUT_ID = 'demo'" not in page
-    assert "Demo Station" not in page
+    script = client.get("/static/ui.js").text
+    assert "/api/layouts" in script
+    assert "layout_id" in script
+    assert "const LAYOUT_ID = 'demo'" not in script
+    assert "Demo Station" not in page + script
 
 
 def test_canvas_uis_support_pan_and_zoom():
@@ -986,7 +987,7 @@ def test_canvas_uis_support_pan_and_zoom():
 
     client = TestClient(app_module.app)
     page = client.get("/static/ui.html").text
-    assert "setupPanZoom" in page
+    assert "setupPanZoom" in client.get("/static/ui.js").text
     for control in ("zoomIn", "zoomOut", "zoomFit", "zoomReset"):
         assert f'id="{control}"' in page
 
