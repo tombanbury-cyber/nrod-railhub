@@ -603,7 +603,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed), text (plain)</span>
     </div>
     <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
-    <div class="layout-canvas">
+    <div class="layout-canvas noselect">
       <svg id="layout-canvas-svg" viewBox="0 0 1200 700" role="group" aria-label="Interactive layout canvas">
         <defs><pattern id="canvas-grid" width="20" height="20" patternUnits="userSpaceOnUse">
           <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e5e7eb" stroke-width="1" />

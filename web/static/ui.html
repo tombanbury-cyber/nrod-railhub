@@ -7,32 +7,36 @@
     <link rel="stylesheet" href="/static/ui.css" />
 </head>
 <body>
-    <div class="container">
+    <div class="container noselect">
         <h1>🚂 NROD RailHub - Schematic Visualization PoC</h1>
         
-        <div class="status">
+        <div class="status noselect">
+
             <div>
-                <span class="status-indicator" id="wsStatus"></span>
-                <span id="wsStatusText">Connecting...</span>
+                <div>
+                    <span class="status-indicator" id="wsStatus"></span>
+                    <span id="wsStatusText">Connecting...</span>
+                    <span id="layoutInfo" role="status" aria-live="polite">Loading layout...</span>
+                </div>
+                <div class="controls">
+                    <label for="layoutSelect">Layout:</label>
+                    <select id="layoutSelect" aria-label="Select layout" disabled></select>
+                </div>
             </div>
-            <div id="layoutInfo" role="status" aria-live="polite">Loading layout...</div>
+
+            <div class="zoom-controls" role="group" aria-label="Schematic zoom">
+                <button type="button" id="zoomOut" aria-label="Zoom out">&minus;</button>
+                <span id="zoomLevel" aria-live="polite">100%</span>
+                <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
+                <button type="button" id="zoomFit">Fit all</button>
+                <button type="button" id="zoomReset">Reset view</button>
+                <span style="font-size:12px;color:#aaa">Scroll to pan &middot; Ctrl/&#8984; + scroll or pinch to zoom &middot; drag to pan</span>
+            </div>
         </div>
 
-        <div class="controls">
-            <label for="layoutSelect">Layout:</label>
-            <select id="layoutSelect" aria-label="Select layout" disabled></select>
-        </div>
-        
-        <div class="zoom-controls" role="group" aria-label="Schematic zoom">
-            <button type="button" id="zoomOut" aria-label="Zoom out">&minus;</button>
-            <span id="zoomLevel" aria-live="polite">100%</span>
-            <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
-            <button type="button" id="zoomFit">Fit all</button>
-            <button type="button" id="zoomReset">Reset view</button>
-            <span style="font-size:12px;color:#aaa">Scroll to pan &middot; Ctrl/&#8984; + scroll or pinch to zoom &middot; drag to pan</span>
-        </div>
-        <div class="schematic-container">
-            <svg id="schematic" width="100%" height="100%"></svg>
+
+        <div class="schematic-container noselect">
+            <svg class="noselect" id="schematic" width="100%" height="100%"></svg>
         </div>
         
         <div class="legend">
