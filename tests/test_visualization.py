@@ -1200,6 +1200,20 @@ def test_admin_bulk_sections_collapsed_and_signal_save_button():
     if "save-all-signals" not in page:  # layout pages render without needing the layout to exist
         page = app_module._render_layout_page("anything")
     assert 'id="save-all-signals"' in page and 'id="save-all-berths"' in page
+    for kind, title in (("berth", "Berths"), ("signal", "Signals")):
+        match = re.search(rf'<details class="admin-section" id="{kind}-panel"([^>]*)>', page)
+        assert match and "open" in match.group(1).split()
+        assert f'<summary><h2 id="{kind}-heading">{title}</h2></summary>' in page
+        for control in (
+            f'id="{kind}-create"',
+            f'id="{kind}-q"',
+            f'id="{kind}-type"',
+            f'id="{kind}-page-size"',
+            f'id="{kind}-prev"',
+            f'id="{kind}-next"',
+            f'id="save-all-{kind}s"',
+        ):
+            assert control in page
     for kind in ("level_crossing", "platform", "bridge", "label"):
         match = re.search(rf'<details class="bulk-section" id="{kind}-bulk"([^>]*)>', page)
         assert match and "open" not in match.group(1)
