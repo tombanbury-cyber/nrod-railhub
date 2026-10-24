@@ -43,7 +43,7 @@ const FONT = {
     blockSize: 11,
     anchorMiddle: 'middle',
 };
-const MARKER_GLOW = MARKER_GLOW;
+const MARKER_GLOW = 'drop-shadow(0 0 2px #FF5722)';
 
 let ws = null;
 let statePollTimer = null;
