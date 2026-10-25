@@ -552,3 +552,70 @@
     .layout-canvas .layout-element:focus circle {
       stroke: #FF5722
     }
+.layout-canvas .track-element {
+  cursor: pointer;
+  outline: none
+}
+
+.layout-canvas .track-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke
+}
+
+.layout-canvas .track-line {
+  fill: none;
+  stroke: #bdbdbd;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none
+}
+
+.layout-canvas .track-element.selected .track-line {
+  stroke: #F57C00
+}
+
+.layout-canvas .track-element:focus .track-line {
+  stroke: #FF5722
+}
+
+.layout-canvas .track-draft {
+  fill: none;
+  stroke: #4CAF50;
+  stroke-width: 3;
+  stroke-dasharray: 6 4
+}
+
+.layout-canvas .berth-socket-group,
+.layout-canvas .junction-element {
+  cursor: crosshair;
+  outline: none
+}
+
+.layout-canvas .layout-element .berth-socket-group .berth-socket-hit,
+.layout-canvas .junction-element .junction-hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all
+}
+
+.layout-canvas .layout-element .berth-socket-group .berth-socket,
+.layout-canvas .junction-element .junction-node {
+  fill: #fff;
+  stroke: #455A64;
+  stroke-width: 2
+}
+
+.layout-canvas .layout-element .berth-socket-group:hover .berth-socket,
+.layout-canvas .layout-element .berth-socket-group:focus .berth-socket,
+.layout-canvas .junction-element:hover .junction-node,
+.layout-canvas .junction-element:focus .junction-node,
+.layout-canvas .layout-element .berth-socket-group.pending .berth-socket,
+.layout-canvas .junction-element.pending .junction-node,
+.layout-canvas .junction-element.selected .junction-node {
+  fill: #4CAF50;
+  stroke: #F57C00;
+  stroke-width: 3
+}

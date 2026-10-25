@@ -32,6 +32,7 @@ from nrod_railhub.db_backend import (
 
 from . import cards as card_store
 from . import sequences
+from . import tracks as track_store
 from .route_inference import infer_train_chain
 
 
@@ -253,6 +254,7 @@ def _require_visualisation_schema(conn: Any) -> None:
     if not _table_exists(conn, "layout_object"):
         conn.execute(LAYOUT_OBJECT_DDL)
         conn.commit()
+    track_store.ensure_tables(conn)
     for table, column, ddl in LAYOUT_COLUMN_MIGRATIONS:
         if column not in conn.table_columns(table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -588,6 +590,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
     <p class="hint">Drag elements to reposition them. Select an element to edit its properties; arrow keys move a selected element (Shift + arrow moves 10 units). Enable "Snap to grid" to align dragged and keyboard-moved elements to the selected grid size (arrow keys then move by one grid step). The canvas grows to include imported berths: scroll the mouse wheel over the canvas or pinch to zoom, Shift + scroll or drag the background to pan, or use the zoom buttons.</p>
     <div class="toolbar" aria-label="Canvas controls">
       {add_controls}
+      <button type="button" class="secondary" id="add-junction" disabled aria-describedby="track-hint">Add junction to selected track</button>
       <button type="button" class="secondary" id="save-canvas" disabled>Save canvas changes</button>
       <span class="snap-controls" role="group" aria-label="Snap to grid">
         <label><input type="checkbox" id="snap-to-grid" checked> Snap to grid</label>
@@ -609,6 +612,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       </span>
       <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed), text (plain)</span>
     </div>
+    <p class="hint" id="track-hint">Tracks: each berth has a connection socket at the middle of its left and right edges. Drag from one socket to another (or focus a socket, press Enter, then Enter on a second socket) to draw a track; routes use horizontal, vertical and 45&deg; segments and stay attached when berths move. Select a track to rename, re-route, add a junction or delete it (Delete key); double-click a track to add a junction at that point, then drag from the junction to a socket to join another track. Escape cancels drawing.</p>
     <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
     <div class="layout-canvas noselect">
       <svg id="layout-canvas-svg" viewBox="0 0 1200 700" role="group" aria-label="Interactive layout canvas">
@@ -624,6 +628,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
 </main>
 {dialog}
 <script defer src="/static/admin-common.js"></script>
+<script defer src="/static/track-routing.js"></script>
 <script defer src="/static/admin-layout.js"></script>
 </body>
 </html>
@@ -1046,6 +1051,26 @@ async def list_layout_objects(
     )
 
 
+@app.get("/api/layouts/{layout_id}/tracks")
+async def list_layout_tracks(layout_id: str):
+    """List all of a layout's tracks (ordered route points and endpoint references)."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+        items = track_store.list_tracks(conn, layout_id)
+        return {"items": items, "total": len(items)}
+
+
+@app.get("/api/layouts/{layout_id}/junctions")
+async def list_layout_junctions(layout_id: str):
+    """List all of a layout's track junctions."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+        items = track_store.list_junctions(conn, layout_id)
+        return {"items": items, "total": len(items)}
+
+
 @app.put("/api/layouts/{layout_id}")
 async def update_layout(layout_id: str, payload: LayoutPayload):
     """Update a layout row and keep child berth/signal rows in sync when renaming."""
@@ -1060,6 +1085,8 @@ async def update_layout(layout_id: str, payload: LayoutPayload):
                     conn.execute("UPDATE berth SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
                     conn.execute("UPDATE signal SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
                     conn.execute("UPDATE layout_object SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
+                    conn.execute("UPDATE layout_track SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
+                    conn.execute("UPDATE layout_junction SET layout_id = ? WHERE layout_id = ?", (payload.id, layout_id))
                 conn.execute(
                     """
                     UPDATE layout
@@ -1075,7 +1102,7 @@ async def update_layout(layout_id: str, payload: LayoutPayload):
 
 @app.delete("/api/layouts/{layout_id}")
 async def delete_layout(layout_id: str):
-    """Delete a layout and its berths/signals."""
+    """Delete a layout and its berths/signals/objects/tracks."""
     with get_conn() as conn:
         _require_visualisation_schema(conn)
         with conn:
@@ -1085,6 +1112,7 @@ async def delete_layout(layout_id: str):
             conn.execute("DELETE FROM berth WHERE layout_id = ?", (layout_id,))
             conn.execute("DELETE FROM signal WHERE layout_id = ?", (layout_id,))
             conn.execute("DELETE FROM layout_object WHERE layout_id = ?", (layout_id,))
+            track_store.delete_layout_tracks(conn, layout_id)
             conn.execute("DELETE FROM layout WHERE id = ?", (layout_id,))
         return {"status": "deleted", "id": layout_id}
 
@@ -1236,6 +1264,10 @@ async def update_berth(berth_id: str, payload: BerthPayload):
                         berth_id,
                     ),
                 )
+                if existing["layout_id"] != payload.layout_id:
+                    track_store.delete_tracks_for_berth(conn, berth_id)
+                elif payload.id != berth_id:
+                    track_store.rename_berth_refs(conn, berth_id, payload.id)
         except INTEGRITY_ERRORS as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "updated", "id": payload.id, "berth": {**_model_dump(payload), "z_index": z_index}}
@@ -1250,6 +1282,7 @@ async def delete_berth(berth_id: str):
             existing = conn.execute("SELECT id FROM berth WHERE id = ?", (berth_id,)).fetchone()
             if not existing:
                 raise HTTPException(status_code=404, detail="Berth not found")
+            track_store.delete_tracks_for_berth(conn, berth_id)
             conn.execute("DELETE FROM berth WHERE id = ?", (berth_id,))
         return {"status": "deleted", "id": berth_id}
 
@@ -1431,6 +1464,122 @@ async def delete_layout_object(object_id: str):
                 raise HTTPException(status_code=404, detail="Layout object not found")
             conn.execute("DELETE FROM layout_object WHERE id = ?", (object_id,))
         return {"status": "deleted", "id": object_id}
+
+
+@app.post("/api/tracks")
+async def create_track(payload: track_store.TrackPayload):
+    """Create a track between berth sockets and/or junctions."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                _require_layout_exists(conn, payload.layout_id)
+                points, start, end = track_store.validate_track(conn, payload)
+                conn.execute(
+                    """
+                    INSERT INTO layout_track
+                        (id, layout_id, name, start_berth_id, start_side, start_junction_id,
+                         end_berth_id, end_side, end_junction_id, points)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (payload.id, *track_store.track_values(payload, points, start, end)),
+                )
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "id": payload.id, "track": _model_dump(payload)}
+
+
+@app.put("/api/tracks/{track_id}")
+async def update_track(track_id: str, payload: track_store.TrackPayload):
+    """Update a track; junctions on it are kept on its (new) route."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                existing = conn.execute("SELECT id FROM layout_track WHERE id = ?", (track_id,)).fetchone()
+                if not existing:
+                    raise HTTPException(status_code=404, detail="Track not found")
+                _require_layout_exists(conn, payload.layout_id)
+                if payload.id != track_id:
+                    raise HTTPException(status_code=422, detail="Track id cannot be changed")
+                points, start, end = track_store.validate_track(conn, payload)
+                conn.execute(
+                    """
+                    UPDATE layout_track
+                    SET layout_id = ?, name = ?, start_berth_id = ?, start_side = ?, start_junction_id = ?,
+                        end_berth_id = ?, end_side = ?, end_junction_id = ?, points = ?
+                    WHERE id = ?
+                    """,
+                    (*track_store.track_values(payload, points, start, end), track_id),
+                )
+                track_store.reproject_junctions(conn, track_id, points)
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "track": _model_dump(payload)}
+
+
+@app.delete("/api/tracks/{track_id}")
+async def delete_track(track_id: str):
+    """Delete a track, the junctions on it and any tracks attached to those junctions."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            if not conn.execute("SELECT id FROM layout_track WHERE id = ?", (track_id,)).fetchone():
+                raise HTTPException(status_code=404, detail="Track not found")
+            tracks, junctions = track_store.delete_tracks(conn, [track_id])
+        return {"status": "deleted", "id": track_id, "deleted_tracks": tracks, "deleted_junctions": junctions}
+
+
+@app.post("/api/junctions")
+async def create_junction(payload: track_store.JunctionPayload):
+    """Create a junction on an existing track's route."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                _require_layout_exists(conn, payload.layout_id)
+                track_store.validate_junction(conn, payload)
+                conn.execute(
+                    "INSERT INTO layout_junction (id, layout_id, track_id, name, x, y) VALUES (?, ?, ?, ?, ?, ?)",
+                    (payload.id, payload.layout_id, payload.track_id, payload.name, payload.x, payload.y),
+                )
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "created", "id": payload.id, "junction": _model_dump(payload)}
+
+
+@app.put("/api/junctions/{junction_id}")
+async def update_junction(junction_id: str, payload: track_store.JunctionPayload):
+    """Update a junction (position changes are refused while other tracks are attached)."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            with conn:
+                if not conn.execute("SELECT id FROM layout_junction WHERE id = ?", (junction_id,)).fetchone():
+                    raise HTTPException(status_code=404, detail="Junction not found")
+                _require_layout_exists(conn, payload.layout_id)
+                if payload.id != junction_id:
+                    raise HTTPException(status_code=422, detail="Junction id cannot be changed")
+                track_store.validate_junction(conn, payload, junction_id)
+                conn.execute(
+                    "UPDATE layout_junction SET layout_id = ?, track_id = ?, name = ?, x = ?, y = ? WHERE id = ?",
+                    (payload.layout_id, payload.track_id, payload.name, payload.x, payload.y, junction_id),
+                )
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "updated", "id": payload.id, "junction": _model_dump(payload)}
+
+
+@app.delete("/api/junctions/{junction_id}")
+async def delete_junction(junction_id: str):
+    """Delete a junction and the tracks attached to it."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        with conn:
+            if not conn.execute("SELECT id FROM layout_junction WHERE id = ?", (junction_id,)).fetchone():
+                raise HTTPException(status_code=404, detail="Junction not found")
+            tracks, junctions = track_store.delete_junction(conn, junction_id)
+        return {"status": "deleted", "id": junction_id, "deleted_tracks": tracks, "deleted_junctions": junctions}
 
 
 WRITE_TOKEN_ENV_VAR = "NROD_RAILHUB_VIS_TOKEN"
@@ -1618,6 +1767,18 @@ async def get_berths(layout_id: str):
             }
             for row in rows
         ]
+
+
+@app.get("/tracks/{layout_id}")
+async def get_tracks(layout_id: str):
+    """Get all tracks and junctions for a layout."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        _require_layout_exists(conn, layout_id)
+        return {
+            "tracks": track_store.list_tracks(conn, layout_id),
+            "junctions": track_store.list_junctions(conn, layout_id),
+        }
 
 
 def _object_berth_matches(object_berth: str, layout_id: str, train_berth: str) -> bool:

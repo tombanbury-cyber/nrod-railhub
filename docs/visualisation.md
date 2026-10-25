@@ -303,6 +303,26 @@ the layout is reopened. Unsaved changes trigger a browser leave-page warning;
 API failures are shown above the canvas and leave unsaved edits in place. The
 existing tables remain available for searching, bulk berth edits, and deletion.
 
+#### Tracks and junctions
+
+Each berth shows two sockets: the midpoints of its left and right edges. Click
+**Add track** is not needed: drag from one socket to another (or click a socket,
+then a second socket) to create a track. Drop on an existing track, or use
+**Add junction** and click a track, to place a junction; sockets and junctions
+can then be start/end points of further tracks. Select a track or junction to
+edit it in the inspector (ids are fixed once created), press Delete/Backspace
+to remove it, Escape cancels a pending connection. Tracks are drawn beneath
+berths and objects; junctions and sockets sit above them. Tracks follow berths
+when berths are moved or resized, and are saved with **Save canvas changes**
+(berths first, then tracks in dependency order).
+
+Routes use only horizontal, vertical and 45-degree segments. For unaligned
+berths the router (`web/static/track-routing.js`, pure and unit-tested with
+Node) inserts diagonal/straight segments, and best-effort avoids berths/objects
+and other tracks; if no clear route exists the least-overlapping valid route is
+used. The route is rendered as a smooth quadratic spline whose control polygon
+is the stored octilinear point list.
+
 #### `POST /api/layouts`
 Create a layout. `PUT /api/layouts/{layout_id}` updates it, and
 `DELETE /api/layouts/{layout_id}` removes the layout plus its berths/signals.
@@ -315,6 +335,21 @@ Create a berth. `PUT /api/berths/{berth_id}` updates it and
 Import selected berth IDs from a displayed headcode chain into a layout. The
 endpoint creates layout-scoped berth IDs using `{layout_id}:{berth_id}` and
 skips berths already present on the target layout.
+
+#### Tracks and junctions API
+`GET /api/layouts/{layout_id}/tracks` and `/junctions` return `{items, total}`;
+`GET /tracks/{layout_id}` returns `{tracks, junctions}`. `POST /api/tracks`,
+`PUT`/`DELETE /api/tracks/{id}` and the same under `/api/junctions` manage them.
+Payload validation (422/404/409): the layout and referenced berths/junctions
+must exist in the layout, points must be integer, ordered, octilinear
+(horizontal/vertical/45 degrees) with at least two distinct points, and the
+first/last point must equal the endpoint's berth socket or junction position.
+Ids and junction track references are immutable. Moving a junction that has
+attached tracks is refused (409). Editing a host track reprojects its junctions
+onto the new route. Deleting a track removes its junctions and tracks attached
+to them; deleting a junction removes its attached tracks; deleting a berth
+removes tracks that reference it; renaming a berth or layout updates
+references; deleting a layout removes its tracks and junctions.
 
 #### `POST /api/signals`
 Create a signal. `PUT /api/signals/{signal_id}` updates it and
@@ -556,6 +591,27 @@ Defines level crossings, bridges, labels and platforms on layouts (created autom
 | z_index | INTEGER | Layering order; higher values draw on top (default 0). Berths and signals have the same column |
 
 API: `GET /api/layouts/{id}/objects`, `POST /api/layout-objects`, `PUT`/`DELETE /api/layout-objects/{id}`.
+
+### `layout_track` and `layout_junction` tables
+Created on demand (`CREATE TABLE IF NOT EXISTS`, portable SQLite/PostgreSQL
+SQL) by `app/visualisation/tracks.py`, and also in `sql/init_db.sql`.
+
+| `layout_track` column | Description |
+|--------|------|
+| id TEXT PK, layout_id TEXT, name | Stable identity and owning layout |
+| start_kind / start_ref / start_side | Endpoint: `berth` (+ `left`/`right` side) or `junction` |
+| end_kind / end_ref / end_side | Same for the end |
+| points | JSON array of ordered `{x, y}` route points (octilinear) |
+| z_index | Layering |
+
+| `layout_junction` column | Description |
+|--------|------|
+| id TEXT PK, layout_id TEXT, track_id | Host track |
+| x, y | Position on the host route |
+
+Limitations: the public display UI does not draw tracks yet (data is exposed via
+the API); berth geometry edited in tables is reconciled the next time the
+editor loads; no live PostgreSQL test runs without a configured server.
 
 ### `train` table
 Stores train information.
