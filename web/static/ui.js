@@ -174,123 +174,123 @@ async function loadBerths(layoutId, token) {
 }
 
 function setupPanZoom(svg, options) {
-const MIN_SCALE = 0.1;
-const MAX_SCALE = 8;
-const pointers = new Map();
-let view = null;
-let panning = null;
-let pinch = null;
-function base() { return options.getBase(); }
-function clampView() {
-const b = options.getBounds();
-const margin = 0.2;
-view.x = Math.max(b.x - view.w * (1 - margin), Math.min(b.x + b.w - view.w * margin, view.x));
-view.y = Math.max(b.y - view.h * (1 - margin), Math.min(b.y + b.h - view.h * margin, view.y));
-}
-function apply() {
-clampView();
-svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
-if (options.onChange) options.onChange(base().w / view.w);
-}
-function reset() {
-const b = base();
-view = { x: 0, y: 0, w: b.w, h: b.h };
-apply();
-}
-function fit() {
-const b = base();
-const c = options.getBounds();
-const pad = 20;
-const scale = Math.min(b.w / (c.w + 2 * pad), b.h / (c.h + 2 * pad), MAX_SCALE);
-view = { w: b.w / scale, h: b.h / scale, x: 0, y: 0 };
-view.x = c.x - pad - (view.w - c.w - 2 * pad) / 2;
-view.y = c.y - pad - (view.h - c.h - 2 * pad) / 2;
-apply();
-}
-function zoomAt(factor, cx, cy) {
-if (!view) reset();
-const b = base();
-const current = b.w / view.w;
-const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, current * factor));
-const ratio = current / next;
-const nw = b.w / next;
-const nh = b.h / next;
-view = { x: cx - (cx - view.x) * ratio, y: cy - (cy - view.y) * ratio, w: nw, h: nh };
-apply();
-}
-function toWorld(clientX, clientY) {
-const p = svg.createSVGPoint();
-p.x = clientX;
-p.y = clientY;
-return p.matrixTransform(svg.getScreenCTM().inverse());
-}
-function zoomBy(factor) {
-if (!view) reset();
-zoomAt(factor, view.x + view.w / 2, view.y + view.h / 2);
-}
-function worldPerPixel() {
-const ctm = svg.getScreenCTM();
-return ctm && ctm.a ? 1 / ctm.a : 1;
-}
-svg.addEventListener("wheel", (event) => {
-event.preventDefault();
-if (!view) reset();
-if (event.ctrlKey || event.metaKey) {
-const p = toWorld(event.clientX, event.clientY);
-zoomAt(Math.exp(-event.deltaY * 0.01), p.x, p.y);
-} else {
-const k = worldPerPixel();
-const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
-const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
-view.x += dx * k;
-view.y += dy * k;
-apply();
-}
-}, { passive: false });
-svg.addEventListener("pointerdown", (event) => {
-if (!options.isBackground(event.target)) return;
-if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
-if (!view) reset();
-pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-if (pointers.size === 1) {
-panning = { id: event.pointerId, x: event.clientX, y: event.clientY, vx: view.x, vy: view.y, moved: false };
-} else if (pointers.size === 2) {
-panning = null;
-const [a, b] = [...pointers.values()];
-pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
-}
-});
-svg.addEventListener("pointermove", (event) => {
-if (!pointers.has(event.pointerId)) return;
-pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-if (pinch && pointers.size === 2) {
-const [a, b] = [...pointers.values()];
-const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-const p = toWorld((a.x + b.x) / 2, (a.y + b.y) / 2);
-zoomAt(dist / pinch.dist, p.x, p.y);
-pinch.dist = dist;
-} else if (panning && panning.id === event.pointerId) {
-const dx = event.clientX - panning.x;
-const dy = event.clientY - panning.y;
-if (!panning.moved && Math.hypot(dx, dy) < 3) return;
-if (!panning.moved) {
-panning.moved = true;
-try { svg.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
-}
-const k = worldPerPixel();
-view.x = panning.vx - dx * k;
-view.y = panning.vy - dy * k;
-apply();
-}
-});
-function end(event) {
-pointers.delete(event.pointerId);
-if (pointers.size < 2) pinch = null;
-if (panning && panning.id === event.pointerId) panning = null;
-}
-svg.addEventListener("pointerup", end);
-svg.addEventListener("pointercancel", end);
-return { zoomBy, fit, reset };
+    const MIN_SCALE = 0.1;
+    const MAX_SCALE = 8;
+    const pointers = new Map();
+    let view = null;
+    let panning = null;
+    let pinch = null;
+    function base() { return options.getBase(); }
+    function clampView() {
+        const b = options.getBounds();
+        const margin = 0.2;
+        view.x = Math.max(b.x - view.w * (1 - margin), Math.min(b.x + b.w - view.w * margin, view.x));
+        view.y = Math.max(b.y - view.h * (1 - margin), Math.min(b.y + b.h - view.h * margin, view.y));
+    }
+    function apply() {
+        clampView();
+        svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
+        if (options.onChange) options.onChange(base().w / view.w);
+    }
+    function reset() {
+        const b = base();
+        view = { x: 0, y: 0, w: b.w, h: b.h };
+        apply();
+    }
+    function fit() {
+        const b = base();
+        const c = options.getBounds();
+        const pad = 20;
+        const scale = Math.min(b.w / (c.w + 2 * pad), b.h / (c.h + 2 * pad), MAX_SCALE);
+        view = { w: b.w / scale, h: b.h / scale, x: 0, y: 0 };
+        view.x = c.x - pad - (view.w - c.w - 2 * pad) / 2;
+        view.y = c.y - pad - (view.h - c.h - 2 * pad) / 2;
+        apply();
+    }
+    function zoomAt(factor, cx, cy) {
+        if (!view) reset();
+        const b = base();
+        const current = b.w / view.w;
+        const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, current * factor));
+        const ratio = current / next;
+        const nw = b.w / next;
+        const nh = b.h / next;
+        view = { x: cx - (cx - view.x) * ratio, y: cy - (cy - view.y) * ratio, w: nw, h: nh };
+        apply();
+    }
+    function toWorld(clientX, clientY) {
+        const p = svg.createSVGPoint();
+        p.x = clientX;
+        p.y = clientY;
+        return p.matrixTransform(svg.getScreenCTM().inverse());
+    }
+    function zoomBy(factor) {
+        if (!view) reset();
+        zoomAt(factor, view.x + view.w / 2, view.y + view.h / 2);
+    }
+    function worldPerPixel() {
+        const ctm = svg.getScreenCTM();
+        return ctm && ctm.a ? 1 / ctm.a : 1;
+    }
+    svg.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        if (!view) reset();
+        if (event.ctrlKey || event.metaKey) {
+            const p = toWorld(event.clientX, event.clientY);
+            zoomAt(Math.exp(-event.deltaY * 0.01), p.x, p.y);
+        } else if (event.shiftKey) {
+            event.preventDefault();
+            const k = worldPerPixel();
+            // Browsers often convert Shift+wheel into deltaX already
+            const d = event.deltaX || event.deltaY;
+            view.x += d * k;
+            apply();
+        }
+    }, { passive: false });
+    svg.addEventListener("pointerdown", (event) => {
+        if (!options.isBackground(event.target)) return;
+        if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
+        if (!view) reset();
+        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (pointers.size === 1) {
+            panning = { id: event.pointerId, x: event.clientX, y: event.clientY, vx: view.x, vy: view.y, moved: false };
+        } else if (pointers.size === 2) {
+            panning = null;
+            const [a, b] = [...pointers.values()];
+            pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+        }
+    });
+    svg.addEventListener("pointermove", (event) => {
+        if (!pointers.has(event.pointerId)) return;
+        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (pinch && pointers.size === 2) {
+            const [a, b] = [...pointers.values()];
+            const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+            const p = toWorld((a.x + b.x) / 2, (a.y + b.y) / 2);
+            zoomAt(dist / pinch.dist, p.x, p.y);
+            pinch.dist = dist;
+        } else if (panning && panning.id === event.pointerId) {
+            const dx = event.clientX - panning.x;
+            const dy = event.clientY - panning.y;
+            if (!panning.moved && Math.hypot(dx, dy) < 3) return;
+            if (!panning.moved) {
+                panning.moved = true;
+                try { svg.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+            }
+            const k = worldPerPixel();
+            view.x = panning.vx - dx * k;
+            view.y = panning.vy - dy * k;
+            apply();
+        }
+    });
+    function end(event) {
+        pointers.delete(event.pointerId);
+        if (pointers.size < 2) pinch = null;
+        if (panning && panning.id === event.pointerId) panning = null;
+    }
+    svg.addEventListener("pointerup", end);
+    svg.addEventListener("pointercancel", end);
+    return { zoomBy, fit, reset };
 }
 
 function schematicBase() {
@@ -335,15 +335,15 @@ function renderSchematic() {
 
     // Add title
     const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    title.setAttribute('x', '10');
-    title.setAttribute('y', '30');
+    title.setAttribute('x', '0');
+    title.setAttribute('y', '0');
     title.setAttribute('fill', COLORS.title);
     title.setAttribute('font-size', FONT.titleSize);
     title.setAttribute('font-weight', FONT.titleWeight);
     title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
     svg.appendChild(title);
 
-//console.log(berths);
+    //console.log(berths);
 
     // Render berths
     berths.forEach(berth => {
@@ -361,11 +361,11 @@ function clearSchematicState() {
         if (!rect) return;
         rect.setAttribute('fill', COLORS.berthFill);
         rect.setAttribute('stroke', COLORS.berthStroke);
-group.classList.remove('occupied');
+        group.classList.remove('occupied');
 
-const headcodeElem = group.querySelector('.headcode');
-if (!headcodeElem) return;
-headcodeElem.textContent = '';
+        const headcodeElem = group.querySelector('.headcode');
+        if (!headcodeElem) return;
+        headcodeElem.textContent = '';
 
     });
     document.querySelectorAll('[id^="train-"]').forEach(marker => marker.remove());
@@ -392,7 +392,7 @@ function renderBerth(berth) {
 
     // Berth label
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-text.setAttribute('class', 'berth-label');
+    text.setAttribute('class', 'berth-label');
     text.setAttribute('x', berth.x + berth.width / 2);
     text.setAttribute('y', berth.y + berth.height / 2 - 2);
     text.setAttribute('text-anchor', FONT.anchorMiddle);
@@ -403,7 +403,7 @@ text.setAttribute('class', 'berth-label');
 
     // Headcode
     const headcode = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-headcode.setAttribute('class', 'headcode');
+    headcode.setAttribute('class', 'headcode');
     headcode.setAttribute('x', berth.x + berth.width / 2);
     headcode.setAttribute('y', berth.y + berth.height / 2 + 10);
     headcode.setAttribute('text-anchor', FONT.anchorMiddle);
@@ -420,19 +420,19 @@ headcode.setAttribute('class', 'headcode');
 
 function updateBerthOccupancy(berthId, occupied, trainId = null) {
 
-const berthElemID = `berth-${currentLayout.id}:${berthId}`;
+    const berthElemID = `berth-${currentLayout.id}:${berthId}`;
     const group = document.getElementById(berthElemID);
 
     if (!group) return;
 
-//console.log(berthElemID, occupied, trainId, group);
+    //console.log(berthElemID, occupied, trainId, group);
 
     const rect = group.querySelector('rect');
-const headcodeElem = group.querySelector('.headcode');
+    const headcodeElem = group.querySelector('.headcode');
 
     if (occupied) {
 
-group.classList.add('occupied');
+        group.classList.add('occupied');
 
         rect.setAttribute('fill', COLORS.occupiedFill);
         rect.setAttribute('stroke', COLORS.occupiedStroke);
@@ -441,19 +441,19 @@ group.classList.add('occupied');
         if (trainId) {
             trainPositions[trainId] = berthId;
             updateTrainMarker(trainId, berthId);
-headcodeElem.textContent = trainId.split(':')[1];
+            headcodeElem.textContent = trainId.split(':')[1];
         }
 
     } else {
 
-//console.log(berthElemID, occupied, trainId, group);
+        //console.log(berthElemID, occupied, trainId, group);
 
-group.classList.remove('occupied');
+        group.classList.remove('occupied');
 
         rect.setAttribute('fill', COLORS.berthFill);
         rect.setAttribute('stroke', COLORS.berthStroke);
 
-headcodeElem.textContent = '';
+        headcodeElem.textContent = '';
 
         // Remove train marker if present
         if (trainId && trainPositions[trainId] === berthId) {
@@ -462,13 +462,13 @@ headcodeElem.textContent = '';
         }
     }
 
-//console.log( trainPositions );
+    //console.log( trainPositions );
 
 }
 
 function renderSnapshot(snapshot) {
 
-clearSchematicState();
+    clearSchematicState();
 
     const trains = Array.isArray(snapshot.trains) ? snapshot.trains : [];
 
@@ -476,13 +476,13 @@ clearSchematicState();
         //const berthId = train.current_berth || train.to_berth || train.from_berth;
         const berthId = train.current_berth || train.to_berth;
 
-//console.log('renderSnapshot', train.current_berth, train.to_berth, train.from_berth);
+        //console.log('renderSnapshot', train.current_berth, train.to_berth, train.from_berth);
 
-//console.log(train.marker_id, train.train_id, train.td_area, train.headcode);
+        //console.log(train.marker_id, train.train_id, train.td_area, train.headcode);
 
         const trainId = train.marker_id || train.train_id || `${train.td_area || ''}:${train.headcode || ''}`;
 
-//console.log('trainId', trainId);
+        //console.log('trainId', trainId);
 
         if (berthId && trainId) {
             updateBerthOccupancy(berthId, true, trainId);
@@ -611,9 +611,9 @@ function startStatePolling() {
 
 function updateTrainMarker(trainId, berthId) {
 
-const berth = berths.find(b => b.id === currentLayout.id+':'+berthId);
+    const berth = berths.find(b => b.id === currentLayout.id + ':' + berthId);
 
-//console.log(trainId, berthId, berth, berths);
+    //console.log(trainId, berthId, berth, berths);
 
     if (!berth) return;
 
@@ -661,7 +661,7 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         // Handle text responses (like "pong")
         if (typeof event.data === 'string' && event.data === 'pong') {
-//console.log('string or pong');
+            //console.log('string or pong');
             return;
         }
 
