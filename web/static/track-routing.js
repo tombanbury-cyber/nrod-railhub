@@ -2,7 +2,7 @@
  * Deterministic track geometry for the visualisation layout editor.
  *
  * Routes are polylines whose segments are horizontal, vertical or 45 degrees only. Endpoints are
- * berth sockets (midpoint of a berth's left/right edge) or junctions on another track's route.
+ * berth sockets (midpoint of any berth edge) or junctions on another track's route.
  * The module has no DOM dependencies so it can be unit tested in Node (see tests/test_tracks.py).
  */
 (function (root, factory) {
@@ -31,14 +31,23 @@
   function socketPoint(berth, side) {
     const x = Number(berth.x);
     const y = Number(berth.y);
-    return {
-      x: side === "left" ? x : x + Number(berth.width),
-      y: y + Math.floor((Number(berth.height) + 1) / 2),
-    };
+    const width = Number(berth.width);
+    const height = Number(berth.height);
+    const middleX = x + Math.floor((width + 1) / 2);
+    const middleY = y + Math.floor((height + 1) / 2);
+    if (side === "left") return { x, y: middleY };
+    if (side === "right") return { x: x + width, y: middleY };
+    if (side === "top") return { x: middleX, y };
+    if (side === "bottom") return { x: middleX, y: y + height };
+    throw new RangeError(`Unknown berth socket side: ${side}`);
   }
 
   function socketDirection(side) {
-    return side === "left" ? -1 : 1;
+    if (side === "left") return { x: -1, y: 0 };
+    if (side === "right") return { x: 1, y: 0 };
+    if (side === "top") return { x: 0, y: -1 };
+    if (side === "bottom") return { x: 0, y: 1 };
+    throw new RangeError(`Unknown berth socket side: ${side}`);
   }
 
   function isOctilinear(points) {
@@ -139,12 +148,15 @@
   /** Loops [v1, v2, v3] that turn a route from exit direction `dir` back the opposite way. */
   function uTurnLoops(S, dir) {
     const loops = [];
+    const perpendicular = { x: -dir.y, y: dir.x };
     [-1, 1].forEach((sv) => {
       [10, 20].forEach((m) => {
         [0, 20, 40, 80].forEach((n) => {
-          const v1 = P(S.x + dir * m, S.y + sv * m);
-          const v2 = P(v1.x, v1.y + sv * n);
-          const v3 = P(v2.x - dir * m, v2.y + sv * m);
+          const v1 = P(S.x + dir.x * m + perpendicular.x * sv * m,
+            S.y + dir.y * m + perpendicular.y * sv * m);
+          const v2 = P(v1.x + perpendicular.x * sv * n, v1.y + perpendicular.y * sv * n);
+          const v3 = P(v2.x - dir.x * m + perpendicular.x * sv * m,
+            v2.y - dir.y * m + perpendicular.y * sv * m);
           if (v1.y >= 0 && v2.y >= 0 && v3.y >= 0) loops.push([v1, v2, v3]);
         });
       });
@@ -162,7 +174,9 @@
     endLoops.forEach((loop) => {
       connect(S, loop[2]).forEach((head) => paths.push([...head, loop[1], loop[0], E]));
     });
-    if (startDir && endDir && (E.x - S.x) * startDir < 0 && (E.x - S.x) * endDir > 0) {
+    if (startDir && endDir &&
+        ((E.x - S.x) * startDir.x + (E.y - S.y) * startDir.y) < 0 &&
+        ((E.x - S.x) * endDir.x + (E.y - S.y) * endDir.y) > 0) {
       startLoops.forEach((a) => endLoops.forEach((b) => {
         connect(a[2], b[2]).forEach((mid) => paths.push([S, a[0], a[1], ...mid, b[1], b[0], E]));
       }));
@@ -251,9 +265,11 @@
       cost += BEND_COST[bendAngle(points[i - 2], points[i - 1], points[i])] || 0;
     }
     cost += obstacleCost(points, ctx.rects) + trackCost(points, ctx.others);
-    if (ctx.start.dir && direction(points[0], points[1]).x === -ctx.start.dir) cost += THROUGH_BERTH_COST;
+    if (ctx.start.dir && direction(points[0], points[1]).x * ctx.start.dir.x +
+        direction(points[0], points[1]).y * ctx.start.dir.y < 0) cost += THROUGH_BERTH_COST;
     const n = points.length;
-    if (ctx.end.dir && direction(points[n - 2], points[n - 1]).x === ctx.end.dir) cost += THROUGH_BERTH_COST;
+    if (ctx.end.dir && direction(points[n - 2], points[n - 1]).x * ctx.end.dir.x +
+        direction(points[n - 2], points[n - 1]).y * ctx.end.dir.y > 0) cost += THROUGH_BERTH_COST;
     cost += axisCost(points[0], points[1], ctx.start.axis);
     cost += axisCost(points[points.length - 2], points[points.length - 1], ctx.end.axis);
     return cost;
@@ -268,17 +284,27 @@
    */
   function routeCandidates(start, end, options) {
     const opts = options || {};
-    const ctx = { start, end, rects: prepareObstacles(opts.obstacles), others: opts.otherRoutes || [] };
+    const asDirection = (dir) => !dir ? null : (typeof dir === "number" ? { x: dir, y: 0 } : dir);
+    const ctx = {
+      start: { ...start, dir: asDirection(start.dir) },
+      end: { ...end, dir: asDirection(end.dir) },
+      rects: prepareObstacles(opts.obstacles),
+      others: opts.otherRoutes || [],
+    };
     const seen = new Set();
     const ranked = [];
-    const stubs = start.dir || end.dir ? STUB_OPTIONS : [0];
+    const constrainCoordinates = start.x >= 0 && start.y >= 0 && end.x >= 0 && end.y >= 0;
+    const stubs = ctx.start.dir || ctx.end.dir ? STUB_OPTIONS : [0];
     const maxStub = Math.max(...stubs);
     stubs.forEach((stub) => {
-      const S = start.dir && stub ? P(start.x + start.dir * stub, start.y) : P(start.x, start.y);
-      const E = end.dir && stub ? P(end.x + end.dir * stub, end.y) : P(end.x, end.y);
-      middlePaths(S, E, stub ? start.dir : 0, stub ? end.dir : 0).forEach((middle) => {
+      const S = ctx.start.dir && stub
+        ? P(start.x + ctx.start.dir.x * stub, start.y + ctx.start.dir.y * stub) : P(start.x, start.y);
+      const E = ctx.end.dir && stub
+        ? P(end.x + ctx.end.dir.x * stub, end.y + ctx.end.dir.y * stub) : P(end.x, end.y);
+      middlePaths(S, E, stub ? ctx.start.dir : 0, stub ? ctx.end.dir : 0).forEach((middle) => {
         const points = normalizePoints([P(start.x, start.y), ...middle, P(end.x, end.y)]);
-        if (points.length < 2 || !isOctilinear(points)) return;
+        if (points.length < 2 || !isOctilinear(points) ||
+            (constrainCoordinates && points.some((point) => point.x < 0 || point.y < 0))) return;
         const key = points.map((p) => `${p.x},${p.y}`).join(";");
         if (seen.has(key)) return;
         seen.add(key);

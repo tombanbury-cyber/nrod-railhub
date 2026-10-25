@@ -263,13 +263,13 @@ INSERT OR IGNORE INTO train (id, headcode, description, toc) VALUES
 --     ('2026-02-14T10:01:00Z', 'td', 'T1', 'berth_exit', 'BRTH_1', '{}'),
 --     ('2026-02-14T10:01:01Z', 'td', 'T1', 'berth_enter', 'BRTH_2', '{}');
 
--- Track table: ordered octilinear routes between berth sockets (left/right edge midpoints) and/or junctions
+-- Track table: ordered octilinear routes between berth edge-midpoint sockets and/or junctions
 CREATE TABLE IF NOT EXISTS layout_track (
     id TEXT PRIMARY KEY,
     layout_id TEXT NOT NULL,
     name TEXT NOT NULL,
     start_berth_id TEXT,  -- start endpoint: berth socket (berth id + side) or junction
-    start_side TEXT,  -- left or right
+    start_side TEXT,  -- left, right, top, or bottom
     start_junction_id TEXT,
     end_berth_id TEXT,
     end_side TEXT,
