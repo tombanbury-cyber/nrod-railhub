@@ -452,3 +452,105 @@
         padding: 12px
       }
     }
+
+    body[data-mode] {
+      --fg: #d8d8d8;
+      --muted: #aaa;
+      --line: #444;
+      --accent: #4CAF50;
+      --danger: #f44336;
+      background: #363636;
+      color: #d8d8d8
+    }
+
+    body[data-mode] h1,
+    body[data-mode] h2,
+    body[data-mode] h3 {
+      color: #4CAF50
+    }
+
+    body[data-mode] section {
+      background: #2a2a2a;
+      box-shadow: none
+    }
+
+    body[data-mode] input,
+    body[data-mode] textarea,
+    body[data-mode] select {
+      background: #363636;
+      color: #d8d8d8;
+      border-color: #555
+    }
+
+    body[data-mode] button,
+    body[data-mode] .button {
+      padding: 8px 16px;
+      border-radius: 5px
+    }
+
+    body[data-mode] button:hover,
+    body[data-mode] .button:hover {
+      background: #45a049
+    }
+
+    body[data-mode] button:active,
+    body[data-mode] .button:active {
+      background: #3d8b40
+    }
+
+    body[data-mode] button.secondary,
+    body[data-mode] .button.secondary {
+      background: #333;
+      color: #eee;
+      border-color: #555;
+      border-radius: 4px
+    }
+
+    body[data-mode] .layout-canvas {
+      background: #b1b1b1;
+      border-color: #444
+    }
+
+    .layout-canvas #canvas-grid path {
+      stroke: #888
+    }
+
+    .layout-canvas .berth-shape,
+    .layout-canvas .platform-shape,
+    .layout-canvas .siding-shape {
+      fill: #4CAF50;
+      stroke: #2E7D32;
+      stroke-width: 1
+    }
+
+    .layout-canvas .signal-shape {
+      fill: #FF5722;
+      stroke: #D32F2F
+    }
+
+    .layout-canvas .signal-stem {
+      stroke: #D32F2F
+    }
+
+    .layout-canvas .platform-object-shape,
+    .layout-canvas .bridge-shape,
+    .layout-canvas .label-shape,
+    .layout-canvas .label-station,
+    .layout-canvas .label-note {
+      fill: #999;
+      stroke: #555
+    }
+
+    .layout-canvas .bridge-end {
+      stroke: #555
+    }
+
+    .layout-canvas .layout-element.selected rect,
+    .layout-canvas .layout-element.selected circle {
+      stroke: #F57C00
+    }
+
+    .layout-canvas .layout-element:focus rect,
+    .layout-canvas .layout-element:focus circle {
+      stroke: #FF5722
+    }
