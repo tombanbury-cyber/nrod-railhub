@@ -633,7 +633,7 @@ function updateTrainMarker(trainId, berthId) {
     marker.setAttribute('stroke-width', STROKE.markerWidth);
     marker.style.filter = MARKER_GLOW;
 
-    svg.appendChild(marker);
+    //svg.appendChild(marker);
 }
 
 function removeTrainMarker(trainId) {

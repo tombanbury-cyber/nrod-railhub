@@ -5,11 +5,11 @@ const isNew = body.dataset.mode === "new";
 const TABLES = {
   berth: {
     api: "/api/berths", status: "berth-status", body: "berth-rows", cols: 9,
-    fields: [["id","text"],["name","text"],["x","number"],["y","number"],["width","number"],["height","number"],["berth_type",["normal","platform","siding"]]],
+    fields: [["id", "text"], ["name", "text"], ["x", "number"], ["y", "number"], ["width", "number"], ["height", "number"], ["berth_type", ["normal", "platform", "siding"]]],
   },
   signal: {
     api: "/api/signals", status: "signal-status", body: "signal-rows", cols: 7,
-    fields: [["id","text"],["name","text"],["x","number"],["y","number"],["signal_type",["auto","controlled","shunt"]]],
+    fields: [["id", "text"], ["name", "text"], ["x", "number"], ["y", "number"], ["signal_type", ["auto", "controlled", "shunt"]]],
   },
 };
 const BERTH_LINKED_KINDS = ["level_crossing", "platform", "label"];
@@ -25,7 +25,7 @@ const CROSSING_ROTATIONS = [0, 45, 90];
 const BRIDGE_ROTATIONS = [0, 45, 90];
 const SIGNAL_ROTATIONS = [0, 45, 90, 135, 180, 225, 270, 315];
 const CROSSING_PAD = 4;
-const OBJECT_TABLE_FIELDS = [["id","text"],["name","text"],["x","number"],["y","number"],["width","number"],["height","number"]];
+const OBJECT_TABLE_FIELDS = [["id", "text"], ["name", "text"], ["x", "number"], ["y", "number"], ["width", "number"], ["height", "number"]];
 function objectTable(kind, extraFields) {
   return {
     api: OBJECT_API, status: `${kind}-status`, body: `${kind}-rows`, objectType: kind,
@@ -33,10 +33,10 @@ function objectTable(kind, extraFields) {
   };
 }
 Object.assign(TABLES, {
-  level_crossing: objectTable("level_crossing", [["berth_id","text"],["rotation",["0","45","90"]]]),
-  platform: objectTable("platform", [["berth_id","text"]]),
-  bridge: objectTable("bridge", [["rotation",["0","45","90"]]]),
-  label: objectTable("label", [["berth_id","text"]]),
+  level_crossing: objectTable("level_crossing", [["berth_id", "text"], ["rotation", ["0", "45", "90"]]]),
+  platform: objectTable("platform", [["berth_id", "text"]]),
+  bridge: objectTable("bridge", [["rotation", ["0", "45", "90"]]]),
+  label: objectTable("label", [["berth_id", "text"]]),
 });
 const tableState = Object.fromEntries(Object.keys(TABLES).map((kind) => [kind, { page: 1 }]));
 const editorSvg = document.getElementById("layout-canvas-svg");
@@ -47,24 +47,24 @@ try {
   if (savedSnapState === "true" || savedSnapState === "false") {
     snapToGridToggle.checked = savedSnapState === "true";
   }
-} catch {}
+} catch { }
 snapToGridToggle.addEventListener("change", () => {
   try {
     window.localStorage.setItem(SNAP_STORAGE_KEY, String(snapToGridToggle.checked));
-  } catch {}
+  } catch { }
 });
 const editorItems = [];
 let selectedElement = null;
 let dragOffset = null;
 let canvasSaving = false;
 const BASE_CANVAS_WIDTH = 1200;
-const BASE_CANVAS_HEIGHT = 700;
-const CANVAS_PADDING = 100;
+const BASE_CANVAS_HEIGHT = 550;
+const CANVAS_PADDING = 0;
 let CANVAS_WIDTH = BASE_CANVAS_WIDTH;
 let CANVAS_HEIGHT = BASE_CANVAS_HEIGHT;
 function setupPanZoom(svg, options) {
-  const MIN_SCALE = 0.1;
-  const MAX_SCALE = 8;
+  const MIN_SCALE = 0.2;
+  const MAX_SCALE = 6;
   const pointers = new Map();
   let view = null;
   let panning = null;
@@ -129,7 +129,8 @@ function setupPanZoom(svg, options) {
       const dx = event.deltaX || event.deltaY;
       view.x += dx * k;
       apply();
-    } else {
+    } if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
       const p = toWorld(event.clientX, event.clientY);
       zoomAt(Math.exp(-event.deltaY * 0.01), p.x, p.y);
     }
@@ -309,9 +310,11 @@ function snapGridSize() {
 }
 
 function nextElementIdentity(kind) {
-  const titles = { berth: "Berth", signal: "Signal", ...Object.fromEntries(
-    Object.entries(OBJECT_KINDS).map(([key, value]) => [key, value.title]),
-  ) };
+  const titles = {
+    berth: "Berth", signal: "Signal", ...Object.fromEntries(
+      Object.entries(OBJECT_KINDS).map(([key, value]) => [key, value.title]),
+    )
+  };
   let number = 1;
   let id;
   do {
@@ -656,11 +659,11 @@ function beginAddingElement(kind) {
   if (!layoutId || canvasSaving) return;
   const typeSelect = document.getElementById(`add-${kind}-type`);
   const chosen = typeSelect ? typeSelect.value : "";
-  const defaults = OBJECT_KINDS[kind] || { width: 60, height: 30 };
+  const defaults = OBJECT_KINDS[kind] || { width: 40, height: 30 };
   const identity = nextElementIdentity(kind);
   const item = {
     kind, ...identity, layout_id: layoutId,
-    x: 60, y: 60, width: defaults.width, height: defaults.height,
+    x: 60, y: 160, width: defaults.width, height: defaults.height,
     berth_type: kind === "berth" && chosen ? chosen : "normal",
     signal_type: kind === "signal" && chosen ? chosen : "auto",
     variant: kind in OBJECT_KINDS ? (chosen || OBJECT_KINDS[kind].variants[0]) : undefined,

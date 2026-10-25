@@ -196,12 +196,11 @@
     }
 
     .layout-canvas {
-      max-height: 60vh;
       overflow: auto;
       border: 1px solid #cbd5e1;
       border-radius: 8px;
       background: #fff;
-      max-height: 60vh;
+      max-height: 550px;
       overflow: auto;
       border: 1px solid #cbd5e1;
       border-radius: 8px;
@@ -215,7 +214,6 @@
       min-width: 720px;
       height: auto;
       touch-action: none;
-
     }
 
     .snap-controls {
