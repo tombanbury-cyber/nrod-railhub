@@ -611,8 +611,13 @@ SQL) by `app/visualisation/tracks.py`, and also in `sql/init_db.sql`.
 | id TEXT PK, layout_id TEXT, track_id | Host track |
 | x, y | Position on the host route |
 
-Limitations: the public display UI does not draw tracks yet (data is exposed via
-the API); berth geometry edited in tables is reconciled the next time the
+The public map (`/static/ui.html`) loads `GET /tracks/{layout_id}` with each layout, draws
+every saved route with `TrackRouting.smoothPath` in a layer beneath berths and objects (so
+endpoints meet berth sockets without hiding berth content), shows junctions as small nodes,
+ignores malformed routes, and includes routes in the fit bounds. Tracks are rebuilt on layout
+change (cleared on load failure) and are unaffected by state polling.
+
+Limitations: berth geometry edited in tables is reconciled the next time the
 editor loads; no live PostgreSQL test runs without a configured server.
 
 ### `train` table
