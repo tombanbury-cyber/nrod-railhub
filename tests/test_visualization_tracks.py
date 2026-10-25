@@ -75,6 +75,34 @@ def test_track_round_trip_and_endpoints(client):
 
 
 @pytest.mark.parametrize(
+    "side,start,end",
+    [
+        ("left", {"x": 0, "y": 115}, {"x": 200, "y": 115}),
+        ("right", {"x": 60, "y": 115}, {"x": 260, "y": 115}),
+        ("top", {"x": 30, "y": 100}, {"x": 230, "y": 100}),
+        ("bottom", {"x": 30, "y": 130}, {"x": 230, "y": 130}),
+    ],
+)
+def test_track_round_trip_and_exact_endpoint_validation_for_each_socket(client, side, start, end):
+    track = _track(
+        f"tl:{side}",
+        start={"berth_id": "tl:A", "side": side},
+        end={"berth_id": "tl:B", "side": side},
+        points=[start, end],
+    )
+    assert client.post("/api/tracks", json=track).status_code == 200
+    stored = {item["id"]: item for item in client.get("/api/layouts/tl/tracks").json()["items"]}
+    assert stored[track["id"]] == track
+
+    invalid = {
+        **track,
+        "id": f"tl:{side}:invalid",
+        "points": [{"x": start["x"] + 1, "y": start["y"]}, end],
+    }
+    assert client.post("/api/tracks", json=invalid).status_code == 422
+
+
+@pytest.mark.parametrize(
     "mutation, status",
     [
         ({"points": [{"x": 60, "y": 115}, {"x": 130, "y": 160}, {"x": 200, "y": 115}]}, 422),  # not 0/45/90
@@ -83,7 +111,7 @@ def test_track_round_trip_and_endpoints(client):
         ({"points": [{"x": 61, "y": 115}, {"x": 200, "y": 115}]}, 422),  # not at the socket
         ({"points": [{"x": 60, "y": -1}, {"x": 200, "y": 115}]}, 422),
         ({"start": {"berth_id": "tl:A"}}, 422),  # side missing
-        ({"start": {"berth_id": "tl:A", "side": "top"}}, 422),
+        ({"start": {"berth_id": "tl:A", "side": "diagonal"}}, 422),
         ({"start": {"berth_id": "tl:A", "side": "right", "junction_id": "x"}}, 422),
         ({"start": {"berth_id": "nope", "side": "right"}}, 404),
         ({"layout_id": "missing"}, 404),
@@ -208,6 +236,7 @@ def test_layout_editor_exposes_track_controls_and_layers():
     for token in ("/api/tracks", "/api/junctions", "berth-socket", "track-layer", "junction-layer",
                   "renderSockets", "createTrack", "addJunctionAt", "deleteTrackElement", "Escape"):
         assert token in js
+    assert 'const SOCKET_SIDES = ["left", "right", "top", "bottom"]' in js
     assert "innerHTML" not in js
     # Tracks are drawn before (beneath) berths and other elements; junctions after (above) them.
     assert "editorSvg.insertBefore(group, junctionLayer)" in js

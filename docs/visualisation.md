@@ -305,7 +305,9 @@ existing tables remain available for searching, bulk berth edits, and deletion.
 
 #### Tracks and junctions
 
-Each berth shows two sockets: the midpoints of its left and right edges. Click
+Each berth shows four sockets: the midpoint of each edge (left, right, top,
+and bottom). Existing tracks connected to the left and right sockets remain
+unchanged. Click
 **Add track** is not needed: drag from one socket to another (or click a socket,
 then a second socket) to create a track. Drop on an existing track, or use
 **Add junction** and click a track, to place a junction; sockets and junctions
@@ -599,7 +601,7 @@ SQL) by `app/visualisation/tracks.py`, and also in `sql/init_db.sql`.
 | `layout_track` column | Description |
 |--------|------|
 | id TEXT PK, layout_id TEXT, name | Stable identity and owning layout |
-| start_kind / start_ref / start_side | Endpoint: `berth` (+ `left`/`right` side) or `junction` |
+| start_kind / start_ref / start_side | Endpoint: `berth` (+ `left`, `right`, `top`, or `bottom` side) or `junction` |
 | end_kind / end_ref / end_side | Same for the end |
 | points | JSON array of ordered `{x, y}` route points (octilinear) |
 | z_index | Layering |

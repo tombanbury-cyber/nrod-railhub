@@ -1,7 +1,7 @@
 """Track and junction persistence helpers for the visualisation layout editor.
 
 A *track* is an ordered route (``points``) between two endpoints. Each endpoint is either a
-berth socket (``berth_id`` + ``side`` of ``left``/``right``, at the midpoint of that berth edge) or
+berth socket (``berth_id`` + ``side`` of a berth edge, at its midpoint) or
 a *junction* (a node placed on another track's route). Routes may only use horizontal, vertical and
 45-degree segments. Geometry is generated client-side (``web/static/track-routing.js``); the
 server validates it so stored routes always satisfy the same constraints.
@@ -53,7 +53,7 @@ class Point(BaseModel):
 class TrackEndpoint(BaseModel):
     """Either a berth socket (``berth_id`` + ``side``) or a ``junction_id``."""
     berth_id: Optional[constr(strip_whitespace=True, min_length=1)] = None
-    side: Optional[Literal["left", "right"]] = None
+    side: Optional[Literal["left", "right", "top", "bottom"]] = None
     junction_id: Optional[constr(strip_whitespace=True, min_length=1)] = None
 
 
@@ -88,9 +88,18 @@ def ensure_tables(conn: Any) -> None:
 # ---------------------------------------------------------------------------------------------
 
 def socket_point(berth: Any, side: str) -> tuple[int, int]:
-    """Midpoint of a berth's left or right edge (matches ``socketPoint`` in track-routing.js)."""
+    """Midpoint of a berth edge (matches ``socketPoint`` in track-routing.js)."""
     x, y, w, h = int(berth["x"]), int(berth["y"]), int(berth["width"]), int(berth["height"])
-    return (x if side == "left" else x + w, y + (h + 1) // 2)
+    middle_x, middle_y = x + (w + 1) // 2, y + (h + 1) // 2
+    if side == "left":
+        return x, middle_y
+    if side == "right":
+        return x + w, middle_y
+    if side == "top":
+        return middle_x, y
+    if side == "bottom":
+        return middle_x, y + h
+    raise ValueError(f"Unknown berth socket side: {side}")
 
 
 def _sign(value: int) -> int:

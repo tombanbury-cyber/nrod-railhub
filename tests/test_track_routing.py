@@ -31,12 +31,75 @@ def run_js(code: str):
     return json.loads(result.stdout)
 
 
-def test_sockets_are_midpoints_of_left_and_right_edges():
+def test_sockets_are_midpoints_of_all_four_edges():
     data = run_js("""
-        out([T.socketPoint(berth("a", 10, 20, 60, 30), "left"), T.socketPoint(berth("a", 10, 20, 60, 30), "right"),
-             T.socketPoint(berth("o", 0, 0, 61, 31), "right")]);
+        const b = berth("a", 10, 20, 60, 30);
+        const odd = berth("o", 0, 0, 61, 31);
+        out(["left", "right", "top", "bottom"].map((side) => T.socketPoint(b, side))
+            .concat(["left", "right", "top", "bottom"].map((side) => T.socketPoint(odd, side))));
     """)
-    assert data == [{"x": 10, "y": 35}, {"x": 70, "y": 35}, {"x": 61, "y": 16}]
+    assert data == [
+        {"x": 10, "y": 35}, {"x": 70, "y": 35}, {"x": 40, "y": 20}, {"x": 40, "y": 50},
+        {"x": 0, "y": 16}, {"x": 61, "y": 16}, {"x": 31, "y": 0}, {"x": 31, "y": 31},
+    ]
+
+
+def test_socket_coordinates_match_server_for_all_four_sides():
+    berth_data = {"x": 10, "y": 20, "width": 61, "height": 31}
+    sides = ["left", "right", "top", "bottom"]
+    client_points = run_js("""
+        const b = berth("odd", 10, 20, 61, 31);
+        out(["left", "right", "top", "bottom"].map((side) => T.socketPoint(b, side)));
+    """)
+    assert client_points == [
+        {"x": x, "y": y} for x, y in (track_store.socket_point(berth_data, side) for side in sides)
+    ]
+
+
+def test_routes_resolve_top_and_bottom_sockets():
+    data = run_js("""
+        const a = berth("a", 20, 100), b = berth("b", 200, 100);
+        const state = { berths: [a, b], tracks: [], junctions: [], obstacles: [a, b] };
+        const results = ["top", "bottom"].map((side) => {
+          const start = { berth_id: "a", side }, end = { berth_id: "b", side };
+          const points = T.routeBetween(state, start, end, 0, null);
+          return {
+            points,
+            start: T.socketPoint(a, side),
+            end: T.socketPoint(b, side),
+            valid: T.isOctilinear(points),
+          };
+        });
+        out(results);
+    """)
+    assert len(data) == 2
+    assert all(route["valid"] for route in data)
+    assert all(route["points"][0] == route["start"] and route["points"][-1] == route["end"] for route in data)
+
+
+def test_top_and_bottom_tracks_reconcile_when_berths_move():
+    data = run_js("""
+        const a = berth("a", 20, 100), b = berth("b", 200, 100);
+        const track = { id: "t", start: { berth_id: "a", side: "top" },
+                        end: { berth_id: "b", side: "bottom" }, points: [] };
+        const state = { berths: [a, b], tracks: [track], junctions: [], obstacles: [a, b] };
+        track.points = T.routeBetween(state, track.start, track.end, 0, null);
+        const initial = T.reconcile(state);
+        b.x += 20;
+        state.obstacles = [a, b];
+        const moved = T.reconcile(state);
+        const stable = T.reconcile(state);
+        out({
+          initial: [...initial.tracks], moved: [...moved.tracks], stable: [...stable.tracks],
+          end: track.points[track.points.length - 1], expected: T.socketPoint(b, "bottom"),
+          octilinear: T.isOctilinear(track.points),
+        });
+    """)
+    assert data["initial"] == []
+    assert data["moved"] == ["t"]
+    assert data["stable"] == []
+    assert data["end"] == data["expected"]
+    assert data["octilinear"]
 
 
 def test_aligned_berths_get_a_straight_route():

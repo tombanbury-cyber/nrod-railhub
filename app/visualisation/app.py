@@ -612,7 +612,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
       </span>
       <span class="hint">Blue: normal berth · green: platform · amber: siding · red: signal · red line: level crossing · brown: bridge · green outline: platform · labels: station (bold), line (italic), note (boxed), text (plain)</span>
     </div>
-    <p class="hint" id="track-hint">Tracks: each berth has a connection socket at the middle of its left and right edges. Drag from one socket to another (or focus a socket, press Enter, then Enter on a second socket) to draw a track; routes use horizontal, vertical and 45&deg; segments and stay attached when berths move. Select a track to rename, re-route, add a junction or delete it (Delete key); double-click a track to add a junction at that point, then drag from the junction to a socket to join another track. Escape cancels drawing.</p>
+    <p class="hint" id="track-hint">Tracks: each berth has a connection socket at the middle of each edge. Drag from one socket to another (or focus a socket, press Enter, then Enter on a second socket) to draw a track; routes use horizontal, vertical and 45&deg; segments and stay attached when berths move. Select a track to rename, re-route, add a junction or delete it (Delete key); double-click a track to add a junction at that point, then drag from the junction to a socket to join another track. Escape cancels drawing.</p>
     <div id="canvas-status" class="status-message" role="status" aria-live="polite"></div>
     <div class="layout-canvas noselect">
       <svg id="layout-canvas-svg" viewBox="0 0 1200 700" role="group" aria-label="Interactive layout canvas">
