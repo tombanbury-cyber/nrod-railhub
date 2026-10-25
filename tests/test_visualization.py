@@ -446,7 +446,7 @@ def test_admin_page_lists_layouts(monkeypatch):
         assert list_js.status_code == 200
         assert "deleteLayout" in list_js.text
         assert "function openImportDialog" in client.get("/static/admin-common.js").text
-        assert ":root{--fg" in client.get("/static/admin.css").text
+        assert ":root{--fg" in "".join(client.get("/static/admin.css").text.split())
         # Editors moved off the landing page
         assert "Berth editor" not in page
         assert "Signal editor" not in page
@@ -492,7 +492,9 @@ def test_admin_layout_pages(monkeypatch):
         assert '<option value="station">station</option>' in edit.text
         assert 'id="snap-to-grid"' in edit.text
         assert 'id="snap-grid-size"' in edit.text
-        assert '<option value="20" selected>20</option>' in edit.text
+        for grid_size in ("5", "10", "20", "25", "50"):
+            assert f'<option value="{grid_size}"' in edit.text
+        assert '<option value="5" selected>5</option>' in edit.text
         assert '<script defer src="/static/admin-common.js"></script>' in edit.text
         assert '<script defer src="/static/admin-layout.js"></script>' in edit.text
         assert '<link rel="stylesheet" href="/static/admin.css" />' in edit.text
@@ -1111,9 +1113,18 @@ def test_layout_editor_js_supports_new_object_kinds(monkeypatch):
                   "renderBridge", "renderLabel", "renderPlatform", "crossingGeometry", "rotation", "setAddControlsDisabled", "pointerdown"):
         assert token in js
     assert "innerHTML" not in js
-    css = client.get("/static/admin.css").text
+    css = "".join(client.get("/static/admin.css").text.split())
     assert ".bridge-shape" in css and ".label-station" in css
     assert ".crossing-line" in css and ".platform-object-shape" in css
+    editor_css = (Path(app_module.STATIC_PATH) / "admin.css").read_text(encoding="utf-8")
+    display_css = (Path(app_module.STATIC_PATH) / "ui.css").read_text(encoding="utf-8")
+    display_js = (Path(app_module.STATIC_PATH) / "ui.js").read_text(encoding="utf-8")
+    assert "body[data-mode]" in editor_css
+    assert "background: #363636;" in editor_css and "background: #2a2a2a;" in editor_css
+    assert ".layout-canvas .berth-shape" in editor_css
+    assert "fill: #4CAF50;" in editor_css and "stroke: #2E7D32;" in editor_css
+    assert "#363636" in display_css and "#2a2a2a" in display_css
+    assert "berthFill: '#4CAF50'" in display_js and "berthStroke: '#2E7D32'" in display_js
 
 
 def test_text_label_foot_crossing_and_berth_links_persist(monkeypatch):
@@ -1296,7 +1307,7 @@ def test_layout_editor_js_layering_rotation_wheel_and_label_hit_testing():
 
     client = TestClient(app_module.app)
     js = client.get("/static/admin-layout.js").text
-    css = client.get("/static/admin.css").text
+    css = "".join(client.get("/static/admin.css").text.split())
     for token in ("Send to back", "Bring to front", "z_index", "SIGNAL_ROTATIONS", "BRIDGE_ROTATIONS", "sortedByLayer"):
         assert token in js
     assert "[0, 45, 90, 135, 180, 225, 270, 315]" in js
