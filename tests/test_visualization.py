@@ -1320,3 +1320,22 @@ def test_layout_editor_js_layering_rotation_wheel_and_label_hit_testing():
     wheel = js.split('svg.addEventListener("wheel"')[1].split("}, { passive: false })")[0]
     assert "zoomAt(" in wheel and "toWorld(event.clientX, event.clientY)" in wheel
     assert "ctrlKey || event.metaKey) {" not in wheel
+
+
+def test_public_map_loads_and_renders_tracks_beneath_berths():
+    import app.visualisation.app as app_module
+
+    client = TestClient(app_module.app)
+    page = client.get("/static/ui.html").text
+    assert page.index("track-routing.js") < page.index("ui.js")
+    script = client.get("/static/ui.js").text
+    assert "/tracks/" in script
+    assert "loadTracks(layoutId, token)" in script
+    assert "TrackRouting.smoothPath" in script
+    assert "token === layoutLoadToken) { tracks = []; junctions = []; }" in script
+    render = script[script.index("function renderSchematic"):script.index("function clearSchematicState")]
+    assert render.index("renderTracks(svg)") < render.index("renderBerth(berth)")
+    bounds = script[script.index("function schematicBounds"):script.index("const schematicView")]
+    assert "tracks" in bounds and "junctions" in bounds
+    objects = script[script.index("function renderLayoutObjects"):script.index("async function refreshObjects")]
+    assert "track-layer" not in objects

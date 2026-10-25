@@ -5,6 +5,8 @@ const STATE_REFRESH_MS = 5000;
 
 // SVG presentation constants
 const COLORS = {
+    track: '#6b7280',
+    junctionStroke: '#e5e7eb',
     berthFill: '#4CAF50',
     berthStroke: '#2E7D32',
     occupiedFill: '#FFC107',
@@ -48,6 +50,8 @@ const MARKER_GLOW = 'drop-shadow(0 0 2px #FF5722)';
 let ws = null;
 let statePollTimer = null;
 let berths = [];
+let tracks = [];
+let junctions = [];
 let layouts = [];
 let currentLayout = null;
 let layoutLoadToken = 0;
@@ -140,6 +144,8 @@ async function selectLayout(layoutId) {
     if (!ok || token !== layoutLoadToken) return;
     await loadBerths(layoutId, token);
     if (token !== layoutLoadToken) return;
+    await loadTracks(layoutId, token);
+    if (token !== layoutLoadToken) return;
     renderSchematic();
     resetSchematicView();
     await refreshState();
@@ -171,6 +177,50 @@ async function loadBerths(layoutId, token) {
         console.error('Failed to load berths:', error);
         if (token === layoutLoadToken) berths = [];
     }
+}
+
+async function loadTracks(layoutId, token) {
+    try {
+        const response = await fetch(`${API_BASE}/tracks/${encodeURIComponent(layoutId)}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (token !== layoutLoadToken) return;
+        tracks = Array.isArray(data && data.tracks) ? data.tracks : [];
+        junctions = Array.isArray(data && data.junctions) ? data.junctions : [];
+    } catch (error) {
+        console.error('Failed to load tracks:', error);
+        if (token === layoutLoadToken) { tracks = []; junctions = []; }
+    }
+}
+
+function validRoutePoints(points) {
+    if (!Array.isArray(points)) return [];
+    return points
+        .map(p => ({ x: Number(p && p.x), y: Number(p && p.y) }))
+        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+}
+
+function renderTracks(svg) {
+    const layer = svgEl('g', { id: 'track-layer', class: 'track-layer', 'pointer-events': 'none' });
+    tracks.forEach(track => {
+        const points = validRoutePoints(track && track.points);
+        if (points.length < 2) return;
+        const d = window.TrackRouting && window.TrackRouting.smoothPath
+            ? window.TrackRouting.smoothPath(points)
+            : 'M ' + points.map(p => `${p.x} ${p.y}`).join(' L ');
+        layer.appendChild(svgEl('path', {
+            class: 'track-line', d, fill: 'none', stroke: COLORS.track, 'stroke-width': 3,
+            'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+        }));
+    });
+    junctions.forEach(junction => {
+        const x = Number(junction && junction.x), y = Number(junction && junction.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        layer.appendChild(svgEl('circle', {
+            class: 'junction-node', cx: x, cy: y, r: 4, fill: COLORS.track, stroke: COLORS.junctionStroke, 'stroke-width': 1.5,
+        }));
+    });
+    svg.appendChild(layer);
 }
 
 function setupPanZoom(svg, options) {
@@ -299,9 +349,13 @@ function schematicBase() {
 }
 
 function schematicBounds() {
-    if (!berths.length) return { x: 0, y: 0, w: schematicBase().w, h: schematicBase().h };
-    const xs = berths.flatMap(b => [Number(b.x), Number(b.x) + Number(b.width)]);
-    const ys = berths.flatMap(b => [Number(b.y), Number(b.y) + Number(b.height)]);
+    const trackPts = [
+        ...tracks.flatMap(t => validRoutePoints(t && t.points)),
+        ...validRoutePoints(junctions),
+    ];
+    if (!berths.length && !trackPts.length) return { x: 0, y: 0, w: schematicBase().w, h: schematicBase().h };
+    const xs = [...berths.flatMap(b => [Number(b.x), Number(b.x) + Number(b.width)]), ...trackPts.map(p => p.x)];
+    const ys = [...berths.flatMap(b => [Number(b.y), Number(b.y) + Number(b.height)]), ...trackPts.map(p => p.y)];
     const x = Math.min(0, ...xs), y = Math.min(0, ...ys);
     return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
 }
@@ -343,7 +397,8 @@ function renderSchematic() {
     title.textContent = currentLayout ? currentLayout.name : 'No layout selected';
     svg.appendChild(title);
 
-    //console.log(berths);
+    // Tracks sit beneath berths and objects
+    renderTracks(svg);
 
     // Render berths
     berths.forEach(berth => {
