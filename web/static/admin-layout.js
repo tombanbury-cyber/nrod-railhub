@@ -54,6 +54,15 @@ snapToGridToggle.addEventListener("change", () => {
   } catch {}
 });
 const editorItems = [];
+const trackItems = [];
+const junctionItems = [];
+const TRACK_API = "/api/tracks";
+const JUNCTION_API = "/api/junctions";
+const SOCKET_SIDES = ["left", "right"];
+const SOCKET_SNAP_RADIUS = 14;
+const Routing = window.TrackRouting;
+let pendingConnection = null;
+let connectionDrag = null;
 let selectedElement = null;
 let dragOffset = null;
 let canvasSaving = false;
@@ -224,9 +233,17 @@ function elementApi(item) {
   return item.kind in OBJECT_KINDS ? OBJECT_API : TABLES[item.kind].api;
 }
 
+let trackControlsLocked = isNew;
 function setAddControlsDisabled(disabled) {
   document.querySelectorAll(".add-control button, .add-control select")
     .forEach((control) => { control.disabled = disabled; });
+  trackControlsLocked = disabled;
+  updateTrackControls();
+}
+
+function updateTrackControls() {
+  const button = document.getElementById("add-junction");
+  if (button) button.disabled = trackControlsLocked || !selectedElement || selectedElement.kind !== "track";
 }
 
 function updateCanvasExtent() {
@@ -237,6 +254,10 @@ function updateCanvasExtent() {
     CANVAS_WIDTH = Math.max(CANVAS_WIDTH, Number(item.x) + width + CANVAS_PADDING);
     CANVAS_HEIGHT = Math.max(CANVAS_HEIGHT, Number(item.y) + height + CANVAS_PADDING);
   });
+  trackItems.forEach((track) => track.points.forEach((p) => {
+    CANVAS_WIDTH = Math.max(CANVAS_WIDTH, p.x + CANVAS_PADDING);
+    CANVAS_HEIGHT = Math.max(CANVAS_HEIGHT, p.y + CANVAS_PADDING);
+  }));
   const grid = editorSvg.querySelector("#canvas-grid-bg");
   if (grid) {
     grid.setAttribute("width", CANVAS_WIDTH);
@@ -246,7 +267,7 @@ function updateCanvasExtent() {
 const canvasView = setupPanZoom(editorSvg, {
   getBase: () => ({ w: BASE_CANVAS_WIDTH, h: BASE_CANVAS_HEIGHT }),
   getBounds: () => ({ x: 0, y: 0, w: CANVAS_WIDTH, h: CANVAS_HEIGHT }),
-  isBackground: (target) => !target.closest(".layout-element"),
+  isBackground: (target) => !target.closest(".layout-element, .track-element, .junction-element"),
   onChange: (scale) => {
     const label = document.getElementById("canvas-zoom-level");
     if (label) label.textContent = `${Math.round(scale * 100)}%`;
@@ -257,7 +278,20 @@ document.getElementById("canvas-zoom-out").addEventListener("click", () => canva
 document.getElementById("canvas-zoom-fit").addEventListener("click", () => { updateCanvasExtent(); canvasView.fit(); });
 document.getElementById("canvas-zoom-reset").addEventListener("click", () => canvasView.reset());
 
+function endpointPayload(endpoint) {
+  return endpoint.junction_id ? { junction_id: endpoint.junction_id } : { berth_id: endpoint.berth_id, side: endpoint.side };
+}
+
 function editorPayload(item) {
+  if (item.kind === "track") {
+    return {
+      id: item.id, layout_id: layoutId, name: item.name, start: endpointPayload(item.start),
+      end: endpointPayload(item.end), points: item.points.map((p) => ({ x: p.x, y: p.y })),
+    };
+  }
+  if (item.kind === "junction") {
+    return { id: item.id, layout_id: layoutId, track_id: item.track_id, name: item.name, x: item.x, y: item.y };
+  }
   const payload = {
     id: item.id, layout_id: layoutId, name: item.name, x: item.x, y: item.y,
     z_index: Number(item.z_index) || 0,
@@ -284,7 +318,7 @@ function editorItemIsDirty(item) {
 }
 
 function editorHasChanges() {
-  return editorItems.some(editorItemIsDirty);
+  return editorItems.some(editorItemIsDirty) || trackItems.some(editorItemIsDirty) || junctionItems.some(editorItemIsDirty);
 }
 
 function updateEditorStatus(message, isError) {
@@ -396,7 +430,464 @@ function changeLayer(item, toFront) {
   updateEditorStatus();
 }
 
+const trackLayer = svgNode("g", { id: "track-layer" });
+const junctionLayer = svgNode("g", { id: "junction-layer" });
+const draftLayer = svgNode("g", { id: "draft-layer", "pointer-events": "none" });
+editorSvg.append(trackLayer, junctionLayer, draftLayer);
+
+function routingState() {
+  return {
+    berths: editorItems.filter((item) => item.kind === "berth"),
+    tracks: trackItems,
+    junctions: junctionItems,
+    obstacles: editorItems.map((item) => ({ x: Number(item.x), y: Number(item.y), ...itemSize(item) })),
+  };
+}
+
+function syncTracks() {
+  return Routing.reconcile(routingState());
+}
+
+function nextTrackIdentity(kind) {
+  const list = kind === "track" ? trackItems : junctionItems;
+  let number = 1;
+  let id;
+  do {
+    id = `${layoutId}_${kind}_${number}`;
+    number += 1;
+  } while ([...editorItems, ...trackItems, ...junctionItems].some((item) => item.id === id));
+  return { id, name: `${kind === "track" ? "Track" : "Junction"} ${list.length + 1}` };
+}
+
+function retargetBerthRefs(oldId, newId) {
+  trackItems.forEach((track) => [track.start, track.end].forEach((endpoint) => {
+    if (endpoint.berth_id === oldId) endpoint.berth_id = newId;
+  }));
+}
+
+function berthName(id) {
+  const berth = editorItems.find((item) => item.kind === "berth" && item.id === id);
+  return berth ? (berth.name || berth.id) : id;
+}
+
+function endpointLabel(endpoint) {
+  if (endpoint.junction_id) {
+    const junction = junctionItems.find((item) => item.id === endpoint.junction_id);
+    return `junction ${junction ? (junction.name || junction.id) : endpoint.junction_id}`;
+  }
+  return `berth ${berthName(endpoint.berth_id)} (${endpoint.side})`;
+}
+
+function connectionKey(source) {
+  return source.kind === "junction" ? `junction:${source.item.id}` : `berth:${source.item.id}:${source.side}`;
+}
+
+function connectionPoint(source) {
+  return source.kind === "junction" ? { x: source.item.x, y: source.item.y } : Routing.socketPoint(source.item, source.side);
+}
+
+function connectionRef(source) {
+  return source.kind === "junction"
+    ? { junction_id: source.item.id }
+    : { berth_id: source.item.id, side: source.side };
+}
+
+function connectionLabel(source) {
+  return source.kind === "junction"
+    ? `junction ${source.item.name || source.item.id}`
+    : `${source.side} socket of berth ${source.item.name || source.item.id}`;
+}
+
+function connectionTargetAt(point) {
+  let best = null;
+  const consider = (source) => {
+    const p = connectionPoint(source);
+    const distance = Math.hypot(p.x - point.x, p.y - point.y);
+    if (distance <= SOCKET_SNAP_RADIUS && (!best || distance < best.distance)) best = { source, distance };
+  };
+  editorItems.filter((item) => item.kind === "berth").forEach((item) => {
+    SOCKET_SIDES.forEach((side) => consider({ kind: "berth", item, side }));
+  });
+  junctionItems.forEach((item) => consider({ kind: "junction", item }));
+  return best ? best.source : null;
+}
+
+function drawDraft(point) {
+  draftLayer.replaceChildren();
+  if (!pendingConnection) return;
+  const from = connectionPoint(pendingConnection);
+  const target = point ? connectionTargetAt(point) : null;
+  const to = target && connectionKey(target) !== connectionKey(pendingConnection) ? connectionPoint(target) : point;
+  if (!to) return;
+  draftLayer.appendChild(svgNode("path", { class: "track-draft", d: `M ${from.x} ${from.y} L ${to.x} ${to.y}` }));
+}
+
+function updatePendingHighlight() {
+  editorSvg.querySelectorAll("[data-connect-key]").forEach((node) => {
+    const active = Boolean(pendingConnection) && node.dataset.connectKey === connectionKey(pendingConnection);
+    node.classList.toggle("pending", active);
+    node.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function cancelConnection(message) {
+  pendingConnection = null;
+  connectionDrag = null;
+  draftLayer.replaceChildren();
+  updatePendingHighlight();
+  if (message) updateEditorStatus(message);
+}
+
+function activateConnection(source) {
+  if (canvasSaving) return;
+  if (!pendingConnection) {
+    pendingConnection = source;
+    updatePendingHighlight();
+    updateEditorStatus(`Track start set at ${connectionLabel(source)}. Select another socket or junction to finish; Escape cancels.`);
+    return;
+  }
+  if (connectionKey(pendingConnection) === connectionKey(source)) {
+    cancelConnection("Track drawing cancelled.");
+    return;
+  }
+  const from = pendingConnection;
+  cancelConnection();
+  createTrack(from, source);
+}
+
+function beginConnectionDrag(source, event) {
+  if (canvasSaving || event.button !== 0) return;
+  event.stopPropagation();
+  event.preventDefault();
+  connectionDrag = { source, x: event.clientX, y: event.clientY, moved: false };
+}
+
+editorSvg.addEventListener("pointermove", (event) => {
+  if (connectionDrag && !connectionDrag.moved && Math.hypot(event.clientX - connectionDrag.x, event.clientY - connectionDrag.y) > 4) {
+    connectionDrag.moved = true;
+    pendingConnection = connectionDrag.source;
+    updatePendingHighlight();
+  }
+  if (pendingConnection) drawDraft(editorPoint(event));
+});
+window.addEventListener("pointerup", (event) => {
+  if (!connectionDrag) return;
+  const drag = connectionDrag;
+  connectionDrag = null;
+  if (!drag.moved) {
+    activateConnection(drag.source);
+    return;
+  }
+  const target = connectionTargetAt(editorPoint(event));
+  cancelConnection();
+  if (target && connectionKey(target) !== connectionKey(drag.source)) createTrack(drag.source, target);
+  else updateEditorStatus("Track drawing cancelled: drop on another socket or junction.");
+});
+window.addEventListener("pointercancel", () => { if (connectionDrag) cancelConnection(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && pendingConnection) cancelConnection("Track drawing cancelled.");
+});
+
+function createTrack(from, to) {
+  const start = connectionRef(from);
+  const end = connectionRef(to);
+  const points = Routing.routeBetween(routingState(), start, end, 0, null);
+  if (!points) {
+    updateEditorStatus("Could not route a track between those connection points.", true);
+    return;
+  }
+  const track = {
+    kind: "track", ...nextTrackIdentity("track"), layout_id: layoutId, start, end, points,
+    _isNew: true, _alt: 0,
+  };
+  trackItems.push(track);
+  syncTracks();
+  renderCanvas();
+  selectEditorElement(track);
+  updateEditorStatus(`Track added from ${endpointLabel(start)} to ${endpointLabel(end)}. Save canvas changes to keep it.`);
+}
+
+function rerouteTrack(track, alt) {
+  const points = Routing.routeBetween(routingState(), track.start, track.end, alt, track.id);
+  if (!points) return;
+  track._alt = alt;
+  track.points = points;
+  syncTracks();
+  renderCanvas();
+  renderInspector();
+  updateEditorStatus();
+}
+
+function addJunctionAt(track, point) {
+  if (canvasSaving) return;
+  const hit = Routing.nearestPointOnRoute(track.points, point);
+  const junction = {
+    kind: "junction", ...nextTrackIdentity("junction"), layout_id: layoutId, track_id: track.id,
+    x: hit.x, y: hit.y, _isNew: true,
+  };
+  junctionItems.push(junction);
+  renderCanvas();
+  selectEditorElement(junction);
+  updateEditorStatus(`Junction added to ${track.name || track.id}. Drag from it to a berth socket to connect another track.`);
+}
+
+function attachedTrackIds(junction) {
+  return trackItems
+    .filter((track) => track.start.junction_id === junction.id || track.end.junction_id === junction.id)
+    .map((track) => track.id);
+}
+
+async function deleteTrackElement(item) {
+  if (canvasSaving) return;
+  const isJunction = item.kind === "junction";
+  const removal = Routing.cascadeDelete(trackItems, junctionItems, isJunction ? attachedTrackIds(item) : [item.id]);
+  if (isJunction) removal.junctions.add(item.id);
+  const extraTracks = removal.tracks.size - (isJunction ? 0 : 1);
+  const extraJunctions = removal.junctions.size - (isJunction ? 1 : 0);
+  const detail = extraTracks || extraJunctions
+    ? ` This also removes ${extraTracks} connected track(s) and ${extraJunctions} junction(s).` : "";
+  if (!confirm(`Delete ${item.kind} ${item.name || item.id}?${detail}`)) return;
+  try {
+    if (!item._isNew) {
+      await submitJson(`${isJunction ? JUNCTION_API : TRACK_API}/${encodeURIComponent(item._originalId || item.id)}`, "DELETE");
+    }
+    for (let i = trackItems.length - 1; i >= 0; i -= 1) if (removal.tracks.has(trackItems[i].id)) trackItems.splice(i, 1);
+    for (let i = junctionItems.length - 1; i >= 0; i -= 1) if (removal.junctions.has(junctionItems[i].id)) junctionItems.splice(i, 1);
+    selectedElement = null;
+    renderCanvas();
+    renderInspector();
+    updateEditorStatus(`${isJunction ? "Junction" : "Track"} deleted.`);
+  } catch (error) {
+    updateEditorStatus(`Failed to delete ${item.kind}: ${error.message}`, true);
+  }
+}
+
+function trackSelectionKey(item) {
+  return item && (item.kind === "track" || item.kind === "junction") ? `${item.kind}:${item.id}` : "";
+}
+
+function updateTrackSelection() {
+  const selectedKey = trackSelectionKey(selectedElement);
+  editorSvg.querySelectorAll("[data-track-focus]").forEach((node) => {
+    const selected = node.dataset.trackFocus === selectedKey;
+    node.classList.toggle("selected", selected);
+    node.setAttribute("aria-pressed", String(selected));
+  });
+  updateTrackControls();
+}
+
+function trackElementKeydown(item) {
+  return (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectEditorElement(item);
+    } else if ((event.key === "Delete" || event.key === "Backspace") && !canvasSaving) {
+      event.preventDefault();
+      deleteTrackElement(item);
+    }
+  };
+}
+
+function renderTracks() {
+  const focusKey = document.activeElement?.dataset?.trackFocus || null;
+  trackLayer.replaceChildren();
+  junctionLayer.replaceChildren();
+  trackItems.forEach((track) => {
+    const group = svgNode("g", {
+      class: "track-element", tabindex: 0, role: "button", "data-track-focus": trackSelectionKey(track),
+      "aria-label": `track: ${track.name || track.id}, from ${endpointLabel(track.start)} to ${endpointLabel(track.end)}`,
+    });
+    const d = Routing.smoothPath(track.points);
+    group.appendChild(svgNode("path", { class: "track-hit", d }));
+    group.appendChild(svgNode("path", { class: "track-line", d }));
+    group.addEventListener("click", () => selectEditorElement(track));
+    group.addEventListener("dblclick", (event) => addJunctionAt(track, editorPoint(event)));
+    group.addEventListener("keydown", trackElementKeydown(track));
+    trackLayer.appendChild(group);
+  });
+  junctionItems.forEach((junction) => {
+    const source = { kind: "junction", item: junction };
+    const group = svgNode("g", {
+      class: "junction-element", tabindex: 0, role: "button", transform: `translate(${junction.x} ${junction.y})`,
+      "data-track-focus": trackSelectionKey(junction), "data-connect-key": connectionKey(source),
+      "aria-label": `junction: ${junction.name || junction.id}, x ${junction.x}, y ${junction.y}`,
+    });
+    group.appendChild(svgNode("circle", { class: "junction-hit", r: 10 }));
+    group.appendChild(svgNode("circle", { class: "junction-node", r: 5 }));
+    group.addEventListener("click", () => selectEditorElement(junction));
+    group.addEventListener("pointerdown", (event) => beginConnectionDrag(source, event));
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "c" || event.key === "C") {
+        event.preventDefault();
+        activateConnection(source);
+      } else {
+        trackElementKeydown(junction)(event);
+      }
+    });
+    junctionLayer.appendChild(group);
+  });
+  updateTrackSelection();
+  updatePendingHighlight();
+  if (focusKey) editorSvg.querySelector(`[data-track-focus="${focusKey}"]`)?.focus();
+}
+
+function renderSockets(group, item) {
+  SOCKET_SIDES.forEach((side) => {
+    const source = { kind: "berth", item, side };
+    const p = Routing.socketPoint(item, side);
+    const socket = svgNode("g", {
+      class: "berth-socket-group", transform: `translate(${p.x - Number(item.x)} ${p.y - Number(item.y)})`,
+      tabindex: 0, role: "button", "aria-pressed": "false", "data-connect-key": connectionKey(source),
+      "aria-label": `Track socket on the ${side} of berth ${item.name || item.id}. Press Enter to start or finish a track.`,
+    });
+    socket.appendChild(svgNode("circle", { class: "berth-socket-hit", r: 10 }));
+    socket.appendChild(svgNode("circle", { class: "berth-socket", r: 4 }));
+    socket.addEventListener("pointerdown", (event) => beginConnectionDrag(source, event));
+    socket.addEventListener("click", (event) => event.stopPropagation());
+    socket.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activateConnection(source);
+      } else if (event.key === "Escape") {
+        cancelConnection("Track drawing cancelled.");
+      }
+    });
+    group.appendChild(socket);
+  });
+}
+
+function renderTrackInspector(inspector, track) {
+  const form = document.createElement("form");
+  form.className = "editor-inspector";
+  addInspectorField(form, "id", track.id);
+  form.querySelector("#element-id").readOnly = true;
+  addInspectorField(form, "name", track.name);
+  const summary = document.createElement("p");
+  summary.className = "hint";
+  summary.textContent = `From ${endpointLabel(track.start)} to ${endpointLabel(track.end)} · ${track.points.length} route points`;
+  form.appendChild(summary);
+  [
+    ["track-alt-route", "Try another route", () => rerouteTrack(track, (track._alt || 0) + 1)],
+    ["track-reroute", "Re-route automatically", () => rerouteTrack(track, 0)],
+    ["track-add-junction", "Add junction", () => addJunctionAt(track, Routing.pointAtFraction(track.points, 0.5))],
+  ].forEach(([id, text, handler]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = id;
+    button.textContent = text;
+    button.disabled = canvasSaving;
+    button.addEventListener("click", handler);
+    form.appendChild(button);
+  });
+  appendTrackActions(form, track, "Delete track");
+  form.addEventListener("input", () => {
+    if (canvasSaving) return;
+    track.name = new FormData(form).get("name");
+    renderTracks();
+    updateEditorStatus();
+  });
+  inspector.appendChild(form);
+}
+
+function renderJunctionInspector(inspector, junction) {
+  const form = document.createElement("form");
+  form.className = "editor-inspector";
+  addInspectorField(form, "id", junction.id);
+  form.querySelector("#element-id").readOnly = true;
+  addInspectorField(form, "name", junction.name);
+  const host = trackItems.find((track) => track.id === junction.track_id);
+  const attached = attachedTrackIds(junction).length > 0;
+  const label = document.createElement("label");
+  label.textContent = "position along track (%)";
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.id = "element-position";
+  slider.min = "0";
+  slider.max = "100";
+  slider.value = String(Math.round(host ? Routing.fractionOfPoint(host.points, junction) * 100 : 0));
+  slider.disabled = canvasSaving || attached || !host;
+  label.appendChild(slider);
+  form.appendChild(label);
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = attached
+    ? "Tracks are connected here, so the junction position is fixed. Delete the connected tracks to move it."
+    : "Drag from this junction to a berth socket (or focus it and press C, then choose a socket) to connect a track.";
+  form.appendChild(hint);
+  appendTrackActions(form, junction, "Delete junction");
+  form.addEventListener("input", (event) => {
+    if (canvasSaving) return;
+    junction.name = new FormData(form).get("name");
+    if (event.target === slider && host && !attached) {
+      const point = Routing.pointAtFraction(host.points, Number(slider.value) / 100);
+      junction.x = point.x;
+      junction.y = point.y;
+    }
+    renderTracks();
+    updateEditorStatus();
+  });
+  inspector.appendChild(form);
+}
+
+function appendTrackActions(form, item, deleteText) {
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Apply properties";
+  save.disabled = canvasSaving;
+  form.appendChild(save);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "danger";
+  remove.id = "element-delete";
+  remove.textContent = deleteText;
+  remove.disabled = canvasSaving;
+  remove.addEventListener("click", () => deleteTrackElement(item));
+  form.appendChild(remove);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!canvasSaving) saveCanvas();
+  });
+}
+
+async function loadTrackData() {
+  const [tracks, junctions] = await Promise.all(["tracks", "junctions"].map(async (kind) => {
+    const response = await fetch(`/api/layouts/${encodeURIComponent(layoutId)}/${kind}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()).items;
+  }));
+  const build = (kind) => (row) => {
+    const item = { ...row, kind, _originalId: row.id, _isNew: false, _alt: 0 };
+    item._savedPayload = editorPayload(item);
+    return item;
+  };
+  trackItems.splice(0, trackItems.length, ...tracks.map(build("track")));
+  junctionItems.splice(0, junctionItems.length, ...junctions.map(build("junction")));
+}
+
+async function saveTrackItem(item, api, failures) {
+  const payload = editorPayload(item);
+  try {
+    await submitJson(item._isNew ? api : `${api}/${encodeURIComponent(item._originalId || item.id)}`, item._isNew ? "POST" : "PUT", payload);
+    item._originalId = payload.id;
+    item._isNew = false;
+    item._savedPayload = payload;
+  } catch (error) {
+    failures.push(`${item.kind} ${item.id}: ${error.message}`);
+  }
+}
+
+async function saveTracks(failures) {
+  for (const track of Routing.orderTracks(trackItems, junctionItems)) {
+    if (editorItemIsDirty(track)) await saveTrackItem(track, TRACK_API, failures);
+    for (const junction of junctionItems.filter((j) => j.track_id === track.id && editorItemIsDirty(j))) {
+      await saveTrackItem(junction, JUNCTION_API, failures);
+    }
+  }
+}
+
 function renderCanvas() {
+  syncTracks();
   updateCanvasExtent();
   const focusedIndex = document.activeElement?.classList?.contains("layout-element")
     ? document.activeElement.dataset.editorIndex : null;
@@ -426,6 +917,7 @@ function renderCanvas() {
       label.setAttribute("fill", "black");
       label.textContent = item.name || item.id || "New berth";
       group.appendChild(label);
+      renderSockets(group, item);
     } else if (item.kind === "level_crossing") {
       renderLevelCrossing(group, item);
     } else if (item.kind === "platform") {
@@ -491,6 +983,10 @@ function renderCanvas() {
       const point = editorPoint(event);
       clampElementPosition(item, point.x - dragOffset.x, point.y - dragOffset.y);
       group.setAttribute("transform", `translate(${item.x} ${item.y})`);
+      if (item.kind === "berth") {
+        syncTracks();
+        renderTracks();
+      }
       const xInput = document.getElementById("element-x");
       const yInput = document.getElementById("element-y");
       if (selectedElement === item && xInput && yInput) {
@@ -501,8 +997,9 @@ function renderCanvas() {
     });
     group.addEventListener("pointerup", () => { dragOffset = null; });
     group.addEventListener("pointercancel", () => { dragOffset = null; });
-    editorSvg.appendChild(group);
+    editorSvg.insertBefore(group, junctionLayer);
   });
+  renderTracks();
   if (focusedIndex !== null) {
     editorSvg.querySelector(`[data-editor-index="${focusedIndex}"]`)?.focus();
   }
@@ -549,6 +1046,8 @@ function renderInspector() {
     return;
   }
   const item = selectedElement;
+  if (item.kind === "track") return renderTrackInspector(inspector, item);
+  if (item.kind === "junction") return renderJunctionInspector(inspector, item);
   const form = document.createElement("form");
   form.className = "editor-inspector";
   addInspectorField(form, "id", item.id);
@@ -604,9 +1103,11 @@ function renderInspector() {
   form.addEventListener("input", () => {
     if (canvasSaving) return;
     const data = new FormData(form);
+    const previousId = item.id;
     for (const [name, value] of data.entries()) {
       item[name] = ["x", "y", "width", "height", "rotation", "z_index"].includes(name) ? Number(value) : value;
     }
+    if (item.kind === "berth" && item.id !== previousId) retargetBerthRefs(previousId, item.id);
     if (["x", "y", "width", "height", "rotation"].some((name) => data.has(name))) {
       clampElementPosition(item, Number(item.x), Number(item.y));
       document.getElementById("element-x").value = item.x;
@@ -632,6 +1133,7 @@ function selectEditorElement(item) {
     group.classList.toggle("selected", selected);
     group.setAttribute("aria-pressed", String(selected));
   });
+  updateTrackSelection();
   renderInspector();
 }
 
@@ -724,7 +1226,9 @@ async function loadEditor() {
     editorItems.splice(0, editorItems.length,
       ...(await loadEditorItems("berth")), ...(await loadEditorItems("signal")),
       ...(await loadEditorObjects()));
+    await loadTrackData();
     selectedElement = null;
+    cancelConnection();
     renderCanvas();
     if (CANVAS_WIDTH > BASE_CANVAS_WIDTH || CANVAS_HEIGHT > BASE_CANVAS_HEIGHT) canvasView.fit();
     renderInspector();
@@ -764,6 +1268,7 @@ async function saveCanvas() {
         failures.push(`${item.kind} ${item.id || "(new)"}: ${error.message}`);
       }
     }
+    await saveTracks(failures);
     renderCanvas();
     for (const kind of changedKinds) if (TABLES[kind]) await loadTable(kind);
     renderInspector();
@@ -1010,6 +1515,11 @@ ADD_KINDS.forEach((kind) => {
   document.getElementById(`add-${kind}`).addEventListener("click", () => beginAddingElement(kind));
 });
 document.getElementById("save-canvas").addEventListener("click", saveCanvas);
+document.getElementById("add-junction").addEventListener("click", () => {
+  if (selectedElement && selectedElement.kind === "track") {
+    addJunctionAt(selectedElement, Routing.pointAtFraction(selectedElement.points, 0.5));
+  }
+});
 if (isNew) {
   setAddControlsDisabled(true);
   updateEditorStatus("Save the layout first to add and arrange elements.");

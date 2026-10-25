@@ -262,3 +262,29 @@ INSERT OR IGNORE INTO train (id, headcode, description, toc) VALUES
 --     ('2026-02-14T10:00:00Z', 'td', 'T1', 'berth_enter', 'BRTH_1', '{}'),
 --     ('2026-02-14T10:01:00Z', 'td', 'T1', 'berth_exit', 'BRTH_1', '{}'),
 --     ('2026-02-14T10:01:01Z', 'td', 'T1', 'berth_enter', 'BRTH_2', '{}');
+
+-- Track table: ordered octilinear routes between berth sockets (left/right edge midpoints) and/or junctions
+CREATE TABLE IF NOT EXISTS layout_track (
+    id TEXT PRIMARY KEY,
+    layout_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    start_berth_id TEXT,  -- start endpoint: berth socket (berth id + side) or junction
+    start_side TEXT,  -- left or right
+    start_junction_id TEXT,
+    end_berth_id TEXT,
+    end_side TEXT,
+    end_junction_id TEXT,
+    points TEXT NOT NULL,  -- JSON array of {"x","y"} route points, start to end
+    FOREIGN KEY (layout_id) REFERENCES layout(id)
+);
+
+-- Junction table: nodes placed on a track's route where other tracks can attach
+CREATE TABLE IF NOT EXISTS layout_junction (
+    id TEXT PRIMARY KEY,
+    layout_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,  -- host track the junction lies on
+    name TEXT NOT NULL,
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    FOREIGN KEY (layout_id) REFERENCES layout(id)
+);
