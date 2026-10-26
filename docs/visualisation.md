@@ -339,6 +339,21 @@ endpoint creates layout-scoped berth IDs using `{layout_id}:{berth_id}` and
 skips berths already present on the target layout.
 
 #### Tracks and junctions API
+#### Layout backup and restore
+
+`GET /api/layouts/{layout_id}/export` downloads a portable JSON backup
+(`format: "nrod-railhub-layout-backup"`, `version: 1`) of the layout plus its
+berths, signals, objects, tracks and junctions. The `/admin` pages offer
+**Export JSON** per layout and **Import layout JSON** to restore a file.
+
+`POST /api/layouts/import` takes that JSON as the request body. The whole
+backup is validated first (format/version, field constraints, duplicate IDs,
+object variants, track/junction references and geometry) and then written in a
+single transaction, so a bad file never leaves a partial restore. Errors: `400`
+malformed JSON, `422` invalid/incompatible backup, `409` if the layout already
+exists (pass `?replace=true` to overwrite it) or a child ID is used by another
+layout. Live train state and the main RailHub tables are not part of a backup.
+
 `GET /api/layouts/{layout_id}/tracks` and `/junctions` return `{items, total}`;
 `GET /tracks/{layout_id}` returns `{tracks, junctions}`. `POST /api/tracks`,
 `PUT`/`DELETE /api/tracks/{id}` and the same under `/api/junctions` manage them.

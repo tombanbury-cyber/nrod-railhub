@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, constr
+from pydantic import BaseModel, Field, ValidationError, constr
 
 from nrod_railhub.db_backend import (
     DB_ERRORS,
@@ -398,6 +398,7 @@ def _render_admin_page(layout_rows: list[Any], counts: Optional[dict[str, dict[s
   <div class="hint">{int(c.get('berths', 0))} berth(s) · {int(c.get('signals', 0))} signal(s)</div>
   <div class="toolbar">
     <a class="button" href="/admin/layouts/{esc(urllib.parse.quote(str(lid), safe=''))}">Edit</a>
+    <a class="button secondary" href="/api/layouts/{esc(urllib.parse.quote(str(lid), safe=''))}/export" download>Export JSON</a>
     <button type="button" class="danger" data-delete-layout="{esc(lid)}">Delete</button>
   </div>
 </article>"""
@@ -420,6 +421,8 @@ def _render_admin_page(layout_rows: list[Any], counts: Optional[dict[str, dict[s
     </div>
     <div class="toolbar">
       <a class="button" href="/admin/new-layout">Create layout</a>
+      <button type="button" class="secondary" id="import-layout-button">Import layout JSON</button>
+      <input type="file" id="import-layout-file" accept="application/json,.json" hidden />
       <button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>
     </div>
   </div>
@@ -549,6 +552,7 @@ def _render_layout_page(layout_id: Optional[str]) -> str:
          )
          actions = (
             '<button type="button" class="secondary" id="open-import">Import berths from headcode chain</button>'
+            f'<a class="button secondary" href="/api/layouts/{urllib.parse.quote(str(layout_id), safe="")}/export" download>Export JSON</a>'
             '<button type="button" class="danger" id="delete-layout">Delete layout</button>'
          )
     mode = "new" if is_new else "edit"
@@ -1035,6 +1039,250 @@ async def create_layout(payload: LayoutPayload):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         rowid = None if getattr(conn, "is_postgres", False) else cursor.lastrowid
         return {"status": "created", "rowid": rowid, "layout": _model_dump(payload)}
+
+
+# ---------------------------------------------------------------------------------------------
+# Layout backup / restore (JSON)
+# ---------------------------------------------------------------------------------------------
+
+BACKUP_FORMAT = "nrod-railhub-layout-backup"
+BACKUP_VERSION = 1
+MAX_BACKUP_BYTES = 20 * 1024 * 1024
+_BACKUP_SECTIONS: tuple[tuple[str, type], ...] = (
+    ("berths", BerthPayload),
+    ("signals", SignalPayload),
+    ("objects", LayoutObjectPayload),
+    ("tracks", track_store.TrackPayload),
+    ("junctions", track_store.JunctionPayload),
+)
+
+
+def _backup_error(detail: str, status: int = 422) -> HTTPException:
+    return HTTPException(status_code=status, detail=f"Invalid layout backup: {detail}")
+
+
+def _build_layout_backup(conn: Any, layout_id: str) -> dict[str, Any]:
+    """Return a portable dict holding a layout and everything that belongs to it."""
+    layout = conn.execute("SELECT * FROM layout WHERE id = ?", (layout_id,)).fetchone()
+    if not layout:
+        raise HTTPException(status_code=404, detail="Layout not found")
+
+    def rows(table: str) -> list[Any]:
+        return conn.execute(f"SELECT * FROM {table} WHERE layout_id = ? ORDER BY id", (layout_id,)).fetchall()
+
+    return {
+        "format": BACKUP_FORMAT,
+        "version": BACKUP_VERSION,
+        "layout": {
+            "id": layout["id"], "name": layout["name"], "description": layout["description"],
+            "data": _json_or_empty(layout["data"]),
+        },
+        "berths": [
+            {
+                "id": r["id"], "layout_id": r["layout_id"], "name": r["name"], "x": int(r["x"]), "y": int(r["y"]),
+                "width": int(r["width"] or 60), "height": int(r["height"] or 30),
+                "berth_type": r["berth_type"] or "normal", "z_index": _stored_int(r, "z_index"),
+            }
+            for r in rows("berth")
+        ],
+        "signals": [
+            {
+                "id": r["id"], "layout_id": r["layout_id"], "name": r["name"], "x": int(r["x"]), "y": int(r["y"]),
+                "signal_type": r["signal_type"] or "auto", "rotation": _stored_int(r, "rotation"),
+                "z_index": _stored_int(r, "z_index"),
+            }
+            for r in rows("signal")
+        ],
+        "objects": [
+            {
+                "id": r["id"], "layout_id": r["layout_id"], "object_type": r["object_type"], "name": r["name"],
+                "x": int(r["x"]), "y": int(r["y"]), "width": int(r["width"] or 60), "height": int(r["height"] or 30),
+                "variant": r["variant"], "berth_id": r["berth_id"], "rotation": _stored_int(r, "rotation"),
+                "z_index": _stored_int(r, "z_index"),
+            }
+            for r in rows("layout_object")
+        ],
+        "tracks": track_store.list_tracks(conn, layout_id),
+        "junctions": track_store.list_junctions(conn, layout_id),
+    }
+
+
+def _parse_layout_backup(doc: Any) -> dict[str, Any]:
+    """Validate a backup document without touching the database; return parsed models."""
+    if not isinstance(doc, dict):
+        raise _backup_error("top-level JSON value must be an object")
+    if doc.get("format") != BACKUP_FORMAT:
+        raise _backup_error(f"not a layout backup (expected format '{BACKUP_FORMAT}')")
+    version = doc.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise _backup_error("missing or non-integer 'version'")
+    if version < 1 or version > BACKUP_VERSION:
+        raise _backup_error(f"unsupported backup version {version}; this server supports version {BACKUP_VERSION}", 422)
+
+    def parse(model: type, item: Any, where: str) -> Any:
+        if not isinstance(item, dict):
+            raise _backup_error(f"{where} must be an object")
+        try:
+            return model(**item)
+        except ValidationError as exc:
+            problems = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors())
+            raise _backup_error(f"{where}: {problems}") from exc
+
+    layout = parse(LayoutPayload, doc.get("layout"), "layout")
+    parsed: dict[str, Any] = {"layout": layout}
+    for key, model in _BACKUP_SECTIONS:
+        items = doc.get(key, [])
+        if not isinstance(items, list):
+            raise _backup_error(f"'{key}' must be a list")
+        models = [parse(model, item, f"{key}[{i}]") for i, item in enumerate(items)]
+        seen: set[str] = set()
+        for item in models:
+            if item.layout_id != layout.id:
+                raise _backup_error(f"{key} '{item.id}' belongs to layout '{item.layout_id}', not '{layout.id}'")
+            if item.id in seen:
+                raise _backup_error(f"duplicate {key} id '{item.id}'")
+            seen.add(item.id)
+        parsed[key] = models
+    _validate_backup_relationships(parsed)
+    return parsed
+
+
+def _validate_backup_relationships(parsed: dict[str, Any]) -> None:
+    berths = {b.id: _model_dump(b) for b in parsed["berths"]}
+    for obj in parsed["objects"]:
+        try:
+            _resolved_object_variant(obj)
+        except HTTPException as exc:
+            raise _backup_error(f"object '{obj.id}': {exc.detail}") from exc
+    tracks = {t.id: t for t in parsed["tracks"]}
+    junctions = {j.id: j for j in parsed["junctions"]}
+    routes = {t.id: track_store.route_tuples(t.points) for t in parsed["tracks"]}
+    for junction in junctions.values():
+        if junction.track_id not in tracks:
+            raise _backup_error(f"junction '{junction.id}' references missing track '{junction.track_id}'")
+        if not track_store.point_on_route(routes[junction.track_id], junction.x, junction.y):
+            raise _backup_error(f"junction '{junction.id}' does not lie on track '{junction.track_id}'")
+    for track in tracks.values():
+        points = routes[track.id]
+        try:
+            track_store.validate_octilinear(points)
+        except HTTPException as exc:
+            raise _backup_error(f"track '{track.id}': {exc.detail}") from exc
+        ends = []
+        for label, endpoint in (("start", track.start), ("end", track.end)):
+            if endpoint.junction_id:
+                if endpoint.berth_id or endpoint.side:
+                    raise _backup_error(f"track '{track.id}' {label} must be a berth socket or a junction, not both")
+                junction = junctions.get(endpoint.junction_id)
+                if not junction:
+                    raise _backup_error(f"track '{track.id}' {label} references missing junction '{endpoint.junction_id}'")
+                ends.append(((junction.x, junction.y), (None, None, endpoint.junction_id)))
+            else:
+                if not endpoint.berth_id or not endpoint.side:
+                    raise _backup_error(f"track '{track.id}' {label} needs a berth_id and side, or a junction_id")
+                berth = berths.get(endpoint.berth_id)
+                if not berth:
+                    raise _backup_error(f"track '{track.id}' {label} references missing berth '{endpoint.berth_id}'")
+                ends.append((track_store.socket_point(berth, endpoint.side), (endpoint.berth_id, endpoint.side, None)))
+        if points[0] != ends[0][0] or points[-1] != ends[1][0]:
+            raise _backup_error(f"track '{track.id}' route does not begin and end at its endpoints")
+        if ends[0][1] == ends[1][1]:
+            raise _backup_error(f"track '{track.id}' start and end must differ")
+
+
+def _restore_layout_backup(conn: Any, parsed: dict[str, Any], replace: bool) -> dict[str, int]:
+    """Write a validated backup in a single transaction; any failure leaves the database untouched."""
+    layout = parsed["layout"]
+    with conn:
+        if conn.execute("SELECT id FROM layout WHERE id = ?", (layout.id,)).fetchone():
+            if not replace:
+                raise HTTPException(
+                    status_code=409, detail=f"Layout '{layout.id}' already exists; import with replace=true to overwrite it"
+                )
+            for table in ("berth", "signal", "layout_object"):
+                conn.execute(f"DELETE FROM {table} WHERE layout_id = ?", (layout.id,))
+            track_store.delete_layout_tracks(conn, layout.id)
+            conn.execute("DELETE FROM layout WHERE id = ?", (layout.id,))
+        for key, table in (
+            ("berths", "berth"), ("signals", "signal"), ("objects", "layout_object"),
+            ("tracks", "layout_track"), ("junctions", "layout_junction"),
+        ):
+            for item in parsed[key]:
+                if conn.execute(f"SELECT id FROM {table} WHERE id = ?", (item.id,)).fetchone():
+                    raise HTTPException(
+                        status_code=409, detail=f"{key[:-1].capitalize()} id '{item.id}' is already used by another layout"
+                    )
+        conn.execute(
+            "INSERT INTO layout (id, name, description, data) VALUES (?, ?, ?, ?)",
+            (layout.id, layout.name, layout.description, json.dumps(layout.data)),
+        )
+        for b in parsed["berths"]:
+            conn.execute(
+                "INSERT INTO berth (id, layout_id, name, x, y, width, height, berth_type, z_index) VALUES (?,?,?,?,?,?,?,?,?)",
+                (b.id, b.layout_id, b.name, b.x, b.y, b.width, b.height, b.berth_type, b.z_index or 0),
+            )
+        for s in parsed["signals"]:
+            conn.execute(
+                "INSERT INTO signal (id, layout_id, name, x, y, signal_type, rotation, z_index) VALUES (?,?,?,?,?,?,?,?)",
+                (s.id, s.layout_id, s.name, s.x, s.y, s.signal_type, s.rotation or 0, s.z_index or 0),
+            )
+        for o in parsed["objects"]:
+            variant, berth_id, rotation = _object_values(o)
+            conn.execute(
+                """INSERT INTO layout_object
+                   (id, layout_id, object_type, name, x, y, width, height, variant, berth_id, rotation, z_index)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (o.id, o.layout_id, o.object_type, o.name, o.x, o.y, o.width, o.height, variant, berth_id,
+                 rotation, o.z_index or 0),
+            )
+        for t in parsed["tracks"]:
+            conn.execute(
+                """INSERT INTO layout_track
+                   (id, layout_id, name, start_berth_id, start_side, start_junction_id,
+                    end_berth_id, end_side, end_junction_id, points)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (t.id, t.layout_id, t.name, t.start.berth_id, t.start.side, t.start.junction_id,
+                 t.end.berth_id, t.end.side, t.end.junction_id,
+                 json.dumps([{"x": p.x, "y": p.y} for p in t.points])),
+            )
+        for j in parsed["junctions"]:
+            conn.execute(
+                "INSERT INTO layout_junction (id, layout_id, track_id, name, x, y) VALUES (?,?,?,?,?,?)",
+                (j.id, j.layout_id, j.track_id, j.name, j.x, j.y),
+            )
+    return {key: len(parsed[key]) for key, _ in _BACKUP_SECTIONS}
+
+
+@app.get("/api/layouts/{layout_id}/export")
+async def export_layout(layout_id: str):
+    """Download a layout and its berths, signals, objects, tracks and junctions as a JSON backup."""
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        backup = _build_layout_backup(conn, layout_id)
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in layout_id) or "layout"
+    return JSONResponse(
+        backup, headers={"Content-Disposition": f'attachment; filename="layout-{safe_name}.json"'}
+    )
+
+
+@app.post("/api/layouts/import")
+async def import_layout(request: Request, replace: bool = Query(False)):
+    """Restore a layout backup atomically. Existing layouts are only overwritten with ``replace=true``."""
+    body = await request.body()
+    if len(body) > MAX_BACKUP_BYTES:
+        raise HTTPException(status_code=413, detail="Layout backup is too large")
+    try:
+        doc = json.loads(body)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid layout backup: malformed JSON ({exc})") from exc
+    parsed = _parse_layout_backup(doc)
+    with get_conn() as conn:
+        _require_visualisation_schema(conn)
+        try:
+            counts = _restore_layout_backup(conn, parsed, replace)
+        except INTEGRITY_ERRORS as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "imported", "id": parsed["layout"].id, "replaced": replace, "counts": counts}
 
 
 @app.get("/api/layouts/{layout_id}/objects")
