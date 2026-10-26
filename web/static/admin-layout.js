@@ -1165,7 +1165,7 @@ function beginAddingElement(kind) {
   const identity = nextElementIdentity(kind);
   const item = {
     kind, ...identity, layout_id: layoutId,
-    x: 60, y: 160, width: defaults.width, height: defaults.height,
+    x: 600, y: 230, width: defaults.width, height: defaults.height,
     berth_type: kind === "berth" && chosen ? chosen : "normal",
     signal_type: kind === "signal" && chosen ? chosen : "auto",
     variant: kind in OBJECT_KINDS ? (chosen || OBJECT_KINDS[kind].variants[0]) : undefined,
