@@ -96,7 +96,7 @@ def test_lifecycle_hooks_do_not_crash():
 
 
 def test_connection_watchdog_triggers_on_silence(monkeypatch):
-    """Watchdog must disconnect when no message has arrived for max_silence seconds."""
+    """Watchdog must invoke reconnect when no message has arrived for max_silence seconds."""
     from nrod_railhub.cli import start_connection_watchdog
 
     conn = Mock()
@@ -104,21 +104,90 @@ def test_connection_watchdog_triggers_on_silence(monkeypatch):
 
     listener = Mock()
 
-    disconnect_event = threading.Event()
+    reconnect_event = threading.Event()
+    stop_event = threading.Event()
 
-    def disconnect():
-        disconnect_event.set()
-
-    conn.disconnect = disconnect
+    def reconnect():
+        reconnect_event.set()
+        stop_event.set()
 
     # Pick timestamps that are max_silence+1 seconds apart.
     listener.last_message_at = "2026-09-19T12:00:00+00:00"
+    listener.connected_at = None
     future_ts = 1789819200.0 + 61.0
 
     monkeypatch.setattr(time, "time", lambda: future_ts)
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
-    t = start_connection_watchdog(conn, listener, max_silence=60, check_interval=1)
+    t = start_connection_watchdog(
+        conn,
+        listener,
+        max_silence=60,
+        reconnect_callback=reconnect,
+        check_interval=1,
+        stop_event=stop_event,
+    )
     t.join(timeout=0.5)
 
-    assert disconnect_event.is_set()
+    assert reconnect_event.is_set()
+    conn.disconnect.assert_not_called()
+
+
+def test_connection_watchdog_prefers_recent_connection_to_old_message(monkeypatch):
+    """Reconnect silence starts from the new connection, not a pre-reconnect message."""
+    from nrod_railhub.cli import start_connection_watchdog
+
+    conn = Mock()
+    listener = Mock()
+    listener.last_message_at = "2026-09-19T12:00:00+00:00"
+    listener.connected_at = "2026-09-19T12:01:00+00:00"
+    reconnect = Mock()
+    stop_event = threading.Event()
+
+    def fake_time():
+        stop_event.set()
+        return 1789819200.0 + 61.0
+
+    monkeypatch.setattr(time, "time", fake_time)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    t = start_connection_watchdog(
+        conn,
+        listener,
+        max_silence=60,
+        reconnect_callback=reconnect,
+        stop_event=stop_event,
+    )
+    t.join(timeout=0.5)
+
+    reconnect.assert_not_called()
+
+
+def test_connection_watchdog_uses_connection_time_before_first_message(monkeypatch):
+    """A connection that never receives its first message must still be checked."""
+    from nrod_railhub.cli import start_connection_watchdog
+
+    conn = Mock()
+    listener = Mock()
+    listener.last_message_at = None
+    listener.connected_at = "2026-09-19T12:00:00+00:00"
+    reconnect_event = threading.Event()
+    stop_event = threading.Event()
+
+    def reconnect():
+        reconnect_event.set()
+        stop_event.set()
+
+    monkeypatch.setattr(time, "time", lambda: 1789819200.0 + 61.0)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    t = start_connection_watchdog(
+        conn,
+        listener,
+        max_silence=60,
+        reconnect_callback=reconnect,
+        stop_event=stop_event,
+    )
+    t.join(timeout=0.5)
+
+    assert reconnect_event.is_set()

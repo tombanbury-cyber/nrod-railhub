@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import stomp
 import yaml
@@ -163,37 +163,41 @@ def start_connection_watchdog(
     conn: stomp.Connection11,
     listener: Listener,
     max_silence: int,
+    reconnect_callback: Callable[[], None],
     check_interval: int = 10,
+    stop_event: Optional[threading.Event] = None,
 ) -> threading.Thread:
     """
-    Monitor the STOMP connection and alert/force reconnect if messages stop flowing.
-
-    stomp.py already performs automatic reconnects, but the watchdog gives the user
-    visible feedback and a last-resort kick if the receiver thread appears stuck.
+    Monitor message flow and invoke the reconnect callback after prolonged silence.
     """
     def loop():
-        while True:
+        while stop_event is None or not stop_event.is_set():
             time.sleep(check_interval)
+            if stop_event is not None and stop_event.is_set():
+                break
+
             now = time.time()
-            last_msg = listener.last_message_at
-            if not last_msg:
+            activity_times = []
+            for timestamp in (listener.last_message_at, listener.connected_at):
+                if not timestamp:
+                    continue
+                try:
+                    activity_times.append(datetime.fromisoformat(timestamp).timestamp())
+                except ValueError:
+                    continue
+            if not activity_times:
                 continue
-            try:
-                last_ts = datetime.fromisoformat(last_msg).timestamp()
-            except Exception:
-                continue
-            silent_for = int(now - last_ts)
+
+            silent_for = int(now - max(activity_times))
             if silent_for >= max_silence:
                 logger.error(
                     f"WATCHDOG: no message received for {silent_for}s (threshold {max_silence}s). "
                     "Forcing reconnect..."
                 )
                 try:
-                    if conn.is_connected():
-                        conn.disconnect()
+                    reconnect_callback()
                 except Exception as e:
-                    logger.debug(f"Watchdog disconnect error: {e}")
-                # Transport will reconnect automatically if reconnect_attempts_max allows.
+                    logger.error(f"Watchdog reconnect failed: {type(e).__name__}: {e}")
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()
@@ -388,15 +392,23 @@ def connect_and_run(args: argparse.Namespace) -> None:
         logger.info(f"WEB: dashboard on http://0.0.0.0:{args.web_port} using {redact_target(db_path)}")
     conn.set_listener("", listener)
 
-    logger.info("Connecting (wait=True) ...")
-    try:
-        # Artemis is picky about host/vhost; set it explicitly like the CLI does.
+    def _connect() -> None:
         conn.connect(
             login=args.user,
             passcode=args.password,
             wait=True,
             headers={"host": args.vhost},
         )
+
+    def _force_reconnect() -> None:
+        if conn.is_connected():
+            conn.disconnect()
+        _connect()
+
+    logger.info("Connecting (wait=True) ...")
+    try:
+        # Artemis is picky about host/vhost; set it explicitly like the CLI does.
+        _connect()
     except Exception as e:
         logger.error(f"CONNECT FAILED 2: {type(e).__name__}: {e!r}")
         return
@@ -420,7 +432,12 @@ def connect_and_run(args: argparse.Namespace) -> None:
 
     start_status_ticker(listener, interval=args.status_every)
     max_silence = getattr(args, "max_silence", 120)
-    start_connection_watchdog(conn, listener, max_silence=max_silence)
+    start_connection_watchdog(
+        conn,
+        listener,
+        max_silence=max_silence,
+        reconnect_callback=_force_reconnect,
+    )
 
     # Run in interactive curses mode if requested
     if args.interactive:
@@ -506,7 +523,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reconnect-attempts", dest="reconnect_attempts", type=int, default=-1,
                    help="Maximum STOMP reconnect attempts (-1 for infinite, default -1)")
     p.add_argument("--max-silence", dest="max_silence", type=int, default=120,
-                   help="Alert if no message received for N seconds (default 120)")
+                   help="Reconnect if no message is received for N seconds (default 120)")
 
     p.add_argument(
         "--corpus-cache",
