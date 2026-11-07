@@ -485,22 +485,27 @@ def test_sg_message_expands_into_td_signal_bytes():
     try:
         db = RailDB(db_path, enable_mapper=False)
 
-        db.insert_td_signal_event(1000, '2024-01-01T00:00:01.000Z', 'EK', 'SG', '88', '41689559')
+        event_ts_ms = 1704067201000
+        event_ts_iso = '2024-01-01T00:00:01.000Z'
+        db.insert_td_signal_event(event_ts_ms, event_ts_iso, 'EK', 'SG', '88', '41689559')
 
         with db._conn:
+            columns = set(db._conn.table_columns("td_signal_bytes"))
+            assert {"ts_ms", "ts_iso"} <= columns
+            assert "timestamp" not in columns
             raw_message_id = db._conn.execute(
                 "SELECT id FROM td_signal_events WHERE address='88'"
             ).fetchone()[0]
             byte_rows = db._conn.execute(
-                "SELECT area_id, address_int, value_int, address, value, source_type, raw_message_id "
+                "SELECT ts_ms, ts_iso, area_id, address_int, value_int, address, value, source_type, raw_message_id "
                 "FROM td_signal_bytes ORDER BY address_int"
             ).fetchall()
 
         assert byte_rows == [
-            ('EK', 0x88, 0x41, '88', '41', 'SG', raw_message_id),
-            ('EK', 0x89, 0x68, '89', '68', 'SG', raw_message_id),
-            ('EK', 0x8A, 0x95, '8A', '95', 'SG', raw_message_id),
-            ('EK', 0x8B, 0x59, '8B', '59', 'SG', raw_message_id),
+            (event_ts_ms, event_ts_iso, 'EK', 0x88, 0x41, '88', '41', 'SG', raw_message_id),
+            (event_ts_ms, event_ts_iso, 'EK', 0x89, 0x68, '89', '68', 'SG', raw_message_id),
+            (event_ts_ms, event_ts_iso, 'EK', 0x8A, 0x95, '8A', '95', 'SG', raw_message_id),
+            (event_ts_ms, event_ts_iso, 'EK', 0x8B, 0x59, '8B', '59', 'SG', raw_message_id),
         ]
     finally:
         if os.path.exists(db_path):
@@ -586,6 +591,37 @@ def test_rebuild_td_signal_bytes_backfills_from_existing_events():
             os.unlink(db_path)
 
 
+def test_td_signal_bytes_legacy_timestamp_schema_is_migrated():
+    """Opening an older DB renames timestamp and backfills ts_ms."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False) as f:
+        db_path = f.name
+
+    try:
+        db = RailDB(db_path, enable_mapper=False)
+        db.insert_td_signal_event(
+            1704067201000, '2024-01-01T00:00:01.000Z', 'EK', 'SG', '88', '41'
+        )
+        with db._conn:
+            db._conn.execute("DROP INDEX idx_td_signal_bytes_lookup")
+            db._conn.execute("ALTER TABLE td_signal_bytes RENAME COLUMN ts_iso TO timestamp")
+            db._conn.execute("ALTER TABLE td_signal_bytes DROP COLUMN ts_ms")
+        db.close()
+
+        migrated = RailDB(db_path, enable_mapper=False)
+        try:
+            columns = set(migrated._conn.table_columns("td_signal_bytes"))
+            assert {"ts_ms", "ts_iso"} <= columns
+            assert "timestamp" not in columns
+            assert migrated._conn.execute(
+                "SELECT ts_ms, ts_iso FROM td_signal_bytes"
+            ).fetchone() == (1704067201000, '2024-01-01T00:00:01.000Z')
+        finally:
+            migrated.close()
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     test_signal_event_capture()
     test_berth_events_still_work()
@@ -596,4 +632,5 @@ if __name__ == "__main__":
     test_sf_messages_do_not_populate_td_signal_bytes()
     test_expand_td_signal_bytes_handles_malformed_input()
     test_rebuild_td_signal_bytes_backfills_from_existing_events()
+    test_td_signal_bytes_legacy_timestamp_schema_is_migrated()
     print("\nAll tests passed! ✓")

@@ -87,6 +87,11 @@ def test_signal_events_bytes_and_sclass_changes(db):
     db.insert_td_signal_event(1000, "2026-01-01T00:00:01Z", "EK", "SG", "D0", "3F")
     db.insert_td_signal_event(2000, "2026-01-01T00:00:02Z", "EK", "SF", "D0", "BF")
     assert _scalar(db, "SELECT COUNT(*) FROM td_signal_bytes") == 1
+    assert "timestamp" not in db._conn.table_columns("td_signal_bytes")
+    byte_timestamp = db._conn.execute(
+        "SELECT ts_ms, ts_iso FROM td_signal_bytes"
+    ).fetchone()
+    assert tuple(byte_timestamp) == (1000, "2026-01-01T00:00:01Z")
     change = db._conn.execute(
         "SELECT id, bit, old_state, new_state FROM td_sclass_changes"
     ).fetchone()

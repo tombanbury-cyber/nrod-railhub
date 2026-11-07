@@ -137,7 +137,8 @@ So the numbering systems were being interpreted differently.
 Useful normalized fields:
 
 ```text
-timestamp
+ts_ms
+ts_iso
 area_id
 address_int
 value_int
@@ -232,7 +233,8 @@ CREATE VIEW IF NOT EXISTS v_td_signal_function_transitions AS
 WITH ordered AS (
     SELECT
         id,
-        timestamp,
+        ts_ms,
+        ts_iso,
         area_id,
         address,
         address_int,
@@ -243,7 +245,7 @@ WITH ordered AS (
 
         LAG(value_int) OVER (
             PARTITION BY area_id, address_int
-            ORDER BY timestamp, id
+            ORDER BY ts_ms, id
         ) AS previous_value
 
     FROM td_signal_bytes
@@ -263,7 +265,8 @@ byte_changes AS (
 
 SELECT
     c.id,
-    c.timestamp,
+    c.ts_ms,
+    c.ts_iso,
     c.area_id,
     c.address AS td_address,
     c.address_int,

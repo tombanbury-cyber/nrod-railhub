@@ -400,7 +400,8 @@ CREATE TABLE mapper_config (
                 );
 CREATE TABLE td_signal_bytes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
                     area_id TEXT NOT NULL,
                     address_int INTEGER NOT NULL,
                     value_int INTEGER NOT NULL,
@@ -560,7 +561,8 @@ CREATE VIEW v_td_signal_transitions AS
 WITH ordered AS (
     SELECT
         id,
-        timestamp,
+        ts_ms,
+        ts_iso,
         area_id,
         address,
         address_int,
@@ -571,7 +573,7 @@ WITH ordered AS (
 
         LAG(value_int) OVER (
             PARTITION BY area_id, address_int
-            ORDER BY timestamp, id
+            ORDER BY ts_ms, id
         ) AS previous_value
 
     FROM td_signal_bytes
@@ -579,7 +581,8 @@ WITH ordered AS (
 
 SELECT
     id,
-    timestamp,
+    ts_ms,
+    ts_iso,
     area_id,
     address,
     address_int,
@@ -600,10 +603,11 @@ FROM ordered
 
 WHERE previous_value IS NOT NULL
   AND previous_value <> value_int
-/* v_td_signal_transitions(id,timestamp,area_id,address,address_int,previous_value,new_value,previous_hex,new_hex,changed_bits,source_type,raw_message_id) */;
+/* v_td_signal_transitions(id,ts_ms,ts_iso,area_id,address,address_int,previous_value,new_value,previous_hex,new_hex,changed_bits,source_type,raw_message_id) */;
 CREATE VIEW v_td_signal_decoded AS
 SELECT
-    b.timestamp,
+    b.ts_ms,
+    b.ts_iso,
     b.area_id,
     b.address,
     b.address_int,
@@ -631,7 +635,7 @@ JOIN smart_serial_bit_map m
 WHERE b.area_id = 'EK'
   AND m.function IS NOT NULL
   AND m.function <> ''
-/* v_td_signal_decoded(timestamp,area_id,address,address_int,value,value_int,source_type,bit,interlocking,section,function_type,function,state) */;
+/* v_td_signal_decoded(ts_ms,ts_iso,area_id,address,address_int,value,value_int,source_type,bit,interlocking,section,function_type,function,state) */;
 CREATE VIEW v_td_signal_function_state AS
 SELECT
     s.area_id,
@@ -673,7 +677,8 @@ CREATE VIEW v_td_signal_function_transitions AS
 WITH ordered AS (
     SELECT
         id,
-        timestamp,
+        ts_ms,
+        ts_iso,
         area_id,
         address,
         address_int,
@@ -684,7 +689,7 @@ WITH ordered AS (
 
         LAG(value_int) OVER (
             PARTITION BY area_id, address_int
-            ORDER BY timestamp, id
+            ORDER BY ts_ms, id
         ) AS previous_value
 
     FROM td_signal_bytes
@@ -693,7 +698,8 @@ WITH ordered AS (
 byte_changes AS (
     SELECT
         id,
-        timestamp,
+        ts_ms,
+        ts_iso,
         area_id,
         address,
         address_int,
@@ -715,7 +721,8 @@ byte_changes AS (
 
 SELECT
     c.id,
-    c.timestamp,
+    c.ts_ms,
+    c.ts_iso,
     c.area_id,
 
     c.address AS td_address,
@@ -759,12 +766,13 @@ WHERE c.area_id = 'EK'
   AND m.function <> ''
 
   AND (c.changed_bits & (1 << m.bit)) <> 0
-/* v_td_signal_function_transitions(id,timestamp,area_id,td_address,address_int,bit,bit_mask,interlocking,section,function_type,function,location_context,previous_state,new_state,previous_byte_hex,new_byte_hex,source_type,raw_message_id) */;
+/* v_td_signal_function_transitions(id,ts_ms,ts_iso,area_id,td_address,address_int,bit,bit_mask,interlocking,section,function_type,function,location_context,previous_state,new_state,previous_byte_hex,new_byte_hex,source_type,raw_message_id) */;
 CREATE VIEW v_td_signal_undocumented_transitions AS
 WITH ordered AS (
     SELECT
         id,
-        timestamp,
+        ts_ms,
+        ts_iso,
         area_id,
         address,
         address_int,
@@ -772,7 +780,7 @@ WITH ordered AS (
 
         LAG(value_int) OVER (
             PARTITION BY area_id, address_int
-            ORDER BY timestamp, id
+            ORDER BY ts_ms, id
         ) AS previous_value,
 
         source_type,
@@ -798,7 +806,8 @@ bits(bit, mask) AS (
 )
 
 SELECT
-    c.timestamp,
+    c.ts_ms,
+    c.ts_iso,
     c.area_id,
     c.address AS td_address,
     c.address_int,
@@ -831,7 +840,7 @@ WHERE c.area_id = 'EK'
       m.function IS NULL
       OR m.function = ''
   )
-/* v_td_signal_undocumented_transitions(timestamp,area_id,td_address,address_int,bit,previous_state,new_state,source_type,raw_message_id) */;
+/* v_td_signal_undocumented_transitions(ts_ms,ts_iso,area_id,td_address,address_int,bit,previous_state,new_state,source_type,raw_message_id) */;
 CREATE INDEX idx_td_berth_ts ON td_berth_events(ts_ms);
 CREATE INDEX idx_td_berth_area_hc_ts ON td_berth_events(td_area, headcode, ts_ms);
 CREATE INDEX idx_td_berth_movements_ts ON td_berth_movements(ts_ms);
@@ -902,7 +911,7 @@ CREATE UNIQUE INDEX idx_bso_unique
 CREATE INDEX idx_bss_edge
                 ON berth_signal_scores(td_area, from_berth, to_berth, score DESC);
 CREATE INDEX idx_td_signal_bytes_lookup
-                    ON td_signal_bytes(area_id, address, timestamp);
+                    ON td_signal_bytes(area_id, address, ts_ms);
 CREATE INDEX idx_smart_serial_bit_map_function
     ON smart_serial_bit_map(function);
 CREATE INDEX idx_smart_serial_bit_map_interlocking_section

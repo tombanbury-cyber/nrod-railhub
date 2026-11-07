@@ -77,6 +77,13 @@ def test_td_event_db_creates_domain_tables_and_indexes():
                 ).fetchall()
             }
             assert indexes <= idx_names
+
+        byte_columns = {
+            row[1]
+            for row in db._conn.execute("PRAGMA table_info(td_signal_bytes)").fetchall()
+        }
+        assert {"ts_ms", "ts_iso"} <= byte_columns
+        assert "timestamp" not in byte_columns
     finally:
         db.close()
 
@@ -174,14 +181,29 @@ def test_sg_message_is_expanded_into_signal_bytes():
     ).fetchone()[0]
 
     byte_rows = db._conn.execute(
-        "SELECT area_id, address_int, value_int, address, value, source_type, raw_message_id "
-        "FROM td_signal_bytes ORDER BY address_int"
+        """
+        SELECT area_id, address_int, value_int, address, value, source_type,
+               raw_message_id, ts_ms, ts_iso
+        FROM td_signal_bytes ORDER BY address_int
+        """
     ).fetchall()
     assert byte_rows == [
-        ("EK", 0x88, 0x41, "88", "41", "SG", raw_message_id),
-        ("EK", 0x89, 0x68, "89", "68", "SG", raw_message_id),
-        ("EK", 0x8A, 0x95, "8A", "95", "SG", raw_message_id),
-        ("EK", 0x8B, 0x59, "8B", "59", "SG", raw_message_id),
+        (
+            "EK", 0x88, 0x41, "88", "41", "SG", raw_message_id,
+            1700000000000, "2023-11-14T22:13:20+00:00",
+        ),
+        (
+            "EK", 0x89, 0x68, "89", "68", "SG", raw_message_id,
+            1700000000000, "2023-11-14T22:13:20+00:00",
+        ),
+        (
+            "EK", 0x8A, 0x95, "8A", "95", "SG", raw_message_id,
+            1700000000000, "2023-11-14T22:13:20+00:00",
+        ),
+        (
+            "EK", 0x8B, 0x59, "8B", "59", "SG", raw_message_id,
+            1700000000000, "2023-11-14T22:13:20+00:00",
+        ),
     ]
     db.close()
 
@@ -210,6 +232,33 @@ def test_rebuild_signal_bytes_backfills_from_existing_events():
         ("EK", 0x07, 0x00, "07", "00", "SH"),
     ]
     db.close()
+
+
+def test_td_event_db_migrates_legacy_signal_byte_timestamps():
+    """The standalone database migrates old ISO timestamp columns and backfills ts_ms."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    db = td_listener.TdEventDB(db_path)
+    db.insert_signal_event(1704067201000, "2024-01-01T00:00:01.000Z", "EK", "SG", "04", "35")
+    db._conn.execute("DROP INDEX idx_td_signal_bytes_lookup")
+    db._conn.execute("ALTER TABLE td_signal_bytes RENAME COLUMN ts_iso TO timestamp")
+    db._conn.execute("ALTER TABLE td_signal_bytes DROP COLUMN ts_ms")
+    db.close()
+
+    migrated = td_listener.TdEventDB(db_path)
+    try:
+        columns = {
+            row[1]
+            for row in migrated._conn.execute("PRAGMA table_info(td_signal_bytes)").fetchall()
+        }
+        assert {"ts_ms", "ts_iso"} <= columns
+        assert "timestamp" not in columns
+        assert migrated._conn.execute(
+            "SELECT ts_ms, ts_iso FROM td_signal_bytes"
+        ).fetchone() == (1704067201000, "2024-01-01T00:00:01.000Z")
+    finally:
+        migrated.close()
 
 
 def test_td_area_filter_excludes_other_areas():
