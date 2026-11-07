@@ -45,7 +45,17 @@ import stomp
 
 from nrod_railhub.cli import load_config_file, merge_config_with_args
 from nrod_railhub.logging_config import setup_logger, get_logger
-from nrod_railhub.models import NR_HOST, NR_PORT, TOPIC_TD, expand_td_signal_bytes, ms_to_iso_utc, safe_int, utc_now_iso, utc_now_ms
+from nrod_railhub.models import (
+    NR_HOST,
+    NR_PORT,
+    TOPIC_TD,
+    expand_td_signal_bytes,
+    iso_to_ms,
+    ms_to_iso_utc,
+    safe_int,
+    utc_now_iso,
+    utc_now_ms,
+)
 
 logger = get_logger("td_listener")
 
@@ -119,6 +129,7 @@ class TdEventDB:
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._init_schema()
+        self._ensure_td_signal_bytes_schema()
         self._ensure_hex_byte_table()
 
     def _init_schema(self) -> None:
@@ -203,7 +214,8 @@ class TdEventDB:
 
                 CREATE TABLE IF NOT EXISTS td_signal_bytes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    ts_iso TEXT NOT NULL,
                     area_id TEXT NOT NULL,
                     address_int INTEGER NOT NULL,
                     value_int INTEGER NOT NULL,
@@ -212,9 +224,54 @@ class TdEventDB:
                     source_type TEXT NOT NULL,
                     raw_message_id INTEGER REFERENCES td_signal_events(id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_td_signal_bytes_lookup
-                    ON td_signal_bytes(area_id, address, timestamp);
                 """
+            )
+
+    def _ensure_td_signal_bytes_schema(self) -> None:
+        """Migrate byte-event timestamps to the shared ts_ms/ts_iso naming."""
+        with self._lock, self._conn:
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(td_signal_bytes)")
+            }
+            self._conn.execute("DROP INDEX IF EXISTS idx_td_signal_bytes_lookup")
+            if "ts_iso" not in columns:
+                if "timestamp" not in columns:
+                    raise RuntimeError("td_signal_bytes has neither ts_iso nor legacy timestamp column")
+                self._conn.execute("ALTER TABLE td_signal_bytes RENAME COLUMN timestamp TO ts_iso")
+                columns.remove("timestamp")
+                columns.add("ts_iso")
+            elif "timestamp" in columns:
+                self._conn.execute(
+                    "UPDATE td_signal_bytes SET ts_iso=timestamp WHERE ts_iso IS NULL"
+                )
+                self._conn.execute("ALTER TABLE td_signal_bytes DROP COLUMN timestamp")
+
+            if "ts_ms" not in columns:
+                self._conn.execute("ALTER TABLE td_signal_bytes ADD COLUMN ts_ms INTEGER")
+
+            rows = self._conn.execute(
+                """
+                SELECT id, ts_iso, raw_message_id
+                FROM td_signal_bytes
+                WHERE ts_ms IS NULL
+                """
+            ).fetchall()
+            for row_id, ts_iso, raw_message_id in rows:
+                ts_ms = iso_to_ms(ts_iso) if ts_iso else None
+                if ts_ms is None and raw_message_id is not None:
+                    event = self._conn.execute(
+                        "SELECT ts_ms FROM td_signal_events WHERE id=?", (raw_message_id,)
+                    ).fetchone()
+                    ts_ms = event[0] if event else None
+                if ts_ms is not None:
+                    self._conn.execute(
+                        "UPDATE td_signal_bytes SET ts_ms=? WHERE id=?", (ts_ms, row_id)
+                    )
+                else:
+                    logger.warning("Could not backfill td_signal_bytes.ts_ms for row id=%s", row_id)
+
+            self._conn.execute(
+                "CREATE INDEX idx_td_signal_bytes_lookup ON td_signal_bytes(area_id, address, ts_ms)"
             )
 
     def _insert_row(self, table: str, columns: str, placeholders: str, values: tuple) -> None:
@@ -251,13 +308,14 @@ class TdEventDB:
 
     def _expand_signal_bytes_rows(
         self,
+        ts_ms: int,
         ts_iso: str,
         area: str,
         msg_type: str,
         address: str,
         data: str,
         raw_message_id: Optional[int],
-    ) -> List[Tuple[str, str, int, int, str, str, str, Optional[int]]]:
+    ) -> List[Tuple[int, str, str, int, int, str, str, str, Optional[int]]]:
         """Expand an SG/SH message into td_signal_bytes row tuples (not yet inserted)."""
         bytes_expanded = expand_td_signal_bytes(address, data)
         if not bytes_expanded and data:
@@ -266,12 +324,13 @@ class TdEventDB:
                 f"area={area} address={address!r} data={data!r}"
             )
         return [
-            (ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id)
+            (ts_ms, ts_iso, area, address_int, value_int, address_hex, value_hex, msg_type, raw_message_id)
             for address_int, value_int, address_hex, value_hex in bytes_expanded
         ]
 
     def _insert_signal_bytes(
         self,
+        ts_ms: int,
         ts_iso: str,
         area: str,
         msg_type: str,
@@ -284,12 +343,14 @@ class TdEventDB:
         Must be called while holding self._lock within an active transaction
         on self._conn (e.g. from `insert_signal_event` or `rebuild_signal_bytes`).
         """
-        rows = self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data, raw_message_id)
+        rows = self._expand_signal_bytes_rows(
+            ts_ms, ts_iso, area, msg_type, address, data, raw_message_id
+        )
         if rows:
             self._conn.executemany(
                 "INSERT INTO td_signal_bytes("
-                "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
-                ") VALUES (?,?,?,?,?,?,?,?)",
+                "ts_ms, ts_iso, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
                 rows,
             )
         return len(rows)
@@ -319,7 +380,9 @@ class TdEventDB:
                     (ts_ms, ts_iso, area, msg_type, address, address_int, data or ""),
                 )
                 if msg_type in ("SG", "SH"):
-                    self._insert_signal_bytes(ts_iso, area, msg_type, address, data or "", cursor.lastrowid)
+                    self._insert_signal_bytes(
+                        ts_ms, ts_iso, area, msg_type, address, data or "", cursor.lastrowid
+                    )
         except Exception as e:
             logger.error(f"DB: failed to insert signal event area={area} msg_type={msg_type}: {e!r}")
             
@@ -328,11 +391,11 @@ class TdEventDB:
         scanned = 0
         inserted = 0
         batch_size = 1000
-        pending: List[Tuple[str, str, int, int, str, str, str, Optional[int]]] = []
+        pending: List[Tuple[int, str, str, int, int, str, str, str, Optional[int]]] = []
         insert_sql = (
             "INSERT INTO td_signal_bytes("
-            "timestamp, area_id, address_int, value_int, address, value, source_type, raw_message_id"
-            ") VALUES (?,?,?,?,?,?,?,?)"
+            "ts_ms, ts_iso, area_id, address_int, value_int, address, value, source_type, raw_message_id"
+            ") VALUES (?,?,?,?,?,?,?,?,?)"
         )
         area_filter = (td_area or "").strip().upper()
 
@@ -342,17 +405,19 @@ class TdEventDB:
             else:
                 self._conn.execute("DELETE FROM td_signal_bytes")
 
-            query = "SELECT id, ts_iso, td_area, msg_type, address, data FROM td_signal_events WHERE msg_type IN ('SG', 'SH')"
+            query = "SELECT id, ts_ms, ts_iso, td_area, msg_type, address, data FROM td_signal_events WHERE msg_type IN ('SG', 'SH')"
             params: tuple = ()
             if area_filter:
                 query += " AND UPPER(COALESCE(td_area, '')) = ?"
                 params = (area_filter,)
             query += " ORDER BY ts_ms ASC, id ASC"
 
-            for raw_id, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
+            for raw_id, ts_ms, ts_iso, area, msg_type, address, data in self._conn.execute(query, params):
                 scanned += 1
                 pending.extend(
-                    self._expand_signal_bytes_rows(ts_iso, area, msg_type, address, data or "", raw_id)
+                    self._expand_signal_bytes_rows(
+                        ts_ms, ts_iso, area, msg_type, address, data or "", raw_id
+                    )
                 )
                 if len(pending) >= batch_size:
                     self._conn.executemany(insert_sql, pending)
