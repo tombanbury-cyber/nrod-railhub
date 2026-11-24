@@ -521,7 +521,7 @@ class Listener(stomp.ConnectionListener):
         )
 
         loc = self._decode_td_location_snapshot(area_id, from_berth, to_berth)
-        tten = self.hv.get_timetable_fields(headcode)
+        tten = self.hv.get_timetable_fields(headcode, td_area=area_id)
         self.db.upsert_td_state(
             area=area_id,
             headcode=headcode,

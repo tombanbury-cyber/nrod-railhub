@@ -154,6 +154,7 @@ class ItpsSchedule:
 class TrustState:
     train_id: str = ""               # TRUST train_id (unique per run)
     train_uid: str = ""              # CIF_train_uid if present
+    headcode: str = ""               # Reporting number carried by this TRUST run
     toc_id: str = ""
     schedule_source: str = ""
     activated: bool = False
