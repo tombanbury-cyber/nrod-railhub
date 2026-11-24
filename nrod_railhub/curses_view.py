@@ -303,7 +303,7 @@ def _collect_interesting_lines(listener: Optional[Listener], td_area_filter: Opt
     for (td_area, headcode), td in sorted(hv.td_by_headcode.items(), key=lambda item: item[1].last_time_ms or 0, reverse=True):
         if allowed_areas and (td_area or "").strip().upper() not in allowed_areas:
             continue
-        timetable = hv.get_timetable_fields(headcode)
+        timetable = hv.get_timetable_fields(headcode, td_area=td_area)
         interesting_type = classify_interesting_train(
             headcode=headcode,
             train_category=timetable.get("category", ""),

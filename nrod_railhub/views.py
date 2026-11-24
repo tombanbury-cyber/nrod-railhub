@@ -15,6 +15,13 @@ from .models import (
     VstpSchedule, ItpsSchedule, TrustState, TdState,
     utc_now_iso, utc_now_ms, hhmmss_to_hhmm, local_hhmm, clip, ms_to_iso_utc, safe_int
 )
+from .schedule_matching import (
+    planned_datetime,
+    resolve_ranked_candidates,
+    schedule_runs_on,
+    select_active_schedule_versions,
+    stp_precedence,
+)
 from .resolvers import LocationResolver, SmartResolver, TOCResolver
 from .logging_config import get_logger
 
@@ -186,16 +193,145 @@ class HumanView:
             station_to_tiplocs[key].append(tiploc)
         return station_to_tiplocs
 
+    @staticmethod
+    def _schedule_identity(schedule: Any) -> tuple[str, str, str, str]:
+        return (
+            type(schedule).__name__,
+            str(getattr(schedule, "uid", "") or ""),
+            str(getattr(schedule, "start_date", "") or ""),
+            str(getattr(schedule, "stp_indicator", "") or "P"),
+        )
+
+    def _active_schedules(self, schedules: List[Any], service_date: Optional[datetime.date]) -> List[Any]:
+        candidates = [
+            schedule for schedule in schedules
+            if service_date is None or schedule_runs_on(schedule, service_date)
+        ]
+        return select_active_schedule_versions(candidates)
+
+    def _headcode_schedules(
+        self, headcode: str, service_date: Optional[datetime.date]
+    ) -> tuple[List[Any], List[Any]]:
+        vstp = self._active_schedules(self.vstp_by_headcode.get(headcode, []), service_date)
+        itps = self._active_schedules(self.sched_by_headcode.get(headcode, []), service_date)
+        vstp_uids = {getattr(schedule, "uid", "") for schedule in vstp}
+        itps = [schedule for schedule in itps if getattr(schedule, "uid", "") not in vstp_uids]
+        return vstp, itps
+
+    @staticmethod
+    def _match_info(
+        schedule: Any,
+        *,
+        source: str,
+        evidence: List[str],
+        confidence: str,
+        service_date: Optional[datetime.date] = None,
+        **details: Any,
+    ) -> Dict[str, Any]:
+        return {
+            "status": "matched",
+            "source": source,
+            "uid": str(getattr(schedule, "uid", "") or ""),
+            "service_date": service_date.isoformat() if service_date else "",
+            "schedule_start_date": str(getattr(schedule, "start_date", "") or ""),
+            "evidence": evidence,
+            "confidence": confidence,
+            **details,
+        }
+
+    def _trust_for_td(
+        self, td_area: str, headcode: str, td: Optional[TdState]
+    ) -> Optional[TrustState]:
+        area_state = self.trust_by_area_headcode.get((td_area, headcode))
+        candidates = [
+            state for state in self.trust_by_train_id.values()
+            if state.headcode == headcode and state.train_uid
+        ]
+        if area_state and area_state.train_uid and all(
+            state.train_id != area_state.train_id for state in candidates
+        ):
+            candidates.append(area_state)
+        if not candidates:
+            legacy_state = self.trust_by_headcode.get(headcode)
+            if (
+                legacy_state and td_area and legacy_state.last_location and self.smart
+                and self._area_from_stanox(legacy_state.last_location) not in (None, td_area)
+            ):
+                return None
+            return legacy_state
+
+        if area_state and area_state.train_uid:
+            area_candidates = [
+                state for state in candidates
+                if state.train_id == area_state.train_id
+                or (
+                    state.last_location and self.smart
+                    and self._area_from_stanox(state.last_location) == td_area
+                )
+            ]
+            candidates = area_candidates or [area_state]
+        elif td_area and self.smart:
+            area_candidates = [
+                state for state in candidates
+                if state.last_location
+                and self._area_from_stanox(state.last_location) == td_area
+            ]
+            if area_candidates:
+                candidates = area_candidates
+            else:
+                candidates = [
+                    state for state in candidates
+                    if not state.last_location
+                    or self._area_from_stanox(state.last_location) is None
+                ]
+
+        td_time = td.last_time_ms if td and td.last_time_ms else None
+        if td_time:
+            td_date = datetime.datetime.fromtimestamp(
+                td_time / 1000, tz=timezone.utc
+            ).date()
+            same_day = []
+            undated = []
+            for state in candidates:
+                try:
+                    trust_dt = datetime.datetime.fromisoformat(
+                        state.last_event_time.replace("Z", "+00:00")
+                    )
+                except (TypeError, ValueError):
+                    undated.append(state)
+                    continue
+                if trust_dt.date() == td_date:
+                    same_day.append(state)
+            candidates = same_day or undated
+
+        def trust_delta(state: TrustState) -> float:
+            if not td_time:
+                return float("-inf")
+            try:
+                trust_dt = datetime.datetime.fromisoformat(
+                    state.last_event_time.replace("Z", "+00:00")
+                )
+                return -abs(td_time - int(trust_dt.timestamp() * 1000))
+            except (TypeError, ValueError):
+                return float("-inf")
+
+        match = resolve_ranked_candidates(
+            candidates,
+            rank=lambda state: (trust_delta(state),),
+            identity=lambda state: state.train_uid,
+        )
+        return match.candidate
+
     def match_td_to_schedule(self, td_area: str, headcode: str, *, trace: bool = False, allowed_tocs: Optional[set[str]] = None) -> tuple[Optional[object], str, Optional[Dict[str, Any]]]:
         """
         Try to find the best matching VSTP/ITPS schedule object for a TD observation.
 
-        Returns (schedule_object_or_None, reason_string, matched_info_or_None).
+        Returns (schedule_object_or_None, reason_string, matched_info_or_None). An
+        ambiguous result has no schedule and includes the competing UIDs in matched_info.
         
         matched_info is a dict with keys:
-          - matched_tiploc: str - the TIPLOC that was matched
-          - stop_index: int - index of matched stop in schedule.locations
-          - planned_dt: str - ISO datetime of planned stop time
+          - status, source, uid, service_date, evidence, confidence
+          - matched_tiploc, stop_index, planned_dt when location evidence was used
 
         Strategy:
          - If TRUST for this headcode has train_uid, try vstp/sched lookup by uid.
@@ -222,43 +358,100 @@ class HumanView:
                     allowed_tocs = set(allowed_tocs)
         
         td = self.td_by_headcode.get((td_area or "", (headcode or "").strip()))
+        service_date = None
+        if td and td.last_time_ms:
+            try:
+                service_date = datetime.datetime.fromtimestamp(
+                    td.last_time_ms / 1000, tz=timezone.utc
+                ).date()
+            except (OverflowError, OSError, ValueError):
+                service_date = None
 
-        # 1a) Area-scoped TRUST -> train_uid -> lookup (highest priority)
         ts_area = self.trust_by_area_headcode.get((td_area, headcode))
-        if ts_area and ts_area.train_uid:
-            uid = ts_area.train_uid
-            # Try exact UID match in VSTP
-            for (k_uid, k_date), vs in list(self.vstp_by_uid_date.items()):
-                if k_uid == uid:
-                    reason = f"matched via area-scoped TRUST train_uid {uid} (area={td_area})"
-                    if trace:
-                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    return vs, reason, None
-            # Try exact UID match in ITPS
-            for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
-                if k_uid == uid:
-                    reason = f"matched timetable via area-scoped TRUST train_uid {uid} (area={td_area})"
-                    if trace:
-                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    return ss, reason, None
+        uid_trust = self._trust_for_td(td_area, headcode, td)
+        trust_area_match = bool(ts_area)
+        if uid_trust and td_area and uid_trust.last_location and self.smart:
+            trust_area_match = self._area_from_stanox(uid_trust.last_location) == td_area
+
+        if uid_trust and uid_trust.train_uid:
+            uid = uid_trust.train_uid.strip()
+            uid_vstp = [
+                schedule for (key_uid, _), schedule in self.vstp_by_uid_date.items()
+                if key_uid == uid
+            ]
+            uid_vstp.extend(
+                schedule for schedule in self.vstp_by_headcode.get(headcode, [])
+                if getattr(schedule, "uid", "") == uid
+            )
+            uid_itps = [
+                schedule for (key_uid, _), schedule in self.sched_by_uid_date.items()
+                if key_uid == uid
+            ]
+            uid_itps.extend(
+                schedule for schedule in self.sched_by_headcode.get(headcode, [])
+                if getattr(schedule, "uid", "") == uid
+            )
+            uid_vstp = list({id(schedule): schedule for schedule in uid_vstp}.values())
+            uid_itps = list({id(schedule): schedule for schedule in uid_itps}.values())
+            uid_vstp = self._active_schedules(uid_vstp, service_date)
+            uid_itps = self._active_schedules(uid_itps, service_date)
+            uid_schedules = uid_vstp or uid_itps
+            uid_schedules = [
+                schedule for schedule in uid_schedules
+                if not getattr(schedule, "signalling_id", "")
+                or getattr(schedule, "signalling_id", "") == headcode
+            ]
+            uid_match = resolve_ranked_candidates(
+                uid_schedules,
+                rank=lambda schedule: (
+                    -stp_precedence(schedule),
+                    str(getattr(schedule, "start_date", "") or ""),
+                ),
+                identity=self._schedule_identity,
+            )
+            if uid_match.status == "matched" and uid_match.candidate is not None:
+                schedule = uid_match.candidate
+                source = "VSTP" if schedule in uid_vstp else "SCHEDULE"
+                prefix = "matched via" if source == "VSTP" else "matched timetable via"
+                reason = f"{prefix} {'area-scoped ' if trust_area_match else ''}TRUST train_uid {uid}"
+                if trust_area_match:
+                    reason += f" (area={td_area})"
+                info = self._match_info(
+                    schedule,
+                    source=source,
+                    evidence=["TRUST train_id", "TRUST train_uid", "service date"],
+                    confidence="high",
+                    service_date=service_date,
+                    trust_train_id=uid_trust.train_id,
+                )
+                if trace:
+                    logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                return schedule, reason, info
+            status = uid_match.status
+            reason = (
+                f"ambiguous schedules for TRUST train_uid {uid}"
+                if status == "ambiguous"
+                else f"no active schedule for TRUST train_uid {uid}"
+            )
+            info = {
+                "status": status,
+                "source": "TRUST",
+                "uid": uid,
+                "service_date": service_date.isoformat() if service_date else "",
+                "trust_train_id": uid_trust.train_id,
+                "candidate_uids": sorted({
+                    str(getattr(candidate, "uid", "") or "?")
+                    for candidate in uid_match.alternatives
+                }),
+                "evidence": ["TRUST train_id", "TRUST train_uid", "service date"],
+                "confidence": "unresolved" if status == "ambiguous" else "none",
+            }
+            if trace:
+                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+            return None, reason, info
 
         # 1) TRUST -> train_uid -> lookup (fallback to global if no area match)
-        ts = self.trust_by_headcode.get(headcode) or None
-        if ts and ts.train_uid:
-            uid = ts.train_uid
-            for (k_uid, k_date), vs in list(self.vstp_by_uid_date.items()):
-                if k_uid == uid:
-                    reason = f"matched via TRUST train_uid {uid}"
-                    if trace:
-                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    # No matched_info since we didn't use TIPLOC matching
-                    return vs, reason, None
-            for (k_uid, k_date), ss in list(self.sched_by_uid_date.items()):
-                if k_uid == uid:
-                    reason = f"matched timetable via TRUST train_uid {uid}"
-                    if trace:
-                        logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                    return ss, reason, None
+        ts = uid_trust
 
         # 2) TIPLOC-index based matching (new approach)
         if td and self.smart and self.resolver:
@@ -271,6 +464,8 @@ class HumanView:
                     # Build reverse index for efficient lookup
                     station_to_tiplocs = self._build_station_to_tiplocs_index()
                     candidate_tiplocs = station_to_tiplocs.get(stanox_name.strip().lower(), [])
+                    active_vstp, active_itps = self._headcode_schedules(headcode, service_date)
+                    active_schedule_ids = {id(schedule) for schedule in active_vstp + active_itps}
                     
                     # Query schedules_by_tiploc for each candidate TIPLOC
                     tiploc_candidates = []
@@ -280,7 +475,7 @@ class HumanView:
                             for sched_obj, stop_idx, planned_hhmm in self.schedules_by_tiploc[tiploc]:
                                 # Filter by headcode - only consider schedules with matching headcode
                                 sched_headcode = getattr(sched_obj, "signalling_id", "") or ""
-                                if sched_headcode == headcode:
+                                if sched_headcode == headcode and id(sched_obj) in active_schedule_ids:
                                     # Check TOC filtering if allowed_tocs is provided
                                     if allowed_tocs:
                                         sched_toc = getattr(sched_obj, 'toc_code', None) or getattr(sched_obj, 'toc', None)
@@ -298,99 +493,120 @@ class HumanView:
                         fallback_reason_suffix = " (relaxed: no mapped TOC candidates)"
                     
                     if tiploc_candidates:
-                        # Rank candidates by time proximity to TD observation
+                        td_time = None
                         try:
-                            td_time = td.last_time_ms and datetime.datetime.fromtimestamp(td.last_time_ms / 1000, tz=timezone.utc)
-                        except Exception:
+                            if td.last_time_ms:
+                                td_time = datetime.datetime.fromtimestamp(
+                                    td.last_time_ms / 1000, tz=timezone.utc
+                                )
+                        except (OverflowError, OSError, ValueError):
                             td_time = None
-                        
-                        best = None
-                        best_delta = None
-                        best_info = None
-                        
+
+                        scored_candidates = []
                         for sched_obj, stop_idx, planned_hhmm, tiploc in tiploc_candidates:
-                            # Compute planned datetime for this stop
-                            planned_dt = None
-                            if planned_hhmm and getattr(sched_obj, "start_date", None):
-                                try:
-                                    sd = getattr(sched_obj, "start_date")
-                                    planned_dt = datetime.datetime.fromisoformat(sd) if "T" in sd else datetime.datetime.strptime(sd, "%Y-%m-%d")
-                                    hhmm = planned_hhmm.strip()
-                                    if hhmm and ":" in hhmm:
-                                        h, m = map(int, hhmm.split(":")[:2])
-                                        planned_dt = planned_dt.replace(hour=h, minute=m, tzinfo=datetime.timezone.utc)
-                                except Exception:
-                                    planned_dt = None
-                            
-                            # Prefer UID match if TRUST has UID
-                            uid_match = False
-                            if ts and ts.train_uid and getattr(sched_obj, "uid", "") == ts.train_uid:
-                                uid_match = True
-                            
-                            # Check if candidate TOC is in allowed_tocs for score boost
-                            toc_match = False
-                            if allowed_tocs:
-                                cand_toc = getattr(sched_obj, 'toc_code', None) or getattr(sched_obj, 'toc', None)
-                                if cand_toc and cand_toc in allowed_tocs:
-                                    toc_match = True
-                            
-                            # Compute time delta with TOC boost
-                            delta = None
-                            if td_time and planned_dt:
-                                delta = abs((td_time - planned_dt).total_seconds())
-                                # Apply TOC boost: reduce effective delta if TOC matches
-                                if toc_match:
-                                    delta = delta * TOC_MATCH_BOOST_FACTOR
-                            
-                            # Rank: UID match first, then smallest time delta (with TOC boost)
-                            if best is None:
-                                best = sched_obj
-                                best_delta = delta
-                                best_info = {
-                                    "matched_tiploc": tiploc,
-                                    "stop_index": stop_idx,
-                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
-                                    "toc_match": toc_match,
-                                }
-                            elif uid_match and not (best_info and best_info.get("uid_match")):
-                                best = sched_obj
-                                best_delta = delta
-                                best_info = {
-                                    "matched_tiploc": tiploc,
-                                    "stop_index": stop_idx,
-                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
-                                    "uid_match": True,
-                                    "toc_match": toc_match,
-                                }
-                            elif delta is not None and (best_delta is None or delta < best_delta):
-                                best = sched_obj
-                                best_delta = delta
-                                best_info = {
-                                    "matched_tiploc": tiploc,
-                                    "stop_index": stop_idx,
-                                    "planned_dt": planned_dt.isoformat() if planned_dt else "",
-                                    "toc_match": toc_match,
-                                }
-                        
-                        if best:
-                            reason = f"matched via TIPLOC index: tiploc={best_info['matched_tiploc']} stanox={stanox} stop_idx={best_info['stop_index']}"
-                            if best_delta is not None:
-                                reason += f" delta={best_delta:.0f}s"
-                            if best_info.get('toc_match'):
+                            planned_dt = planned_datetime(
+                                sched_obj, planned_hhmm, service_date=service_date
+                            )
+
+                            uid_match = bool(
+                                ts and ts.train_uid
+                                and getattr(sched_obj, "uid", "") == ts.train_uid
+                            )
+                            candidate_toc = (
+                                getattr(sched_obj, "toc_code", None)
+                                or getattr(sched_obj, "toc", None)
+                            )
+                            toc_match = bool(allowed_tocs and candidate_toc in allowed_tocs)
+                            delta = (
+                                abs((td_time - planned_dt).total_seconds())
+                                if td_time and planned_dt else None
+                            )
+                            if delta is not None and toc_match:
+                                delta *= TOC_MATCH_BOOST_FACTOR
+                            score = (
+                                int(uid_match),
+                                -delta if delta is not None else float("-inf"),
+                            )
+                            scored_candidates.append({
+                                "schedule": sched_obj,
+                                "score": score,
+                                "stop_index": stop_idx,
+                                "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                                "tiploc": tiploc,
+                                "delta": delta,
+                                "toc_match": toc_match,
+                            })
+
+                        match = resolve_ranked_candidates(
+                            scored_candidates,
+                            rank=lambda candidate: candidate["score"],
+                            identity=lambda candidate: self._schedule_identity(candidate["schedule"]),
+                        )
+                        if match.status == "ambiguous":
+                            candidate_uids = sorted({
+                                str(getattr(item["schedule"], "uid", "") or "?")
+                                for item in match.alternatives
+                            })
+                            reason = f"ambiguous TIPLOC schedule match for headcode {headcode}"
+                            info = {
+                                "status": "ambiguous",
+                                "source": "TIPLOC",
+                                "candidate_uids": candidate_uids,
+                                "service_date": service_date.isoformat() if service_date else "",
+                                "evidence": ["TD location", "service date"],
+                                "confidence": "unresolved",
+                            }
+                            if trace:
+                                logger.debug(
+                                    f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}"
+                                )
+                            return None, reason + fallback_reason_suffix, info
+
+                        if match.candidate is not None:
+                            selected = match.candidate
+                            schedule = selected["schedule"]
+                            reason = (
+                                f"matched via TIPLOC index: tiploc={selected['tiploc']} "
+                                f"stanox={stanox} stop_idx={selected['stop_index']}"
+                            )
+                            if selected["delta"] is not None:
+                                reason += f" delta={selected['delta']:.0f}s"
+                            if selected["toc_match"]:
                                 reason += " (TOC boost)"
                             reason += fallback_reason_suffix
+                            evidence = ["TD location", "service date"]
+                            confidence = "medium"
+                            if ts and ts.train_uid and getattr(schedule, "uid", "") == ts.train_uid:
+                                evidence.append("TRUST train_uid")
+                                confidence = "high"
+                            if selected["delta"] is not None:
+                                evidence.append("scheduled stop time")
+                            info = self._match_info(
+                                schedule,
+                                source="SCHEDULE" if isinstance(schedule, ItpsSchedule) else "VSTP",
+                                evidence=evidence,
+                                confidence=confidence,
+                                service_date=service_date,
+                                matched_tiploc=selected["tiploc"],
+                                stop_index=selected["stop_index"],
+                                planned_dt=selected["planned_dt"],
+                                toc_match=selected["toc_match"],
+                            )
                             if trace:
-                                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+                                logger.debug(
+                                    f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}"
+                                )
                             logger.debug(f"TIPLOC match: {reason}")
-                            return best, reason, best_info
+                            return schedule, reason, info
 
         # 3) Fallback: Candidate schedules by headcode (with area-route validation)
+        vstp_list, itps_list = self._headcode_schedules(headcode, service_date)
         candidates = []
-        vs_list = self.vstp_by_headcode.get(headcode, [])
+        vs_list = vstp_list
         for vs in vs_list:
             if self._schedule_passes_through_area(vs, td_area, td):
                 candidates.append(("VSTP", vs))
-        ss_list = self.sched_by_headcode.get(headcode, [])
+        ss_list = itps_list
         for ss in ss_list:
             if self._schedule_passes_through_area(ss, td_area, td):
                 candidates.append(("SCHEDULE", ss))
@@ -413,6 +629,7 @@ class HumanView:
             return None, reason, None
 
         # 4) Legacy SMART stanox matching (scan candidate locations)
+        smart_matches = set()
         if td and self.smart:
             berth = td.to_berth or td.from_berth or ""
             hit = self.smart.lookup(td.area_id or "", berth) if (td.area_id and berth) else None
@@ -428,19 +645,19 @@ class HumanView:
                                 continue
                             cand_name = self.resolver.name_for_tiploc(tiploc) if self.resolver else None
                             if cand_name and cand_name.strip().lower() == stanox_name.strip().lower():
-                                reason = f"matched by SMART stanox {stanox} -> station name"
-                                if trace:
-                                    logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-                                return cand, reason, None
+                                smart_matches.add(self._schedule_identity(cand))
 
         # 5) Time proximity fallback
+        td_time = None
         try:
-            td_time = td.last_time_ms and datetime.datetime.fromtimestamp(td.last_time_ms / 1000, tz=timezone.utc)
-        except Exception:
+            if td and td.last_time_ms:
+                td_time = datetime.datetime.fromtimestamp(
+                    td.last_time_ms / 1000, tz=timezone.utc
+                )
+        except (OverflowError, OSError, ValueError):
             td_time = None
 
-        best = None
-        best_delta = None
+        ranked_candidates = []
         for typ, cand in candidates:
             planned_dt = None
             locs = getattr(cand, "locations", []) or []
@@ -451,31 +668,100 @@ class HumanView:
                     dep = first[2] if len(first) > 2 else None
                 else:
                     dep = getattr(first, "departure", None) or getattr(first, "dep", None)
-                if dep and getattr(cand, "start_date", None):
-                    try:
-                        sd = getattr(cand, "start_date")
-                        planned_dt = datetime.datetime.fromisoformat(sd) if "T" in sd else datetime.datetime.strptime(sd, "%Y-%m-%d")
-                        hhmm = dep.strip()
-                        if hhmm and ":" in hhmm:
-                            h, m = map(int, hhmm.split(":")[:2])
-                            planned_dt = planned_dt.replace(hour=h, minute=m, tzinfo=datetime.timezone.utc)
-                    except Exception:
-                        planned_dt = None
-            if td_time and planned_dt:
-                delta = abs((td_time - planned_dt).total_seconds())
-                if best is None or delta < best_delta:
-                    best = cand
-                    best_delta = delta
-        if best:
-            reason = f"matched by time proximity (delta seconds {best_delta:.0f})"
+                if dep:
+                    planned_dt = planned_datetime(cand, dep, service_date=service_date)
+            delta = (
+                abs((td_time - planned_dt).total_seconds())
+                if td_time and planned_dt else None
+            )
+            toc = getattr(cand, "toc_code", None) or getattr(cand, "toc", None)
+            toc_match = bool(allowed_tocs and toc in allowed_tocs)
+            if delta is not None and toc_match:
+                delta *= TOC_MATCH_BOOST_FACTOR
+            uid_match = bool(ts and ts.train_uid and getattr(cand, "uid", "") == ts.train_uid)
+            ranked_candidates.append({
+                "source": typ,
+                "schedule": cand,
+                "delta": delta,
+                "planned_dt": planned_dt.isoformat() if planned_dt else "",
+                "toc_match": toc_match,
+                "smart_match": self._schedule_identity(cand) in smart_matches,
+                "score": (
+                    int(uid_match),
+                    int(self._schedule_identity(cand) in smart_matches),
+                    -delta if delta is not None else float("-inf"),
+                ),
+            })
+
+        match = resolve_ranked_candidates(
+            ranked_candidates,
+            rank=lambda candidate: candidate["score"],
+            identity=lambda candidate: self._schedule_identity(candidate["schedule"]),
+        )
+        if match.status == "ambiguous":
+            candidate_uids = sorted({
+                str(getattr(item["schedule"], "uid", "") or "?")
+                for item in match.alternatives
+            })
+            reason = f"ambiguous schedule match for headcode {headcode}"
+            info = {
+                "status": "ambiguous",
+                "source": "VSTP/SCHEDULE",
+                "candidate_uids": candidate_uids,
+                "service_date": service_date.isoformat() if service_date else "",
+                "evidence": ["headcode", "service date", "TD area"],
+                "confidence": "unresolved",
+            }
             if trace:
                 logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-            return best, reason, None
+            return None, reason, info
 
-        reason = "ambiguous — returned first candidate for headcode"
+        if match.candidate is not None:
+            selected = match.candidate
+            schedule = selected["schedule"]
+            if selected["smart_match"]:
+                reason = "matched by SMART stanox -> station name"
+                if selected["delta"] is not None:
+                    reason += f" with time proximity (delta seconds {selected['delta']:.0f})"
+            elif selected["delta"] is not None:
+                reason = f"matched by time proximity (delta seconds {selected['delta']:.0f})"
+            else:
+                reason = "matched unique loaded schedule candidate for headcode"
+            evidence = ["headcode"]
+            if service_date:
+                evidence.append("service date")
+            if td_area:
+                evidence.append("TD area route")
+            if selected["smart_match"]:
+                evidence.append("SMART location")
+            if selected["delta"] is not None:
+                evidence.append("scheduled departure time")
+            if ts and ts.train_uid and getattr(schedule, "uid", "") == ts.train_uid:
+                evidence.append("TRUST train_uid")
+            confidence = (
+                "high" if "TRUST train_uid" in evidence
+                else "medium" if "SMART location" in evidence or "scheduled departure time" in evidence
+                else "low"
+            )
+            info = self._match_info(
+                schedule,
+                source=selected["source"],
+                evidence=evidence,
+                confidence=confidence,
+                service_date=service_date,
+                planned_dt=selected["planned_dt"],
+                toc_match=selected["toc_match"],
+            )
+            if selected["toc_match"]:
+                reason += " (TOC boost)"
+            if trace:
+                logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
+            return schedule, reason, info
+
+        reason = "no candidate schedules for headcode"
         if trace:
             logger.debug(f"TRACE MATCH headcode={headcode} td_area={td_area} reason={reason}")
-        return candidates[0][1], reason, None
+        return None, reason, None
 
     def load_schedule_gz(
         self,
@@ -803,6 +1089,10 @@ class HumanView:
             self.trust_by_uid[st.train_uid] = st
 
         headcode = (body.get("train_reporting_number") or body.get("reporting_number") or "").strip()
+        if headcode:
+            st.headcode = headcode
+        else:
+            headcode = st.headcode
         # If TRUST gives us a headcode, store it
         if headcode:
             self.trust_by_headcode[headcode] = st
@@ -814,6 +1104,7 @@ class HumanView:
                 self.trust_by_headcode[inferred] = st
                 # Update headcode for use in area-scoped indexing below
                 headcode = inferred
+                st.headcode = inferred
 
         # Infer TD area from location STANOX and populate area-scoped index
         if st.last_location and headcode and self.smart:
@@ -877,21 +1168,25 @@ class HumanView:
     def render_for_headcode(self, headcode: str, td_area: str | None = None, *, width: int = 120, trace: bool = False) -> str:
         parts: List[str] = [f"[{utc_now_iso()}] {headcode}"]
 
-        # Use match_td_to_schedule when td_area is provided
         vs = None
         if td_area:
             td = self.td_by_headcode.get((td_area, headcode))
             if td:
                 sched, reason, matched_info = self.match_td_to_schedule(td_area, headcode, trace=trace)
                 logger.debug(f"render_for_headcode: headcode={headcode} td_area={td_area} reason={reason}")
-                # Note: render_for_headcode is VSTP-focused; use render_for_td for full VSTP/ITPS support
                 if sched and isinstance(sched, VstpSchedule):
                     vs = sched
-        
-        # Fallback to direct lookup if no td_area or no match
-        if not vs:
-            vs_list = self.vstp_by_headcode.get(headcode, [])
-            vs = vs_list[0] if vs_list else None
+        if not vs and not self.td_by_headcode.get((td_area or "", headcode)):
+            candidates = self._active_schedules(
+                self.vstp_by_headcode.get(headcode, []),
+                datetime.datetime.now(timezone.utc).date(),
+            )
+            unique = resolve_ranked_candidates(
+                candidates,
+                rank=lambda _candidate: (0,),
+                identity=self._schedule_identity,
+            )
+            vs = unique.candidate
 
         if vs:
             # decorate origin/dest with names if we have them
@@ -949,12 +1244,6 @@ class HumanView:
         if td:
             sched, reason, matched_info = self.match_td_to_schedule(td_area, headcode, trace=trace)
             logger.debug(f"render_for_td: headcode={headcode} td_area={td_area} reason={reason}")
-
-        # If no match via TD, fallback to direct lookup (legacy behavior)
-        if not sched:
-            vs_list = self.vstp_by_headcode.get(headcode, [])
-            ss_list = self.sched_by_headcode.get(headcode, [])
-            sched = vs_list[0] if vs_list else (ss_list[0] if ss_list else None)
 
         # Extract schedule details
         if sched and getattr(sched, "locations", None):
@@ -1043,7 +1332,7 @@ class HumanView:
         return "TRUST: " + " ".join(parts)
 
 
-    def get_timetable_fields(self, headcode: str) -> Dict[str, Any]:
+    def get_timetable_fields(self, headcode: str, *, td_area: Optional[str] = None) -> Dict[str, Any]:
         """Return planned timetable fields for a headcode from VSTP or ITPS SCHEDULE.
 
         Returns a dict with keys:
@@ -1052,68 +1341,102 @@ class HumanView:
           - dep, arr: planned hh:mm strings (may be "")
           - origin, dest: resolved names if possible, else TIPLOC codes (may be "")
           - category, power_type: train classification metadata if available
+          - match_status, match_reason, match_info: provenance and ambiguity details
         """
         headcode = (headcode or "").strip()
+        empty = {
+            "source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "",
+            "category": "", "power_type": "", "match_status": "unmatched",
+            "match_reason": "", "match_info": None,
+        }
         if not headcode:
-            return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "", "category": "", "power_type": ""}
+            return empty
 
-        vs_list = self.vstp_by_headcode.get(headcode, [])
-        vs = vs_list[0] if vs_list else None
-        if vs and vs.locations:
-            o_code = vs.locations[0][0]
-            d_code = vs.locations[-1][0]
-            dep = vs.locations[0][2] or vs.locations[0][1]
-            arr = vs.locations[-1][1] or vs.locations[-1][2]
-            origin = (self.resolver.name_for_tiploc(o_code) if self.resolver else None) or o_code
-            dest = (self.resolver.name_for_tiploc(d_code) if self.resolver else None) or d_code
+        if td_area:
+            schedule, reason, match_info = self.match_td_to_schedule(td_area, headcode)
+            if schedule is None:
+                empty["match_status"] = (match_info or {}).get("status", "unmatched")
+                empty["match_reason"] = reason
+                empty["match_info"] = match_info
+                return empty
+        else:
+            service_date = datetime.datetime.now(timezone.utc).date()
+            candidates = self._headcode_schedules(
+                headcode, service_date
+            )
+            all_candidates = candidates[0] + candidates[1]
+            match = resolve_ranked_candidates(
+                all_candidates,
+                rank=lambda _candidate: (0,),
+                identity=self._schedule_identity,
+            )
+            if match.status != "matched" or match.candidate is None:
+                empty["match_status"] = match.status
+                empty["match_reason"] = f"{match.status} schedule candidates for headcode {headcode}"
+                empty["match_info"] = {
+                    "status": match.status,
+                    "service_date": service_date.isoformat(),
+                    "candidate_uids": sorted({
+                        str(getattr(candidate, "uid", "") or "?")
+                        for candidate in match.alternatives
+                    }),
+                    "evidence": ["headcode", "service date"],
+                    "confidence": "unresolved" if match.status == "ambiguous" else "none",
+                }
+                return empty
+            schedule = match.candidate
+            reason = "matched unique loaded schedule candidate for headcode"
+            match_info = self._match_info(
+                schedule,
+                source="VSTP" if isinstance(schedule, VstpSchedule) else "SCHEDULE",
+                evidence=["headcode", "service date"],
+                confidence="low",
+                service_date=service_date,
+            )
+
+        locations = getattr(schedule, "locations", []) or []
+        if not locations:
             return {
-                "source": "VSTP",
-                "uid": vs.uid or "",
-                "dep": dep or "",
-                "arr": arr or "",
-                "origin": origin or "",
-                "dest": dest or "",
-                "category": vs.train_category or "",
-                "power_type": vs.power_type or "",
+                **empty,
+                "match_status": "matched",
+                "match_reason": reason,
+                "match_info": match_info,
+                "source": "VSTP" if isinstance(schedule, VstpSchedule) else "SCHEDULE",
+                "uid": getattr(schedule, "uid", "") or "",
+                "category": getattr(schedule, "train_category", "") or "",
+                "power_type": getattr(schedule, "power_type", "") or "",
             }
 
-        itps_list = self.sched_by_headcode.get(headcode, [])
-        itps = itps_list[0] if itps_list else None
-        if itps and itps.locations:
-            o = itps.locations[0]
-            d = itps.locations[-1]
-            if isinstance(o, tuple):
-                o_tiploc = o[0] if len(o) > 0 else ""
-                o_arr = o[1] if len(o) > 1 else ""
-                o_dep = o[2] if len(o) > 2 else ""
-            else:
-                o_tiploc = getattr(o, "tiploc", "") or ""
-                o_arr = getattr(o, "arrival", "") or ""
-                o_dep = getattr(o, "departure", "") or ""
-            if isinstance(d, tuple):
-                d_tiploc = d[0] if len(d) > 0 else ""
-                d_arr = d[1] if len(d) > 1 else ""
-                d_dep = d[2] if len(d) > 2 else ""
-            else:
-                d_tiploc = getattr(d, "tiploc", "") or ""
-                d_arr = getattr(d, "arrival", "") or ""
-                d_dep = getattr(d, "departure", "") or ""
-            dep = o_dep or o_arr
-            arr = d_arr or d_dep
-            origin = (self.resolver.name_for_tiploc(o_tiploc) if self.resolver else None) or o_tiploc
-            dest = (self.resolver.name_for_tiploc(d_tiploc) if self.resolver else None) or d_tiploc
-            return {
-                "source": "SCHEDULE",
-                "uid": itps.uid or "",
-                "dep": dep or "",
-                "arr": arr or "",
-                "origin": origin or "",
-                "dest": dest or "",
-                "category": itps.train_category or "",
-                "power_type": itps.power_type or "",
-            }
+        def location_fields(location: Any) -> tuple[str, str, str]:
+            if isinstance(location, tuple):
+                return (
+                    location[0] if len(location) > 0 else "",
+                    location[1] if len(location) > 1 else "",
+                    location[2] if len(location) > 2 else "",
+                )
+            return (
+                getattr(location, "tiploc", "") or "",
+                getattr(location, "arrival", "") or "",
+                getattr(location, "departure", "") or "",
+            )
 
-        return {"source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "", "category": "", "power_type": ""}
+        origin_code, origin_arr, origin_dep = location_fields(locations[0])
+        dest_code, dest_arr, dest_dep = location_fields(locations[-1])
+        origin = (self.resolver.name_for_tiploc(origin_code) if self.resolver else None) or origin_code
+        dest = (self.resolver.name_for_tiploc(dest_code) if self.resolver else None) or dest_code
+        return {
+            "source": "VSTP" if isinstance(schedule, VstpSchedule) else "SCHEDULE",
+            "uid": getattr(schedule, "uid", "") or "",
+            "dep": origin_dep or origin_arr or "",
+            "arr": dest_arr or dest_dep or "",
+            "origin": origin or "",
+            "dest": dest or "",
+            "category": getattr(schedule, "train_category", "") or "",
+            "power_type": getattr(schedule, "power_type", "") or "",
+            "match_status": "matched",
+            "match_reason": reason,
+            "match_info": match_info,
+        }
 
     def render_for_uid(self, uid: str) -> str:
         parts: List[str] = [f"[{utc_now_iso()}] uid={uid}"]

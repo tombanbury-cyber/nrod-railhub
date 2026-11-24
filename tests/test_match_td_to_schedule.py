@@ -47,8 +47,9 @@ def test_match_via_trust_uid_vstp():
     
     assert sched is vs
     assert "matched via TRUST train_uid C12345" in reason
-    # UID-based matches don't use TIPLOC index, so matched_info is None
-    assert matched_info is None
+    assert matched_info["status"] == "matched"
+    assert matched_info["uid"] == "C12345"
+    assert matched_info["confidence"] == "high"
 
 
 def test_match_via_trust_uid_itps():
@@ -89,7 +90,7 @@ def test_match_via_trust_uid_itps():
     
     assert sched is itps
     assert "matched timetable via TRUST train_uid C12345" in reason
-    assert matched_info is None
+    assert matched_info["uid"] == "C12345"
 
 
 def test_match_via_smart_stanox():
@@ -213,11 +214,11 @@ def test_match_via_time_proximity():
     
     assert sched is vs1
     assert "matched by time proximity" in reason
-    assert matched_info is None
+    assert matched_info["status"] == "matched"
 
 
-def test_match_ambiguous_fallback():
-    """Test ambiguous fallback when no clear match."""
+def test_match_ambiguous_fallback_does_not_guess():
+    """Multiple equally plausible schedules remain unresolved."""
     resolver = Mock()
     smart = Mock()
     hv = HumanView(resolver=resolver, smart=smart)
@@ -229,7 +230,13 @@ def test_match_ambiguous_fallback():
         start_date="2026-01-17",
         locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
     )
-    hv.vstp_by_headcode["2C90"] = [vs]
+    other = VstpSchedule(
+        uid="C67890",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")]
+    )
+    hv.vstp_by_headcode["2C90"] = [vs, other]
 
     # Setup TD state without time
     td = TdState(
@@ -249,12 +256,13 @@ def test_match_ambiguous_fallback():
         return names.get(tiploc.upper(), "")
     resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
 
-    # Test matching - should return first candidate as ambiguous
+    # Neither candidate has a stronger identity, location, or time signal.
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
     
-    assert sched is vs
+    assert sched is None
     assert "ambiguous" in reason.lower()
-    assert matched_info is None
+    assert matched_info["status"] == "ambiguous"
+    assert matched_info["candidate_uids"] == ["C12345", "C67890"]
 
 
 def test_match_no_candidates():
@@ -283,6 +291,87 @@ def test_match_no_candidates():
     assert matched_info is None
 
 
+def test_missing_trust_uid_does_not_fall_back_to_another_headcode_schedule():
+    """A known run UID that is absent must not resolve to a different reused-headcode run."""
+    hv = HumanView(resolver=Mock(), smart=Mock())
+    other_schedule = VstpSchedule(
+        uid="C67890",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("CLPHMJC", "12:30", "12:31"), ("VICTRIC", "12:45", "")],
+    )
+    hv.vstp_by_headcode["2C90"] = [other_schedule]
+    hv.trust_by_headcode["2C90"] = TrustState(
+        train_id="123456789",
+        train_uid="C12345",
+    )
+    hv.td_by_headcode[("EK", "2C90")] = TdState(
+        descr="2C90",
+        area_id="EK",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0,
+    )
+
+    schedule, reason, info = hv.match_td_to_schedule("EK", "2C90")
+
+    assert schedule is None
+    assert "no active schedule for TRUST train_uid C12345" in reason
+    assert info["status"] == "unmatched"
+
+
+def test_trust_run_identity_selects_area_matching_uid_not_global_headcode_state():
+    smart = Mock()
+    smart.berth_map = {
+        ("EK", "0101"): {"stanox": "87001"},
+        ("AD", "0201"): {"stanox": "99001"},
+    }
+    hv = HumanView(resolver=None, smart=smart)
+    ek_schedule = VstpSchedule(
+        uid="C12345",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("FAVRSHM", "12:30", "12:31"), ("RAMSGTE", "13:00", "")],
+    )
+    ad_schedule = VstpSchedule(
+        uid="C67890",
+        signalling_id="2C90",
+        start_date="2026-01-17",
+        locations=[("WHITLEY", "12:30", "12:31"), ("NEWCAST", "13:00", "")],
+    )
+    trust_ek = TrustState(
+        train_id="111111111",
+        train_uid="C12345",
+        headcode="2C90",
+        last_location="87001",
+        last_event_time="2026-01-17T12:29:00+00:00",
+    )
+    trust_ad = TrustState(
+        train_id="222222222",
+        train_uid="C67890",
+        headcode="2C90",
+        last_location="99001",
+        last_event_time="2026-01-17T12:29:00+00:00",
+    )
+    hv.vstp_by_headcode["2C90"] = [ek_schedule, ad_schedule]
+    hv.vstp_by_uid_date[("C12345", "2026-01-17")] = ek_schedule
+    hv.vstp_by_uid_date[("C67890", "2026-01-17")] = ad_schedule
+    hv.trust_by_train_id = {
+        trust_ek.train_id: trust_ek,
+        trust_ad.train_id: trust_ad,
+    }
+    hv.trust_by_headcode["2C90"] = trust_ad
+    hv.td_by_headcode[("EK", "2C90")] = TdState(
+        descr="2C90",
+        area_id="EK",
+        last_time_ms=iso_to_ms("2026-01-17T12:30:00Z") or 0,
+    )
+
+    schedule, reason, info = hv.match_td_to_schedule("EK", "2C90")
+
+    assert schedule is ek_schedule
+    assert "area-scoped TRUST train_uid C12345" in reason
+    assert info["trust_train_id"] == "111111111"
+
+
 def test_match_without_td_state():
     """Test matching when TD state doesn't exist."""
     resolver = Mock()
@@ -304,12 +393,39 @@ def test_match_without_td_state():
         return names.get(tiploc.upper(), "")
     resolver.name_for_tiploc.side_effect = mock_name_for_tiploc
 
-    # Test matching without TD state - should still return schedule
+    # A sole candidate is unambiguous even without live location evidence.
     sched, reason, matched_info = hv.match_td_to_schedule("EK", "2C90")
     
     assert sched is vs
-    assert "ambiguous" in reason.lower()
-    assert matched_info is None
+    assert "unique loaded schedule candidate" in reason.lower()
+    assert matched_info["status"] == "matched"
+
+
+def test_timetable_fields_report_ambiguous_reused_headcode():
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    hv = HumanView(resolver=Mock(), smart=Mock())
+    hv.vstp_by_headcode["2C90"] = [
+        VstpSchedule(
+            uid="C12345",
+            signalling_id="2C90",
+            start_date=today,
+            end_date=today,
+            locations=[("AAA", "", "12:00"), ("BBB", "13:00", "")],
+        ),
+        VstpSchedule(
+            uid="C67890",
+            signalling_id="2C90",
+            start_date=today,
+            end_date=today,
+            locations=[("CCC", "", "12:00"), ("DDD", "13:00", "")],
+        ),
+    ]
+
+    fields = hv.get_timetable_fields("2C90")
+
+    assert fields["uid"] == ""
+    assert fields["match_status"] == "ambiguous"
+    assert set(fields["match_info"]["candidate_uids"]) == {"C12345", "C67890"}
 
 
 def test_match_prefers_uid_over_stanox():
@@ -362,8 +478,7 @@ def test_match_prefers_uid_over_stanox():
     
     assert sched is vs_correct
     assert "TRUST train_uid C12345" in reason
-    # UID-based matching doesn't use TIPLOC index
-    assert matched_info is None
+    assert matched_info["uid"] == "C12345"
 
 
 def test_tiploc_index_matching_with_reused_headcode():
@@ -409,7 +524,7 @@ def test_tiploc_index_matching_with_reused_headcode():
     )
     
     # Both schedules are valid, first one is stored in headcode index
-    hv.sched_by_headcode["1P42"] = [sched_kx_pboro]
+    hv.sched_by_headcode["1P42"] = [sched_kx_pboro, sched_ram_vic]
     hv.sched_by_uid_date[("P12345", "2026-01-17")] = sched_kx_pboro
     hv.sched_by_uid_date[("R67890", "2026-01-17")] = sched_ram_vic
     

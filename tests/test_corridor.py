@@ -160,6 +160,41 @@ def test_movements_signals_and_live_state(db_path):
     assert res["views"]["up"]["trains"][0]["live"] == []
 
 
+def test_reused_headcode_requires_uid_for_live_schedule_assignment(db_path):
+    _populate_reference(db_path)
+    conn = sqlite3.connect(db_path)
+    reverse = [
+        ("RAMSGAT", "call"), ("MARGATE", "call"), ("WHSTABL", "call"),
+        ("FAVRSHM", "call"), ("LONDON", "call"),
+    ]
+    _add_schedule(conn, "D2", "2C10", reverse)
+    conn.commit()
+    conn.close()
+
+    res = corridor.build_corridor(_conn(db_path), "Faversham", "Ramsgate", RUN_DATE)
+
+    live = res["unscheduled_live"]
+    assert len(live) == 1
+    assert live[0]["headcode"] == "2C10"
+    assert live[0]["schedule_match_status"] == "ambiguous"
+    assert set(live[0]["candidate_uids"]) == {"D1", "D2"}
+    assert any(
+        row["schedule_match_status"] == "ambiguous"
+        and row["headcodes"] == ["2C10"]
+        for row in res["unassigned_movements"]
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE td_state SET uid='D1' WHERE td_area='EK' AND headcode='2C10'")
+    conn.commit()
+    conn.close()
+    resolved = corridor.build_corridor(_conn(db_path), "Faversham", "Ramsgate", RUN_DATE)
+    down_live = resolved["views"]["down"]["trains"][0]["live"]
+    assert len(down_live) == 1
+    assert down_live[0]["uid"] == "D1"
+    assert down_live[0]["schedule_match_status"] == "matched"
+
+
 def test_sparse_topology_evidence_is_reported_not_invented(db_path):
     _populate_reference(db_path, with_td=False)
     res = corridor.build_corridor(_conn(db_path), "FAV", "RAM", RUN_DATE)

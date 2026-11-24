@@ -35,11 +35,14 @@ names show a message. Nothing here raises if tables or data are missing.
 * Corridor berths are those SMART tags to the corridor's stations. Berths between stations
   without SMART entries only appear if an observed movement links them to a tagged berth. Gaps
   are left visible rather than filled in.
-* Observed movements are assigned to a direction only when their headcode matches CIF schedules
-  running in exactly one direction on the chosen date. Otherwise they are listed as
-  "unresolved direction". Headcodes are not unique, so a match is indicative only.
-* Live trains are matched by headcode; matches outside the corridor's TD areas are ignored, and
-  those whose berth is not tagged to the corridor are flagged "headcode match only".
+* Historical movement rows do not retain a train UID. They are assigned a direction only when
+  their headcode maps to one direction on the chosen date; if several schedules share that
+  headcode, the direction may be known while the schedule identity remains explicitly ambiguous.
+  Matches in both directions remain "unresolved direction".
+* Live trains use the stored train UID when it matches an active corridor schedule. Without a UID,
+  a live row is attached only when exactly one loaded active corridor schedule has that headcode;
+  otherwise it is shown as unresolved instead of being copied to every matching schedule.
+  Observations from a different date are not matched to the selected timetable date.
 * **Up/Down** is labelled only for station pairs listed in `KNOWN_DIRECTION_HINTS`
   (`nrod_railhub/corridor.py`; currently Faversham ↔ Ramsgate, Down = away from London). For other
   pairs directions are shown as "A → B" / "B → A" and no Up/Down assumption is made.

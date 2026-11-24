@@ -227,7 +227,7 @@ def test_collect_interesting_lines_groups_by_type():
                 ("EK", "1Z99"): SimpleNamespace(last_time_ms=25, from_berth="G", to_berth="H"),
             }
 
-        def get_timetable_fields(self, headcode):
+        def get_timetable_fields(self, headcode, *, td_area=None):
             if headcode == "2C90":
                 return {"category": "DD", "power_type": "D", "origin": "Woking", "dest": "Waterloo"}
             if headcode == "1S01":
@@ -269,7 +269,7 @@ def test_collect_interesting_lines_respects_td_area_filter():
                 ("AD", "1S01"): SimpleNamespace(last_time_ms=100, from_berth="C", to_berth="D"),
             }
 
-        def get_timetable_fields(self, headcode):
+        def get_timetable_fields(self, headcode, *, td_area=None):
             if headcode == "2C90":
                 return {"category": "DD", "power_type": "D", "origin": "Woking", "dest": "Waterloo"}
             return {"category": "", "power_type": "S", "origin": "York", "dest": "Scarborough"}

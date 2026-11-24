@@ -27,6 +27,7 @@ import urllib.parse
 from typing import Any, Dict, Iterable, List, Optional
 
 from .db_backend import DB_ERRORS
+from .schedule_matching import resolve_ranked_candidates, schedule_runs_on, stp_precedence
 
 # (from CRS, to CRS) -> direction of travel from first to second ("down" = away from London).
 # This is curated reference knowledge, not derived from the database.
@@ -36,7 +37,6 @@ KNOWN_DIRECTION_HINTS: Dict[tuple, str] = {
 
 MAX_SCHEDULES = 300
 _CHUNK = 400
-_STP_PRECEDENCE = {"C": 0, "O": 1, "N": 2, "P": 3}
 
 DIRECTION_LABELS = {
     "down": "Down (away from London)",
@@ -136,17 +136,7 @@ def resolve_station(conn: sqlite3.Connection, text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _runs_on(row: Any, on_date: Optional[_dt.date]) -> bool:
-    if on_date is None:
-        return True
-    iso = on_date.isoformat()
-    start, end, days = row["schedule_start_date"], row["schedule_end_date"], row["schedule_days_runs"]
-    if start and start > iso:
-        return False
-    if end and end < iso:
-        return False
-    if days and len(days) == 7 and days[on_date.weekday()] != "1":
-        return False
-    return True
+    return on_date is None or schedule_runs_on(row, on_date)
 
 
 def _best_time(loc: Any) -> tuple:
@@ -190,14 +180,25 @@ def find_corridor_schedules(
         if k not in best or abs(r["ib"] - r["ia"]) < abs(best[k]["ib"] - best[k]["ia"]):
             best[k] = r
     # Apply validity and STP precedence (C cancels, O overlays, P is base) per UID.
-    by_uid: Dict[str, Any] = {}
+    variants_by_uid: Dict[str, List[Any]] = {}
     for r in best.values():
         if (r["transaction_type"] or "").strip().lower() == "delete" or not _runs_on(r, on_date):
             continue
-        cur = by_uid.get(r["uid"])
-        rank = _STP_PRECEDENCE.get((r["CIF_stp_indicator"] or "P").upper(), 3)
-        if cur is None or rank < _STP_PRECEDENCE.get((cur["CIF_stp_indicator"] or "P").upper(), 3):
-            by_uid[r["uid"]] = r
+        variants_by_uid.setdefault(r["uid"], []).append(r)
+    by_uid: Dict[str, Any] = {}
+    for uid, variants in variants_by_uid.items():
+        match = resolve_ranked_candidates(
+            variants,
+            rank=lambda variant: (
+                -stp_precedence(variant),
+                str(variant["schedule_start_date"] or ""),
+            ),
+            identity=lambda variant: (
+                variant["uid"], variant["schedule_start_date"], variant["CIF_stp_indicator"]
+            ),
+        )
+        if match.candidate is not None:
+            by_uid[uid] = match.candidate
     out = []
     for r in by_uid.values():
         if (r["CIF_stp_indicator"] or "").upper() == "C":
@@ -346,6 +347,7 @@ def build_corridor(
         })
 
     headcode_dirs: Dict[str, set] = {}
+    schedules_by_headcode: Dict[str, List[dict]] = {}
     trains_by_view: Dict[str, List[dict]] = {k: [] for k in result["views"]}
     for sched in schedules:
         locs = details.get((sched["uid"], sched["schedule_start_date"]))
@@ -359,6 +361,7 @@ def build_corridor(
         first, last = locs[0]["tiploc"], locs[-1]["tiploc"]
         if sched["headcode"]:
             headcode_dirs.setdefault(sched["headcode"], set()).add(dkey)
+            schedules_by_headcode.setdefault(sched["headcode"], []).append(sched)
         trains_by_view[dkey].append({
             "headcode": sched["headcode"], "uid": sched["uid"], "toc_code": sched["toc_code"],
             "stp": sched["stp"],
@@ -495,9 +498,15 @@ def build_corridor(
 
     unassigned: List[dict] = []
     for mv in sorted(movements.values(), key=lambda m: m["last_seen"] or "", reverse=True):
-        dirs = set()
+        matching_schedules = []
         for hc in mv["headcodes"]:
-            dirs |= headcode_dirs.get(hc, set())
+            matching_schedules.extend(schedules_by_headcode.get(hc, []))
+        direction_match = resolve_ranked_candidates(
+            matching_schedules,
+            rank=lambda _schedule: (0,),
+            identity=lambda schedule: keys[schedule["direction"]],
+        )
+        matched_uids = sorted({schedule["uid"] for schedule in matching_schedules})
         fb = berth_station.get((mv["td_area"], mv["from_berth"]))
         tb = berth_station.get((mv["td_area"], mv["to_berth"]))
         row = {
@@ -506,16 +515,20 @@ def build_corridor(
             "count": mv["count"], "last_seen": mv["last_seen"],
             "headcodes": sorted(mv["headcodes"])[:8], "signals": _signals_for(mv),
             "direction_basis": None,
+            "direction_match_status": direction_match.status,
+            "schedule_match_status": "ambiguous" if matching_schedules else "unmatched",
+            "matched_uids": matched_uids,
         }
-        if len(dirs) == 1:
-            dkey = next(iter(dirs))
-            row["direction_basis"] = "headcode matches CIF schedules running in this direction"
+        if direction_match.status == "matched" and direction_match.candidate is not None:
+            dkey = keys[direction_match.candidate["direction"]]
+            row["direction_basis"] = (
+                "headcode matches CIF schedules running in this direction; "
+                "schedule identity remains unresolved without a train UID"
+            )
             result["views"][dkey]["movements"].append(row)
         else:
-            row["direction_basis"] = (
-                "headcode matches CIF schedules in both directions" if dirs
-                else "no corridor CIF schedule matches the observed headcodes"
-            )
+            row["direction_basis"] = "headcode matches CIF schedules in both directions" \
+                if matching_schedules else "no corridor CIF schedule matches the observed headcodes"
             unassigned.append(row)
     result["unassigned_movements"] = unassigned
     if movements and not any(m["signals"] for m in unassigned + [
@@ -543,7 +556,7 @@ def build_corridor(
                     params.extend(chunk)
             if conds:
                 live_rows = conn.execute(
-                    "SELECT td_area, headcode, to_berth, from_berth, last_time_iso, location_name "
+                    "SELECT td_area, headcode, uid, to_berth, from_berth, last_time_iso, location_name "
                     "FROM td_state WHERE " + " OR ".join(conds) + " ORDER BY last_time_ms DESC LIMIT 1000",
                     params,
                 ).fetchall()
@@ -553,21 +566,60 @@ def build_corridor(
     for r in live_rows:
         in_corridor = (r["td_area"], r["to_berth"]) in berth_station
         live = {
-            "td_area": r["td_area"], "headcode": r["headcode"], "berth": r["to_berth"],
+            "td_area": r["td_area"], "headcode": r["headcode"], "uid": r["uid"],
+            "berth": r["to_berth"],
             "from_berth": r["from_berth"], "last_seen": r["last_time_iso"],
             "location": r["location_name"], "in_corridor_berth": in_corridor,
         }
-        dirs = headcode_dirs.get((r["headcode"] or "").upper(), set())
-        if not dirs:
+        headcode = (r["headcode"] or "").upper()
+        candidates = schedules_by_headcode.get(headcode, [])
+        if on_date and r["last_time_iso"]:
+            try:
+                observation_date = _dt.date.fromisoformat(str(r["last_time_iso"])[:10])
+            except ValueError:
+                observation_date = None
+            if observation_date is not None and observation_date != on_date:
+                live["schedule_match_status"] = "unmatched"
+                live["schedule_match_reason"] = "TD observation is from a different service date"
+                if in_corridor:
+                    unscheduled_live.append(live)
+                continue
+        uid = str(r["uid"] or "").strip()
+        if uid:
+            candidates = [candidate for candidate in candidates if candidate["uid"] == uid]
+        else:
+            candidates = list({candidate["uid"]: candidate for candidate in candidates}.values())
+        schedule_match = resolve_ranked_candidates(
+            candidates,
+            rank=lambda _candidate: (0,),
+            identity=lambda candidate: candidate["uid"],
+        )
+        if schedule_match.status != "matched" or schedule_match.candidate is None:
+            live["schedule_match_status"] = schedule_match.status
+            live["schedule_match_reason"] = (
+                "stored train UID matches no corridor schedule" if uid
+                else "headcode identifies multiple corridor schedules"
+                if schedule_match.status == "ambiguous"
+                else "no corridor schedule matches this headcode"
+            )
+            live["candidate_uids"] = sorted({
+                candidate["uid"] for candidate in schedule_match.alternatives
+            })
             if in_corridor:
                 unscheduled_live.append(live)
             continue
+        selected_schedule = schedule_match.candidate
         if not in_corridor and areas and r["td_area"] not in areas:
             continue  # same headcode seen in an unrelated TD area: not shown as corridor traffic
-        for dkey in dirs:
-            for t in trains_by_view[dkey]:
-                if t["headcode"] == (r["headcode"] or "").upper():
-                    t["live"].append(live)
+        dkey = keys[selected_schedule["direction"]]
+        live["schedule_match_status"] = "matched"
+        live["schedule_match_reason"] = (
+            "matched by stored train UID" if uid else "only active corridor schedule for headcode"
+        )
+        for train in trains_by_view[dkey]:
+            if train["uid"] == selected_schedule["uid"]:
+                train["live"].append(live)
+                break
     for dkey, trains in trains_by_view.items():
         result["views"][dkey]["trains"] = trains
     result["unscheduled_live"] = unscheduled_live
@@ -730,10 +782,15 @@ def render_corridor_html(result: dict, direction: str = "both") -> str:
             "Observed movements with unresolved direction"))
     if result.get("unscheduled_live"):
         parts.append("<h4>Live trains in corridor berths without a matching corridor schedule</h4><table>"
-                     "<tr><th>Headcode</th><th>TD area</th><th>Berth</th><th>Last seen</th></tr>"
+                     "<tr><th>Headcode</th><th>TD area</th><th>Berth</th><th>Last seen</th>"
+                     "<th>Schedule match</th></tr>"
                      + "".join(
                          f"<tr><td>{_e(t['headcode'])}</td><td>{_e(t['td_area'])}</td>"
-                         f"<td class='mono'>{_e(t['berth'])}</td><td>{_e(t['last_seen'])}</td></tr>"
+                         f"<td class='mono'>{_e(t['berth'])}</td><td>{_e(t['last_seen'])}</td>"
+                         f"<td>{_e(t.get('schedule_match_status', 'unmatched'))}: "
+                         f"{_e(t.get('schedule_match_reason', ''))}"
+                         + (f" ({_e(', '.join(t['candidate_uids']))})" if t.get("candidate_uids") else "")
+                         + "</td></tr>"
                          for t in result["unscheduled_live"][:100]) + "</table>")
     if result["topology"]:
         parts.append("<h4>Reconstructed topology links (hypotheses)</h4><table style='font-size:13px'>"
