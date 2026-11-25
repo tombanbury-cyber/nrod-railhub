@@ -120,6 +120,7 @@ class VstpSchedule:
     end_date: str = ""
     train_category: str = ""
     power_type: str = ""
+    train_service_code: str = ""
     locations: List[Tuple[str, str, str]] = field(default_factory=list)
     # list of (tiploc, arr_hhmm, dep_hhmm)
 
@@ -132,6 +133,7 @@ class ItpsSchedule:
     signalling_id: str = ""          # headcode / reporting number
     train_category: str = ""
     power_type: str = ""
+    train_service_code: str = ""
     start_date: str = ""             # YYYY-MM-DD
     end_date: str = ""               # YYYY-MM-DD
     days_run: str = ""               # 7-char 0/1 string Mon..Sun (may be blank)
