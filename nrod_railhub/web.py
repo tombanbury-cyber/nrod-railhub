@@ -75,6 +75,32 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         cur.close()
         return rows
 
+    def operation_fields(row):
+        keys = set(row.keys())
+
+        def value(key):
+            return row[key] if key in keys and row[key] else ""
+
+        return (
+            value("operation_type") or "Unknown",
+            value("operation_source") or "Not recorded",
+            value("operation_confidence") or "Not recorded",
+            value("operation_evidence") or "No supporting evidence recorded",
+        )
+
+    def operation_cell(row) -> str:
+        operation, source, confidence, evidence = operation_fields(row)
+        confidence_display = (
+            f"{html.escape(confidence)} confidence"
+            if confidence != "Not recorded"
+            else "Confidence not recorded"
+        )
+        details = f"{html.escape(source)} · {confidence_display}"
+        return (
+            f"<strong>{html.escape(operation)}</strong><br>"
+            f"<small class='dim'>{details}<br>Evidence: {html.escape(evidence)}</small>"
+        )
+
     # Shared UI parts
     def nav_html(active: str = "") -> str:
         area = request.args.get("area", "").strip()
@@ -237,7 +263,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
         body.append("<h3>Latest TD state" + (f" (area {area})" if area else "") + "</h3>")
         # Add search filter box
         body.append("<div style='margin:10px 0'><input type='text' id='tableFilter' placeholder='Filter by headcode, location, berth...' style='padding:8px;width:300px;border:1px solid #ccc;border-radius:4px'/> <span id='filterCount' style='margin-left:10px;color:#6c757d'></span></div>")
-        body.append("<table id='tdStateTable'><thead><tr><th onclick='sortTable(0)' style='cursor:pointer'>Area <span id='sort0'></span></th><th onclick='sortTable(1)' style='cursor:pointer'>Headcode <span id='sort1'></span></th><th onclick='sortTable(2)' style='cursor:pointer'>Time <span id='sort2'></span></th><th onclick='sortTable(3)' style='cursor:pointer'>From <span id='sort3'></span></th><th onclick='sortTable(4)' style='cursor:pointer'>To <span id='sort4'></span></th><th onclick='sortTable(5)' style='cursor:pointer'>Location <span id='sort5'></span></th><th onclick='sortTable(6)' style='cursor:pointer'>Plat <span id='sort6'></span></th><th onclick='sortTable(7)' style='cursor:pointer'>Sched <span id='sort7'></span></th></tr></thead><tbody>")
+        body.append("<table id='tdStateTable'><thead><tr><th onclick='sortTable(0)' style='cursor:pointer'>Area <span id='sort0'></span></th><th onclick='sortTable(1)' style='cursor:pointer'>Headcode <span id='sort1'></span></th><th onclick='sortTable(2)' style='cursor:pointer'>Time <span id='sort2'></span></th><th onclick='sortTable(3)' style='cursor:pointer'>From <span id='sort3'></span></th><th onclick='sortTable(4)' style='cursor:pointer'>To <span id='sort4'></span></th><th onclick='sortTable(5)' style='cursor:pointer'>Location <span id='sort5'></span></th><th onclick='sortTable(6)' style='cursor:pointer'>Plat <span id='sort6'></span></th><th onclick='sortTable(7)' style='cursor:pointer'>Sched <span id='sort7'></span></th><th onclick='sortTable(8)' style='cursor:pointer'>Operation <span id='sort8'></span></th></tr></thead><tbody>")
         for r in rows:
             # Build schedule string similar to original
             sched = ""
@@ -261,6 +287,7 @@ def start_web_dashboard(db_path: str, port: int, config_path: Optional[str] = No
                 f"<td>{loc}</td>",
                 f"<td>{r['platform'] if 'platform' in r.keys() and r['platform'] else ''}</td>",
                 f"<td>{sched}</td>",
+                f"<td>{operation_cell(r)}</td>",
             ]) + "</tr>")
         body.append("</tbody></table>")
         
@@ -279,7 +306,7 @@ function sortTable(columnIndex) {
     const ascending = sortDirection[columnIndex];
     
     // Clear all sort indicators
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 9; i++) {
         const sortSpan = document.getElementById('sort' + i);
         if (sortSpan) sortSpan.textContent = '';
     }
@@ -548,6 +575,12 @@ filterInput.addEventListener('input', updateFilter);
             if origin or dest:
                 sched_route = f"{origin if origin else 'N/A'} → {dest if dest else 'N/A'}"
                 body.append(f"<tr><td><b>Schedule Route</b></td><td>{sched_route}</td></tr>")
+
+            operation, source, confidence, evidence = operation_fields(r)
+            body.append(f"<tr><td><b>Operation</b></td><td>{html.escape(operation)}</td></tr>")
+            body.append(f"<tr><td><b>Classification Source</b></td><td>{html.escape(source)}</td></tr>")
+            body.append(f"<tr><td><b>Classification Confidence</b></td><td>{html.escape(confidence)}</td></tr>")
+            body.append(f"<tr><td><b>Classification Evidence</b></td><td>{html.escape(evidence)}</td></tr>")
             
             body.append("</table>")
         if ev:

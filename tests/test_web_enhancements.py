@@ -24,13 +24,20 @@ def test_train_detail_page_formatted_table():
                 td_area TEXT, headcode TEXT, last_time_ms INTEGER,
                 last_time_iso TEXT, from_berth TEXT, to_berth TEXT,
                 stanox TEXT, location_name TEXT, platform TEXT,
-                sched_dep TEXT, sched_arr TEXT, origin_name TEXT, dest_name TEXT
+                sched_dep TEXT, sched_arr TEXT, origin_name TEXT, dest_name TEXT,
+                operation_type TEXT, operation_source TEXT,
+                operation_confidence TEXT, operation_evidence TEXT
             )
         """)
         conn.execute("""
-            INSERT INTO td_state VALUES 
+            INSERT INTO td_state (
+                td_area, headcode, last_time_ms, last_time_iso, from_berth, to_berth,
+                stanox, location_name, platform, sched_dep, sched_arr, origin_name, dest_name,
+                operation_type, operation_source, operation_confidence, operation_evidence
+            ) VALUES
             ('EK', '2C90', 1234567890, '2024-01-01T12:00:00', 'A123', 'B456',
-             '87701', 'Clapham Junction', '2', '12:00', '12:30', 'London', 'Brighton')
+             '87701', 'Clapham Junction', '2', '12:00', '12:30', 'London', 'Brighton',
+             'Passenger', 'CIF train category', 'high', 'CIF category OO')
         """)
         conn.execute("""
             CREATE TABLE td_berth_events (
@@ -81,6 +88,10 @@ def test_train_detail_page_formatted_table():
         assert "Location" in result, "Should display Location field"
         assert "Platform" in result, "Should display Platform field"
         assert "Schedule" in result, "Should display schedule info"
+        assert "Operation" in result
+        assert "Passenger" in result
+        assert "CIF train category" in result
+        assert "CIF category OO" in result
                 
     finally:
         # Clean up
@@ -92,41 +103,34 @@ def test_index_page_has_sorting_and_filtering():
     """Test that index page includes JavaScript for sorting and filtering."""
     from flask import Flask
     from nrod_railhub import web
+    from nrod_railhub.database import RailDB
     
     # Create a temporary database with test data
     with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
         db_path = f.name
     
     try:
-        # Set up test database
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE td_state (
-                td_area TEXT, headcode TEXT, last_time_ms INTEGER,
-                last_time_iso TEXT, from_berth TEXT, to_berth TEXT,
-                stanox TEXT, location_name TEXT, platform TEXT,
-                sched_dep TEXT, sched_arr TEXT, origin_name TEXT, dest_name TEXT
-            )
-        """)
-        conn.execute("""
-            INSERT INTO td_state VALUES 
-            ('EK', '2C90', 1234567890, '2024-01-01T12:00:00', 'A123', 'B456',
-             '87701', 'Clapham Junction', '2', '12:00', '12:30', 'London', 'Brighton')
-        """)
-        conn.execute("""
-            CREATE TABLE trust_state (id INTEGER PRIMARY KEY)
-        """)
-        conn.execute("""
-            CREATE TABLE vstp_state (id INTEGER PRIMARY KEY)
-        """)
-        conn.execute("""
-            CREATE TABLE td_berth_events (id INTEGER PRIMARY KEY)
-        """)
-        conn.execute("""
-            CREATE TABLE td_signal_events (id INTEGER PRIMARY KEY)
-        """)
-        conn.commit()
-        conn.close()
+        db = RailDB(db_path, enable_mapper=False)
+        db.upsert_td_state(
+            "EK",
+            "2C90",
+            1234567890,
+            "2024-01-01T12:00:00",
+            "A123",
+            "B456",
+            stanox="87701",
+            location_name="Clapham Junction",
+            platform="2",
+            sched_dep="12:00",
+            sched_arr="12:30",
+            origin_name="London",
+            dest_name="Brighton",
+            operation_type="Freight",
+            operation_source="CIF train category",
+            operation_confidence="high",
+            operation_evidence="CIF category H1",
+        )
+        db.close()
         
         # Create Flask app and test client
         app_holder = {}
@@ -167,6 +171,9 @@ def test_index_page_has_sorting_and_filtering():
         assert "tdStateTable" in result, "Table should have ID"
         assert "<thead>" in result or "thead" in result, "Table should have thead"
         assert "<tbody>" in result or "tbody" in result, "Table should have tbody"
+        assert "Operation" in result
+        assert "Freight" in result
+        assert "CIF category H1" in result
                 
     finally:
         # Clean up

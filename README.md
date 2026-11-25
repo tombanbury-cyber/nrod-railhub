@@ -8,6 +8,7 @@ Real-time UK rail monitoring using Network Rail's open data feeds.  Combines VST
 - 🗺️ **Location enrichment** - Converts TIPLOC/STANOX codes to station names
 - 💾 **SQLite persistence** - Historical event storage and analysis
 - 🌐 **Web dashboard** - Browser-based train tracking interface
+- 🏷️ **Operation classification** - Conservative operation labels with evidence on Home and train detail
 - 🎯 **Smart filtering** - Track specific trains, areas, or view everything
 - 🖥️ **Interactive mode** - Real-time curses-based terminal dashboard
 
@@ -248,6 +249,7 @@ PostgreSQL support is optional (`pip install -r requirements-postgres.txt`) and 
 When `--web-port` is set, open `http://localhost: PORT` in your browser:
 
 - **Home** - Latest TD state for all tracked trains
+- **Operation classification** - Matched CIF metadata shows an operation label, evidence, source, and confidence on Home and train detail
 - **Filter by area** - Click area pill to filter (e.g. EK, AD, WR)
 - **Train detail** - Click headcode for event history
 - **Events** - Recent TD berth movements
@@ -256,6 +258,8 @@ When `--web-port` is set, open `http://localhost: PORT` in your browser:
 - **CIF** - View and filter CIF schedules by TOC, headcode, status, etc.
 - **TRUST** - View TRUST train movement data
 - **Mapper** - Configure and rebuild berth-signal correlation mappings
+
+Headcode-pattern clues are not presented as confirmed operations.
 
 ### Schedule Filtering and Sorting
 
