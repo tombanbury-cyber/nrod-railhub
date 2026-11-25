@@ -18,6 +18,7 @@ from .models import utc_now_iso, utc_now_ms, ms_to_iso_utc, safe_int
 from .views import HumanView
 from .database import RailDB
 from .logging_config import get_logger
+from .interesting import classify_train_operation
 
 logger = get_logger("listener")
 
@@ -522,6 +523,12 @@ class Listener(stomp.ConnectionListener):
 
         loc = self._decode_td_location_snapshot(area_id, from_berth, to_berth)
         tten = self.hv.get_timetable_fields(headcode, td_area=area_id)
+        operation = classify_train_operation(
+            headcode=headcode,
+            train_category=tten.get("category", ""),
+            power_type=tten.get("power_type", ""),
+            train_service_code=tten.get("train_service_code", ""),
+        )
         self.db.upsert_td_state(
             area=area_id,
             headcode=headcode,
@@ -537,6 +544,10 @@ class Listener(stomp.ConnectionListener):
             origin_name=tten.get("origin"),
             dest_name=tten.get("dest"),
             uid=tten.get("uid"),
+            cif_train_category=tten.get("category"),
+            cif_power_type=tten.get("power_type"),
+            cif_train_service_code=tten.get("train_service_code"),
+            **operation,
         )
 
         if area_id and not self._get_cached_tocs_for_td_area(area_id):

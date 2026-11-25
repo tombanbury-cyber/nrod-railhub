@@ -879,11 +879,13 @@ class HumanView:
                 days = (rec.get("schedule_days_runs") or "").strip()
                 train_category = (seg.get("CIF_train_category") or rec.get("CIF_train_category") or "").strip()
                 power_type = (seg.get("CIF_power_type") or rec.get("CIF_power_type") or "").strip()
+                train_service_code = (seg.get("CIF_train_service_code") or "").strip()
                 itps = ItpsSchedule(
                     uid=uid,
                     signalling_id=signalling_id,
                     train_category=train_category,
                     power_type=power_type,
+                    train_service_code=train_service_code,
                     start_date=(rec.get("schedule_start_date") or "").strip(),
                     end_date=(rec.get("schedule_end_date") or "").strip(),
                     days_run=days,
@@ -943,6 +945,7 @@ class HumanView:
         signalling_id = ""
         train_category = ""
         power_type = ""
+        train_service_code = ""
         locations: List[Tuple[str, str, str]] = []
         for seg in segments:
             if not isinstance(seg, dict):
@@ -950,6 +953,7 @@ class HumanView:
             signalling_id = signalling_id or (seg.get("signalling_id") or "").strip()
             train_category = train_category or (seg.get("CIF_train_category") or "").strip()
             power_type = power_type or (seg.get("CIF_power_type") or "").strip()
+            train_service_code = train_service_code or (seg.get("CIF_train_service_code") or "").strip()
             locs = seg.get("schedule_location") or []
             if not isinstance(locs, list):
                 continue
@@ -978,6 +982,7 @@ class HumanView:
             signalling_id=signalling_id,
             train_category=train_category,
             power_type=power_type,
+            train_service_code=train_service_code,
             start_date=start_date,
             end_date=end_date,
             locations=locations,
@@ -1347,7 +1352,7 @@ class HumanView:
         empty = {
             "source": "", "uid": "", "dep": "", "arr": "", "origin": "", "dest": "",
             "category": "", "power_type": "", "match_status": "unmatched",
-            "match_reason": "", "match_info": None,
+            "train_service_code": "", "match_reason": "", "match_info": None,
         }
         if not headcode:
             return empty
@@ -1405,6 +1410,7 @@ class HumanView:
                 "uid": getattr(schedule, "uid", "") or "",
                 "category": getattr(schedule, "train_category", "") or "",
                 "power_type": getattr(schedule, "power_type", "") or "",
+                "train_service_code": getattr(schedule, "train_service_code", "") or "",
             }
 
         def location_fields(location: Any) -> tuple[str, str, str]:
@@ -1433,6 +1439,7 @@ class HumanView:
             "dest": dest or "",
             "category": getattr(schedule, "train_category", "") or "",
             "power_type": getattr(schedule, "power_type", "") or "",
+            "train_service_code": getattr(schedule, "train_service_code", "") or "",
             "match_status": "matched",
             "match_reason": reason,
             "match_info": match_info,

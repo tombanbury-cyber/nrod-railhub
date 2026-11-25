@@ -72,6 +72,7 @@ class RailDB:
         self.ensure_topology_schema()
         self._ensure_hex_byte_table()
         self._ensure_cif_fingerprint_column()
+        self._ensure_td_operation_schema()
         
 
         # Retention settings
@@ -159,6 +160,13 @@ class RailDB:
                     origin_name TEXT,
                     dest_name TEXT,
                     uid TEXT,
+                    CIF_train_category TEXT,
+                    CIF_power_type TEXT,
+                    CIF_train_service_code TEXT,
+                    operation_type TEXT,
+                    operation_source TEXT,
+                    operation_confidence TEXT,
+                    operation_evidence TEXT,
                     PRIMARY KEY (td_area, headcode)
                 );
                 
@@ -1219,13 +1227,18 @@ class RailDB:
 
     def upsert_td_state(self, area: str, headcode: str, last_time_ms: int, last_time_iso: str, from_berth: str, to_berth: str,
                         stanox: str | None = None, location_name: str | None = None, platform: str | None = None,
-                        sched_dep: str | None = None, sched_arr: str | None = None, origin_name: str | None = None, dest_name: str | None = None, uid: str | None = None) -> None:
+                        sched_dep: str | None = None, sched_arr: str | None = None, origin_name: str | None = None,
+                        dest_name: str | None = None, uid: str | None = None, cif_train_category: str | None = None,
+                        cif_power_type: str | None = None, cif_train_service_code: str | None = None,
+                        operation_type: str | None = None, operation_source: str | None = None,
+                        operation_confidence: str | None = None, operation_evidence: str | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO td_state(td_area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox, location_name, platform,
-                                     sched_dep, sched_arr, origin_name, dest_name, uid)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                     sched_dep, sched_arr, origin_name, dest_name, uid, CIF_train_category, CIF_power_type,
+                                     CIF_train_service_code, operation_type, operation_source, operation_confidence, operation_evidence)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(td_area, headcode) DO UPDATE SET
                     last_time_ms=excluded.last_time_ms,
                     last_time_iso=excluded.last_time_iso,
@@ -1238,9 +1251,21 @@ class RailDB:
                     sched_arr=COALESCE(excluded.sched_arr, td_state.sched_arr),
                     origin_name=COALESCE(excluded.origin_name, td_state.origin_name),
                     dest_name=COALESCE(excluded.dest_name, td_state.dest_name),
-                    uid=COALESCE(excluded.uid, td_state.uid)
+                    uid=COALESCE(excluded.uid, td_state.uid),
+                    CIF_train_category=excluded.CIF_train_category,
+                    CIF_power_type=excluded.CIF_power_type,
+                    CIF_train_service_code=excluded.CIF_train_service_code,
+                    operation_type=excluded.operation_type,
+                    operation_source=excluded.operation_source,
+                    operation_confidence=excluded.operation_confidence,
+                    operation_evidence=excluded.operation_evidence
                 """,
-                (area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox, location_name, platform, sched_dep, sched_arr, origin_name, dest_name, uid),
+                (
+                    area, headcode, last_time_ms, last_time_iso, from_berth, to_berth, stanox,
+                    location_name, platform, sched_dep, sched_arr, origin_name, dest_name, uid,
+                    cif_train_category, cif_power_type, cif_train_service_code, operation_type,
+                    operation_source, operation_confidence, operation_evidence,
+                ),
             )
 
     def upsert_trust(self, train_id: str, headcode: str, uid: str, toc_id: str, last_event_time: str, last_location: str, last_delay_min: int | None, raw: dict) -> None:
@@ -2276,6 +2301,22 @@ class RailDB:
         with self._lock, self._conn:
             if "record_fingerprint" not in self._conn.table_columns("cif_schedules"):
                 self._conn.execute("ALTER TABLE cif_schedules ADD COLUMN record_fingerprint TEXT")
+
+    def _ensure_td_operation_schema(self) -> None:
+        """Add matched schedule metadata and operation classification to existing databases."""
+        columns = set(self._conn.table_columns("td_state"))
+        with self._lock, self._conn:
+            for column in (
+                "CIF_train_category",
+                "CIF_power_type",
+                "CIF_train_service_code",
+                "operation_type",
+                "operation_source",
+                "operation_confidence",
+                "operation_evidence",
+            ):
+                if column not in columns:
+                    self._conn.execute(f"ALTER TABLE td_state ADD COLUMN {column} TEXT")
 
     def _ensure_td_signal_bytes_schema(self) -> None:
         """Migrate byte-event timestamps to the shared ts_ms/ts_iso naming."""
